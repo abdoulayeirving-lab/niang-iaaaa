@@ -16,6 +16,7 @@ def get_base_dir():
 BASE_DIR   = get_base_dir()
 CONFIG_DIR = BASE_DIR / "config"
 API_FILE   = CONFIG_DIR / "api_keys.json"
+INSTALLER_API_KEY_FILE = CONFIG_DIR / "installer_gemini_key.txt"
 THEME_FILE = CONFIG_DIR / "ui_theme.json"
 
 SYSTEM_NAME = "NIANG IA"
@@ -167,8 +168,11 @@ class KaizumiUI:
         self._batt_ts      = 0.0
 
         self.on_text_command = None
+        self.on_whatsapp_call_control = None
         self.vision_mode = "STANDBY"
         self.vision_signal = "Awaiting camera input"
+        self.live_camera_active = False
+        self.whatsapp_call_status = "OFF — manual call mode"
         self.vision_preview_open = False
         self._preview_window = None
         self._preview_label = None
@@ -304,6 +308,24 @@ class KaizumiUI:
             ("FOCUS MODE", "start focus mode"),
         ]:
             self._deck_button(self._left_deck, label, command)
+        self._deck_label(self._left_deck, "WHATSAPP AI CALL (MANUAL)")
+        self._whatsapp_call_status_label = tk.Label(
+            self._left_deck,
+            text=self.whatsapp_call_status,
+            anchor="w",
+            justify="left",
+            wraplength=170,
+            bg=self.col["panel"],
+            fg=self.col["dim"],
+            font=("Consolas", 8, "bold"),
+        )
+        self._whatsapp_call_status_label.pack(fill="x", padx=12, pady=(0, 6))
+        for label, action in [
+            ("MUTE AI AUDIO", "mute"),
+            ("RESUME AI AUDIO", "resume"),
+            ("STOP AI AUDIO", "stop"),
+        ]:
+            self._call_deck_button(self._left_deck, label, action)
 
         self._deck_label(self._right_deck, "CAMERA CONTROL")
         self._deck_button(self._right_deck, "OPEN CAMERA PREVIEW", "__open_preview__")
@@ -327,6 +349,15 @@ class KaizumiUI:
                                        bg=self.col["panel"], fg=self.col["green"],
                                        font=("Consolas", 9, "bold"))
         self._vision_status.pack(fill="x", padx=12, pady=(10, 8))
+        self._live_camera_status = tk.Label(
+            self._right_deck,
+            text="● LIVE CAMERA: OFF",
+            anchor="w",
+            bg=self.col["panel"],
+            fg=self.col["dim"],
+            font=("Consolas", 9, "bold"),
+        )
+        self._live_camera_status.pack(fill="x", padx=12, pady=(0, 8))
         self._deck_label(self._right_deck, "LOCAL CV MODULES")
         for text in ("HAND LANDMARKS   READY", "POSE ESTIMATION   READY", "QR / FACE SCAN   READY"):
             self._deck_label(self._right_deck, text, compact=True)
@@ -353,6 +384,43 @@ class KaizumiUI:
                         font=("Consolas", 8, "bold"), cursor="hand2")
         btn.pack(fill="x", padx=10, pady=3, ipady=5)
         self._deck_buttons.append(btn)
+
+    def _call_deck_button(self, parent, text, command):
+        btn = tk.Button(
+            parent,
+            text="▸  " + text,
+            anchor="w",
+            command=lambda: self._call_deck_command(command),
+            bg=self.col["input"],
+            fg=self.col["text"],
+            activebackground=self.col["pri"],
+            activeforeground=self.col["bg"],
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=1,
+            highlightbackground=self.col["dim"],
+            font=("Consolas", 8, "bold"),
+            cursor="hand2",
+        )
+        btn.pack(fill="x", padx=10, pady=3, ipady=5)
+
+    def _call_deck_command(self, command):
+        self.write_log("SYS: WhatsApp AI call control requested.")
+        if command in {"mute", "stop"} and self.on_whatsapp_call_control:
+            threading.Thread(
+                target=self.on_whatsapp_call_control,
+                args=(command,),
+                daemon=True,
+            ).start()
+            return
+        if command == "resume":
+            command = "resume WhatsApp call audio"
+        if self.on_text_command:
+            threading.Thread(
+                target=self.on_text_command,
+                args=(command,),
+                daemon=True,
+            ).start()
 
     def _deck_command(self, command, mode=None):
         if command == "__open_preview__":
@@ -381,10 +449,37 @@ class KaizumiUI:
         if hasattr(self, "_vision_signal_label"):
             self._vision_signal_label.configure(text=self.vision_signal,
                                                 bg=self.col["panel"], fg=self.col["text"])
+        if hasattr(self, "_live_camera_status"):
+            active = self.live_camera_active
+            self._live_camera_status.configure(
+                text=f"● LIVE CAMERA: {'ON' if active else 'OFF'}",
+                bg=self.col["panel"],
+                fg=self.col["red"] if active else self.col["dim"],
+            )
+        if hasattr(self, "_whatsapp_call_status_label"):
+            active = any(
+                state in self.whatsapp_call_status
+                for state in ("CONNECTED", "LISTENING", "SPEAKING")
+            )
+            self._whatsapp_call_status_label.configure(
+                text=self.whatsapp_call_status,
+                bg=self.col["panel"],
+                fg=self.col["red"] if active else self.col["dim"],
+            )
 
     def set_vision_signal(self, text: str):
         """Publish the latest local CV observation to the command deck."""
         self.vision_signal = str(text or "Awaiting camera input")[:120]
+        self._safe_ui(self._refresh_deck_status)
+
+    def set_live_camera_status(self, active: bool):
+        """Show whether webcam frames are currently being sent to Gemini."""
+        self.live_camera_active = bool(active)
+        self._safe_ui(self._refresh_deck_status)
+
+    def set_whatsapp_call_status(self, state: str, detail: str):
+        """Display NIANG IA's audio state without implying WhatsApp call state."""
+        self.whatsapp_call_status = f"{state}: {detail}"[:160]
         self._safe_ui(self._refresh_deck_status)
 
     def set_vision_detections(self, events):
@@ -1231,11 +1326,16 @@ class KaizumiUI:
     # ── API key ───────────────────────────────────────────────────────────────
 
     def _api_keys_exist(self):
-        """A usable Gemini key must exist (env or config), not just the file."""
+        """Check all supported Gemini key sources without exposing key values."""
         if os.environ.get("KAIZUMI_GEMINI_API_KEY", "").strip():
             return True
         if os.environ.get("KAIZUMI_GEMINI_API_KEYS", "").strip():
             return True
+        try:
+            if INSTALLER_API_KEY_FILE.read_text(encoding="utf-8").strip():
+                return True
+        except FileNotFoundError:
+            pass
         try:
             cfg = json.loads(API_FILE.read_text(encoding="utf-8"))
         except Exception:

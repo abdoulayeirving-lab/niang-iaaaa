@@ -30,6 +30,22 @@ def _get_system() -> str:
         return ""
 
 
+def _get_calendar_agenda() -> str:
+    from google_oauth import get_credentials
+
+    if not get_credentials():
+        return ""
+    from actions.calendar_actions import calendar_action
+    result = calendar_action(
+        parameters={"action": "today", "max_results": 5},
+        response=None,
+        player=None,
+    )
+    if result.startswith("No upcoming events today"):
+        return ""
+    return result
+
+
 def _get_memory() -> str:
     try:
         from memory.memory_manager import format_memory_for_prompt, load_memory
@@ -76,9 +92,25 @@ def daily_briefing(
 
     parts = [f"Good morning, sir. Today is {_get_time()}."]
 
+    try:
+        from actions.proactive_suggestions import get_suggestions
+        suggestions = get_suggestions()
+        if suggestions:
+            parts.append("A few suggestions based on your recent usage: " + " ".join(suggestions))
+    except RuntimeError as exc:
+        parts.append(f"Personalized suggestions unavailable: {exc}")
+
     weather = _get_weather(city)
     if weather and "unavailable" not in weather and len(weather) > 10:
         parts.append(f"Today's weather: {weather}")
+
+    try:
+        agenda = _get_calendar_agenda()
+        if agenda:
+            parts.append(agenda)
+    except Exception as exc:
+        print(f"[Briefing] Calendar agenda unavailable: {exc}")
+        parts.append(f"Calendar agenda unavailable: {exc}")
 
     facts = _get_memory()
     if facts:

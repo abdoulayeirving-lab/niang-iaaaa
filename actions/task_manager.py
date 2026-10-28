@@ -30,7 +30,16 @@ def task_manager(
             return f"Task {task_id} failed. {info.get('error', '')}"
         if status == "cancelled":
             return f"Task {task_id} was cancelled."
-        return f"Task {task_id} is {status}. Goal: {info['goal']}"
+        progress = ""
+        if info.get("total_steps"):
+            progress = (
+                f" Progress: {info['completed_steps']}/{info['total_steps']} steps."
+            )
+        current = f" Current step: {info['current_step']}." if info.get("current_step") else ""
+        return (
+            f"Task {task_id} is {status} ({info.get('phase', status)})."
+            f"{progress}{current} Goal: {info['goal']}"
+        )
 
     if action in ("cancel", "stop", "abort"):
         task_id = str(params.get("task_id", "")).strip()
@@ -46,7 +55,13 @@ def task_manager(
             return "No background tasks, sir."
         lines = []
         for t in tasks[-8:]:
-            lines.append(f"{t['task_id']}: {t['status']} — {t['goal']}")
+            progress = ""
+            if t.get("total_steps"):
+                progress = f" {t['completed_steps']}/{t['total_steps']}"
+            current = f" — {t['current_step']}" if t.get("current_step") else ""
+            lines.append(
+                f"{t['task_id']}: {t['status']}{progress}{current} — {t['goal']}"
+            )
         return "Tasks: " + " | ".join(lines)
 
     return f"Unknown task action: {action}, sir."

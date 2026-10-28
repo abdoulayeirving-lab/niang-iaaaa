@@ -1,0 +1,5 @@
+{
+  "incoming_audio_device": "EXACT VIRTUAL CAPTURE DEVICE NAME",
+  "outgoing_audio_device": "EXACT VIRTUAL PLAYBACK DEVICE NAME ROUTED TO WHATSAPP MIC",
+  "isolation_confirmed": false
+}

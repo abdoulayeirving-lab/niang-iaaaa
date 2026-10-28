@@ -1,0 +1,15 @@
+NIANG IA CAPABILITIES
+
+Current Features:
+- Conversational interaction
+- Web search
+- Opening Windows applications
+- Messaging
+- Setting reminders
+- YouTube control
+- System status monitoring
+- Gmail handling
+- Document analysis
+
+Future Goals:
+- Deeper online account integration

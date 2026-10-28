@@ -12,23 +12,30 @@ if exist ".venv\Scripts\python.exe" (
 call :find_python
 if defined PYTHON_EXE goto create_venv
 
+set "PYTHON_INSTALLER=%~dp0runtime\python-3.12.10-amd64.exe"
+if exist "%PYTHON_INSTALLER%" goto install_bundled_python
+
 where winget >nul 2>&1
 if errorlevel 1 goto python_missing
 
-echo Python 3.11 ou 3.12 est necessaire pour NIANG IA.
-echo Le programme peut installer Python 3.12 depuis winget.
-choice /C YN /M "Installer Python 3.12 maintenant"
-if errorlevel 2 exit /b 1
-
-winget install --id Python.Python.3.12 --exact --scope user --accept-package-agreements --accept-source-agreements
+echo Installation automatique de Python 3.12...
+winget install --id Python.Python.3.12 --exact --scope user --silent --accept-package-agreements --accept-source-agreements
 if errorlevel 1 (
     echo.
     echo [ERREUR] Installation de Python impossible.
-    echo Installe Python 3.12 depuis https://www.python.org/downloads/ puis relance ce fichier.
+    echo Verifie la connexion Internet ou installe Python 3.11/3.12, puis relance NIANG IA.
     pause
     exit /b 1
 )
 
+call :find_python
+if not defined PYTHON_EXE goto python_missing
+goto create_venv
+
+:install_bundled_python
+echo Installation automatique de Python 3.12 fourni avec NIANG IA...
+"%PYTHON_INSTALLER%" /quiet InstallAllUsers=0 TargetDir="%LocalAppData%\Programs\Python\Python312" PrependPath=0 Include_launcher=0 Include_pip=1 Include_tcltk=1 Include_test=0 Shortcuts=0
+if errorlevel 1 goto python_install_error
 call :find_python
 if not defined PYTHON_EXE goto python_missing
 
@@ -112,7 +119,15 @@ exit /b 0
 :python_missing
 echo.
 echo [ERREUR] Python 3.11 ou 3.12 n'a pas ete trouve.
-echo Installe Python 3.12 depuis https://www.python.org/downloads/ puis relance ce fichier.
+echo Si Python vient d'etre installe, ferme et relance NIANG IA.
+echo Sinon, installe Python 3.11 ou 3.12, puis relance ce fichier.
+pause
+exit /b 1
+
+:python_install_error
+echo.
+echo [ERREUR] L'installation automatique de Python 3.12 a echoue.
+echo Relance l'installateur NIANG IA ou installe Python 3.11/3.12 manuellement.
 pause
 exit /b 1
 

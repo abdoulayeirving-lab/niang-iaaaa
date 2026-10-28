@@ -32,6 +32,10 @@ class Task:
     speak:       Any        = field(compare=False, default=None)   
     on_complete: Any        = field(compare=False, default=None)  
     cancel_flag: threading.Event = field(compare=False, default_factory=threading.Event)
+    phase:       str         = field(compare=False, default="queued")
+    current_step: str        = field(compare=False, default="")
+    completed_steps: int     = field(compare=False, default=0)
+    total_steps: int         = field(compare=False, default=0)
 
 
 class TaskQueue:
@@ -108,6 +112,8 @@ class TaskQueue:
 
             task.cancel_flag.set()
             task.status = TaskStatus.CANCELLED
+            task.phase = "cancelled"
+            task.current_step = ""
             try:
                 self._queue.remove(task)
             except ValueError:
@@ -126,6 +132,10 @@ class TaskQueue:
                 "status":  task.status.value,
                 "result":  task.result,
                 "error":   task.error,
+                "phase": task.phase,
+                "current_step": task.current_step,
+                "completed_steps": task.completed_steps,
+                "total_steps": task.total_steps,
             }
 
     def get_all_statuses(self) -> list[dict]:
@@ -135,6 +145,10 @@ class TaskQueue:
                     "task_id": t.task_id,
                     "goal":    t.goal[:50],
                     "status":  t.status.value,
+                    "phase": t.phase,
+                    "current_step": t.current_step,
+                    "completed_steps": t.completed_steps,
+                    "total_steps": t.total_steps,
                 }
                 for t in self._tasks.values()
             ]
@@ -153,6 +167,7 @@ class TaskQueue:
                 task = self._next_task()
                 if task:
                     task.status = TaskStatus.RUNNING
+                    task.phase = "planning"
                     self._active_count += 1
                     try:
                         self._queue.remove(task)
@@ -183,13 +198,17 @@ class TaskQueue:
                 goal        = task.goal,
                 speak       = task.speak,
                 cancel_flag = task.cancel_flag,
+                on_progress = lambda progress: self._update_progress(task, progress),
             )
 
             with self._lock:
                 if task.cancel_flag.is_set():
                     task.status = TaskStatus.CANCELLED
+                    task.phase = "cancelled"
                 else:
                     task.status = TaskStatus.COMPLETED
+                    task.phase = "completed"
+                    task.current_step = ""
                     task.result = result
                 self._active_count -= 1
 
@@ -204,12 +223,32 @@ class TaskQueue:
         except Exception as e:
             with self._lock:
                 task.status = TaskStatus.FAILED
+                task.phase = "failed"
                 task.error  = str(e)
                 self._active_count -= 1
             print(f"[TaskQueue] ❌ Failed: [{task.task_id}] {e}")
 
         with self._condition:
             self._condition.notify()
+
+    def _update_progress(self, task: Task, progress: dict) -> None:
+        if not isinstance(progress, dict):
+            return
+        with self._lock:
+            if task.status != TaskStatus.RUNNING:
+                return
+            phase = progress.get("phase")
+            current_step = progress.get("current_step")
+            completed = progress.get("completed_steps")
+            total = progress.get("total_steps")
+            if isinstance(phase, str):
+                task.phase = phase[:30]
+            if isinstance(current_step, str):
+                task.current_step = current_step[:200]
+            if isinstance(completed, int) and not isinstance(completed, bool):
+                task.completed_steps = max(0, completed)
+            if isinstance(total, int) and not isinstance(total, bool):
+                task.total_steps = max(0, total)
 
 _queue        = TaskQueue()
 _queue_started = False

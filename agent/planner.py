@@ -12,6 +12,20 @@ def get_base_dir() -> Path:
 
 BASE_DIR        = get_base_dir()
 API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
+MAX_PLAN_STEPS = 5
+ALLOWED_TOOLS = {
+    "open_app", "web_search", "game_updater", "browser_control",
+    "file_controller", "notify", "daily_briefing", "wake_word",
+    "cmd_control", "computer_settings", "computer_control", "system_status",
+    "task_manager", "clipboard", "recall_memory", "vision_gesture",
+    "screen_process", "send_message", "reminder", "desktop_control",
+    "youtube_video", "weather_report", "flight_finder", "code_helper",
+    "dev_agent", "vision_click", "gmail", "read_pdf",
+    "pdf_qa", "autostart", "monitor_alerts", "email_watch", "pc_health",
+    "translate", "media_control", "read_document", "document_qa", "search_documents", "calendar",
+    "drive", "schedule", "create_presentation", "create_spreadsheet",
+    "smart_home_control", "create_document", "analyze_data",
+}
 
 
 PLANNER_PROMPT = """You are the planning module of NIANG IA, a personal AI assistant.
@@ -144,9 +158,32 @@ code_helper
   output_path: string (optional)
   file_path: string (optional)
 
+search_documents
+  query: search terms or a question about personal documents
+  folder: "Documents" | "Downloads" | "Desktop" | "all" | a specific folder path
+  Matching excerpts are returned to Gemini; search only the requested folders.
+
+create_document
+  title: document title
+  filename: optional filename
+  sections: list of objects with title, body (paragraphs), bullets, optional table {headers, rows}
+  Create detailed, complete content appropriate to the user's request.
+
+analyze_data
+  source: local .csv or .xlsx file
+  report_name: optional report filename
+  Creates a local descriptive-statistics report; dataset contents stay on this computer.
+
 dev_agent
   description: string (required)
   language: string (optional)
+  action: "turn_on" | "turn_off" | "toggle" | "set_level" | "set_temperature" |
+          "open_cover" | "close_cover" | "lock" | "unlock" |
+          "activate_scene" | "status"
+  device: configured device id/name
+  area: configured Home Assistant area id/name (turn_on/turn_off only)
+  value: brightness percent or target temperature
+
 EXAMPLES:
 
 Goal: "research mechanical engineering and save it to a notepad file"
@@ -209,6 +246,36 @@ def _get_api_key() -> str:
     return next_key()
 
 
+def _validate_plan(plan: dict, goal: str) -> dict:
+    """Reject malformed or unbounded model output before any tool can run."""
+    steps = plan.get("steps") if isinstance(plan, dict) else None
+    if not isinstance(steps, list) or not steps or len(steps) > MAX_PLAN_STEPS:
+        raise ValueError(f"Plan must contain 1 to {MAX_PLAN_STEPS} steps.")
+
+    validated = []
+    for index, step in enumerate(steps, start=1):
+        if not isinstance(step, dict):
+            raise ValueError(f"Plan step {index} must be an object.")
+        tool = step.get("tool")
+        description = step.get("description")
+        parameters = step.get("parameters", {})
+        if tool not in ALLOWED_TOOLS:
+            raise ValueError(f"Unsupported plan tool at step {index}: {tool!r}.")
+        if not isinstance(description, str) or not description.strip():
+            raise ValueError(f"Plan step {index} needs a description.")
+        if not isinstance(parameters, dict):
+            raise ValueError(f"Plan step {index} parameters must be an object.")
+        validated.append({
+            "step": index,
+            "tool": tool,
+            "description": description.strip()[:500],
+            "parameters": parameters,
+            "critical": bool(step.get("critical", True)),
+        })
+
+    return {"goal": str(plan.get("goal") or goal), "steps": validated}
+
+
 def create_plan(goal: str, context: str = "") -> dict:
     import google.generativeai as genai
 
@@ -229,15 +296,7 @@ def create_plan(goal: str, context: str = "") -> dict:
 
         plan = json.loads(text)
 
-        if "steps" not in plan or not isinstance(plan["steps"], list):
-            raise ValueError("Invalid plan structure")
-
-        for step in plan["steps"]:
-            if step.get("tool") in ("generated_code",):
-                print(f"[Planner] ⚠️ generated_code detected in step {step.get('step')} — replacing with web_search")
-                desc = step.get("description", goal)
-                step["tool"] = "web_search"
-                step["parameters"] = {"query": desc[:200]}
+        plan = _validate_plan(plan, goal)
 
         print(f"[Planner] ✅ Plan: {len(plan['steps'])} steps")
         for s in plan["steps"]:
@@ -298,13 +357,7 @@ Create a REVISED plan for the remaining work only. Do not repeat completed steps
         text     = re.sub(r"```(?:json)?", "", text).strip().rstrip("`").strip()
         plan     = json.loads(text)
 
-        if "steps" not in plan or not isinstance(plan["steps"], list):
-            raise ValueError("Invalid revised plan structure")
-
-        for step in plan["steps"]:
-            if step.get("tool") == "generated_code":
-                step["tool"] = "web_search"
-                step["parameters"] = {"query": step.get("description", goal)[:200]}
+        plan = _validate_plan(plan, goal)
 
         print(f"[Planner] 🔄 Revised plan: {len(plan['steps'])} steps")
         return plan

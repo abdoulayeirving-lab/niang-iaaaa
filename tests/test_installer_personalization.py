@@ -1,0 +1,51 @@
+import unittest
+from pathlib import Path
+
+from PIL import Image
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class InstallerPersonalizationTests(unittest.TestCase):
+    def test_installer_asks_only_for_preferred_name_and_default_language(self):
+        source = (ROOT / "NIANG_IA.iss").read_text(encoding="utf-8")
+
+        self.assertIn("CreateCustomPage(wpWelcome, '', '')", source)
+        self.assertIn("Comment veux-tu que NIANG IA t''appelle ?", source)
+        self.assertIn("Langue par défaut de NIANG IA", source)
+        self.assertIn("UserNameEdit.Text", source)
+        self.assertIn("LanguageCombo.Text", source)
+        self.assertIn("LanguageCombo.ItemIndex := 0", source)
+        self.assertIn("LanguageCombo.Items.Add('Français')", source)
+        self.assertNotIn("PersonalizationPage.Add(", source)
+
+    def test_prompt_uses_saved_name_and_language_as_defaults(self):
+        prompt = (ROOT / "core" / "prompt.txt").read_text(encoding="utf-8")
+
+        self.assertIn("saved Language as the default response language", prompt)
+        self.assertIn("saved Name naturally", prompt)
+
+    def test_installer_opens_official_key_page_and_saves_key_separately(self):
+        source = (ROOT / "NIANG_IA.iss").read_text(encoding="utf-8")
+
+        self.assertIn("https://aistudio.google.com/apikey", source)
+        self.assertIn("Obtenir une clé Gemini", source)
+        self.assertIn("GeminiKeyEdit.Text", source)
+        self.assertIn("installer_gemini_key.txt", source)
+        self.assertIn("GeminiKeyEdit.PasswordChar := '*'", source)
+        self.assertNotIn("Copy(KeyValue, 1, 4)", source)
+
+    def test_windows_icon_fills_canvas_and_has_transparent_rounded_corners(self):
+        with Image.open(ROOT / "assets" / "niang_ia.ico") as source:
+            sizes = source.info["sizes"]
+            icon = source.convert("RGBA")
+
+        self.assertIn((256, 256), sizes)
+        self.assertEqual(icon.getpixel((0, 0))[3], 0)
+        self.assertEqual(icon.getpixel((128, 128))[3], 255)
+        self.assertEqual(icon.getchannel("A").getbbox(), (0, 0, 256, 256))
+
+
+if __name__ == "__main__":
+    unittest.main()

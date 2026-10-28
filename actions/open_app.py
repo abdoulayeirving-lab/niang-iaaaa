@@ -157,40 +157,48 @@ def _launch_start_menu(app_name: str) -> bool:
     return False
 
 def _launch_windows(app_name: str) -> bool:
-    if _launch_start_menu(app_name):
-        time.sleep(1.0)
-        return True
+    requested = app_name.strip()
+    if requested.casefold() in {"youtube", "youtube.com", "www.youtube.com"}:
+        target = "https://www.youtube.com"
+    else:
+        target = requested
 
-    exe = _find_registry_exe(app_name)
-    if exe:
-        try:
-            subprocess.Popen([exe], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            time.sleep(1.0)
-            return True
-        except Exception:
-            pass
+    # Keep cmd /c start limited to a single app name or the fixed YouTube URL.
+    # In particular, never pass shell syntax or user-provided arguments to CMD.
+    if target not in {"https://www.youtube.com", "ms-settings:"} and not re.fullmatch(
+        r"[A-Za-z0-9 ._-]+", target
+    ):
+        print(f"[open_app] Refused unsafe launch name: {requested!r}")
+        return False
 
-    # ms-settings: / shell: protocol shortcuts
     try:
-        # Only allow this shell-based fallback for protocol shortcuts or
-        # plain app names — never anything containing shell metacharacters.
-        import re as _re
-        if _re.search(r'[&|<>^()%;!]', app_name):
-            print(f"[open_app] ⛔ Refused unsafe launch name: {app_name!r}")
-            return False
-        subprocess.Popen(["cmd", "/c", "start", "", app_name],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        time.sleep(1.0)
+        subprocess.Popen(
+            ["cmd.exe", "/c", "start", "", target],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
         return True
     except Exception:
         pass
+
+    if _launch_start_menu(requested):
+        return True
+
+    exe = _find_registry_exe(requested)
+    if exe:
+        try:
+            subprocess.Popen([exe], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+        except Exception:
+            pass
 
     try:
         import pyautogui
         pyautogui.PAUSE = 0.1
         pyautogui.press("win")
         time.sleep(0.6)
-        pyautogui.write(app_name, interval=0.05)
+        pyautogui.write(requested, interval=0.05)
         time.sleep(0.8)
         pyautogui.press("enter")
         time.sleep(3.0)
@@ -285,6 +293,12 @@ def open_app(
     if launcher is None:
         return f"Unsupported OS: {system}"
 
+    if system == "Windows" and not re.fullmatch(
+        r"[A-Za-z0-9 ._-]+", app_name
+    ) and app_name.casefold() not in {"youtube.com", "www.youtube.com"}:
+        print(f"[open_app] Refused unsafe launch name: {app_name!r}")
+        return f"I can't safely open {app_name}, sir."
+
     normalized = _normalize(app_name)
     print(f"[open_app] 🚀 Launching: {app_name} → {normalized} ({system})")
 
@@ -300,6 +314,7 @@ def open_app(
                 ["cmd", "/c", "start", "", "whatsapp:"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             return f"Opened {app_name} successfully, sir."
 

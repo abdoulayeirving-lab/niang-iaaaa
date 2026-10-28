@@ -343,6 +343,10 @@ def _call_tool(tool: str, parameters: dict, speak: Callable | None) -> str:
         from actions.document_qa import document_qa
         return document_qa(parameters=parameters, response=None, player=None) or "Done."
 
+    elif tool == "search_documents":
+        from actions.document_qa import search_documents
+        return search_documents(parameters=parameters, response=None, player=None) or "Done."
+
     elif tool == "calendar":
         from actions.calendar_actions import calendar_action
         return calendar_action(parameters=parameters, response=None, player=None) or "Done."
@@ -360,6 +364,19 @@ def _call_tool(tool: str, parameters: dict, speak: Callable | None) -> str:
                           slides=parameters.get("slides") or [],
                           filename=parameters.get("filename")) or "Done."
 
+    elif tool == "create_document":
+        from actions.office_builder import create_document as _make_docx
+        return _make_docx(
+            title=parameters.get("title", ""),
+            sections=parameters.get("sections") or [],
+            filename=parameters.get("filename"),
+            author=parameters.get("author", "NIANG IA"),
+        ) or "Done."
+
+    elif tool == "analyze_data":
+        from actions.data_analysis import analyze_data
+        return analyze_data(parameters=parameters, response=None, player=None) or "Done."
+
     elif tool == "create_spreadsheet":
         from actions.office_builder import create_spreadsheet as _make_xlsx
         return _make_xlsx(filename=parameters.get("filename", "spreadsheet"),
@@ -371,7 +388,8 @@ def _call_tool(tool: str, parameters: dict, speak: Callable | None) -> str:
         from actions.smart_home import smart_home_control as _sh_control
         return _sh_control(action=parameters.get("action", "status"),
                            device=parameters.get("device"),
-                           value=parameters.get("value")) or "Done."
+                           value=parameters.get("value"),
+                           area=parameters.get("area")) or "Done."
 
     elif tool in ("save_memory", "set_mode", "set_voice", "set_mood"):
         return f"{tool} is a main-session preference tool, sir â€” skipping in background."
@@ -409,11 +427,26 @@ class AgentExecutor:
 
     MAX_REPLAN_ATTEMPTS = 2
 
+    @staticmethod
+    def _report_progress(callback, phase, current_step, completed, total):
+        if callback is None:
+            return
+        try:
+            callback({
+                "phase": phase,
+                "current_step": current_step,
+                "completed_steps": completed,
+                "total_steps": total,
+            })
+        except Exception as exc:
+            print(f"[Executor] Progress callback failed: {exc}")
+
     def execute(
         self,
         goal:        str,
         speak:       Callable | None        = None,
         cancel_flag: threading.Event | None = None,
+        on_progress: Callable[[dict], None] | None = None,
     ) -> str:
         print(f"\n[Executor] ðŸŽ¯ Goal: {goal}")
 
@@ -429,6 +462,10 @@ class AgentExecutor:
                 msg = "I couldn't create a valid plan for this task, sir."
                 if speak: speak(msg)
                 return msg
+            self._report_progress(
+                on_progress, "planned", "", len(completed_steps),
+                len(completed_steps) + len(steps),
+            )
 
             success      = True
             failed_step  = None
@@ -447,6 +484,10 @@ class AgentExecutor:
                 params = _inject_context(params, tool, step_results, goal=goal)
 
                 print(f"\n[Executor] â–¶ï¸ Step {step_num}: [{tool}] {desc}")
+                self._report_progress(
+                    on_progress, "running", f"{step_num}: {desc}",
+                    len(completed_steps), len(completed_steps) + len(steps),
+                )
 
                 attempt = 1
                 step_ok = False
@@ -458,6 +499,10 @@ class AgentExecutor:
                         result = _call_tool_with_timeout(tool, params, speak, cancel_flag)
                         step_results[step_num] = result 
                         completed_steps.append(step)
+                        self._report_progress(
+                            on_progress, "running", f"{step_num}: {desc}",
+                            len(completed_steps), len(completed_steps) + len(steps),
+                        )
                         print(f"[Executor] âœ… Step {step_num} done: {str(result)[:100]}")
                         step_ok = True
                         break
@@ -468,6 +513,10 @@ class AgentExecutor:
                         print(f"[Executor] â­ï¸ Step {step_num}: {e} â€” skipping")
                         completed_steps.append(step)
                         step_results[step_num] = str(e)
+                        self._report_progress(
+                            on_progress, "running", f"{step_num}: {desc}",
+                            len(completed_steps), len(completed_steps) + len(steps),
+                        )
                         step_ok = True
                         break
 
@@ -490,6 +539,10 @@ class AgentExecutor:
                         elif decision == ErrorDecision.SKIP:
                             print(f"[Executor] â­ï¸ Skipping step {step_num}")
                             completed_steps.append(step)
+                            self._report_progress(
+                                on_progress, "running", f"{step_num}: {desc}",
+                                len(completed_steps), len(completed_steps) + len(steps),
+                            )
                             step_ok = True
                             break
 
@@ -512,6 +565,10 @@ class AgentExecutor:
                                     )
                                     step_results[step_num] = res
                                     completed_steps.append(step)
+                                    self._report_progress(
+                                        on_progress, "running", f"{step_num}: {desc}",
+                                        len(completed_steps), len(completed_steps) + len(steps),
+                                    )
                                     step_ok = True
                                     break
                                 except Exception as fix_err:
@@ -531,7 +588,12 @@ class AgentExecutor:
                     break
 
             if success:
-                return self._summarize(goal, completed_steps, speak)
+                result = self._summarize(goal, completed_steps, speak)
+                self._report_progress(
+                    on_progress, "completed", "", len(completed_steps),
+                    len(completed_steps),
+                )
+                return result
 
             if replan_attempts >= self.MAX_REPLAN_ATTEMPTS:
                 msg = f"Task failed after {replan_attempts} replan attempts, sir."

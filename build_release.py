@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
 import shutil
+import urllib.request
 import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 DIST = ROOT / "dist"
-VERSION = "1.0.0"
+VERSION = "1.0.11"
 STAGE = DIST / f"NIANG_IA_{VERSION}"
 ARCHIVE = DIST / f"NIANG_IA_{VERSION}_windows.zip"
+PYTHON_INSTALLER_NAME = "python-3.12.10-amd64.exe"
+PYTHON_INSTALLER_URL = f"https://www.python.org/ftp/python/3.12.10/{PYTHON_INSTALLER_NAME}"
+PYTHON_INSTALLER_SHA256 = "67b5635e80ea51072b87941312d00ec8927c4db9ba18938f7ad2d27b328b95fb"
+BUILD_CACHE = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "NIANG_IA_BuildTools"
 
 SOURCE_DIRS = (
     "actions",
@@ -20,9 +27,11 @@ SOURCE_DIRS = (
     "config",
     "core",
     "docs",
+    "desktop",
     "memory",
     "models",
     "remote",
+    "runtime",
     "tests",
     "vision",
 )
@@ -94,6 +103,33 @@ def collect_files() -> list[Path]:
     return sorted(set(files), key=lambda path: path.relative_to(ROOT).as_posix().lower())
 
 
+def ensure_python_installer() -> Path:
+    installer = BUILD_CACHE / PYTHON_INSTALLER_NAME
+    BUILD_CACHE.mkdir(parents=True, exist_ok=True)
+
+    if installer.is_file():
+        digest = hashlib.sha256(installer.read_bytes()).hexdigest()
+        if digest == PYTHON_INSTALLER_SHA256:
+            return installer
+        installer.unlink()
+
+    temporary = installer.with_suffix(installer.suffix + ".download")
+    try:
+        with urllib.request.urlopen(PYTHON_INSTALLER_URL, timeout=60) as response:
+            with temporary.open("wb") as downloaded:
+                shutil.copyfileobj(response, downloaded)
+        digest = hashlib.sha256(temporary.read_bytes()).hexdigest()
+        if digest != PYTHON_INSTALLER_SHA256:
+            raise RuntimeError(
+                f"Python installer SHA-256 mismatch: expected "
+                f"{PYTHON_INSTALLER_SHA256}, got {digest}"
+            )
+        temporary.replace(installer)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return installer
+
+
 def main() -> None:
     if STAGE.exists() or ARCHIVE.exists():
         raise FileExistsError(
@@ -105,18 +141,23 @@ def main() -> None:
     if not files:
         raise RuntimeError("No release files were found.")
 
+    python_installer = ensure_python_installer()
     for source in files:
         relative = source.relative_to(ROOT)
         destination = STAGE / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
 
+    runtime_installer = STAGE / "runtime" / PYTHON_INSTALLER_NAME
+    runtime_installer.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(python_installer, runtime_installer)
+
     with zipfile.ZipFile(ARCHIVE, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as bundle:
         for staged in sorted(STAGE.rglob("*")):
             if staged.is_file():
                 bundle.write(staged, Path(STAGE.name) / staged.relative_to(STAGE))
 
-    print(f"Staged {len(files)} files in {STAGE}")
+    print(f"Staged {len(files) + 1} files in {STAGE}, including Python 3.12.10")
     print(f"Created {ARCHIVE} ({ARCHIVE.stat().st_size:,} bytes)")
 
 

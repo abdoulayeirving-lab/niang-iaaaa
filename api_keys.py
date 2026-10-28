@@ -1,7 +1,8 @@
 """Multi-key Gemini API rotation.
 
 Reads all configured API keys (legacy `gemini_api_key` + new list
-`gemini_api_keys`) from config/api_keys.json. When a key hits the free-tier
+`gemini_api_keys`) from config/api_keys.json and the optional installer key
+file. When a key hits the free-tier
 daily quota (429 RESOURCE_EXHAUSTED), it is marked exhausted with a cooldown
 and the next configured key is tried automatically. Keys recover once the
 cooldown expires (daily quota resets), so old keys keep working again later.
@@ -22,6 +23,7 @@ def get_base_dir() -> Path:
 
 
 CONFIG_PATH = get_base_dir() / "config" / "api_keys.json"
+INSTALLER_KEY_PATH = get_base_dir() / "config" / "installer_gemini_key.txt"
 STATE_PATH  = get_base_dir() / "config" / "api_key_state.json"
 
 # Free-tier daily quota resets ~midnight; 8h cooldown is a safe approximation.
@@ -65,15 +67,21 @@ def get_all_keys() -> list:
     if env_keys:
         keys.extend(k.strip() for k in env_keys.split(",") if k.strip())
     try:
+        installer_key = INSTALLER_KEY_PATH.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        installer_key = ""
+    if installer_key:
+        keys.append(installer_key)
+    try:
         cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     except Exception:
         cfg = {}
-    lst = cfg.get("gemini_api_keys")
-    if isinstance(lst, list):
-        keys.extend(k for k in lst if isinstance(k, str) and k.strip())
     single = cfg.get("gemini_api_key")
     if isinstance(single, str) and single.strip():
-        keys.insert(0, single)
+        keys.append(single.strip())
+    lst = cfg.get("gemini_api_keys")
+    if isinstance(lst, list):
+        keys.extend(k.strip() for k in lst if isinstance(k, str) and k.strip())
     seen, out = set(), []
     for k in keys:
         if k not in seen:
@@ -125,8 +133,6 @@ def add_key(key: str) -> int:
     key = (key or "").strip()
     if not key:
         raise ValueError("Empty API key.")
-    if not key.startswith("AIza"):
-        raise ValueError("That doesn't look like a Gemini API key (should start with 'AIza').")
     with _lock:
         cfg = {}
         if CONFIG_PATH.exists():

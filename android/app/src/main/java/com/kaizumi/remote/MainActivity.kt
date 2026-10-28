@@ -1,351 +1,474 @@
 package com.kaizumi.remote
 
 import android.Manifest
-import android.bluetooth.*
-import android.bluetooth.le.BluetoothLeScanner
-import android.bluetooth.le.ScanCallback
-import android.bluetooth.le.ScanResult
-import android.bluetooth.le.ScanSettings
+import android.app.AlertDialog
+import android.content.ActivityNotFoundException
+import android.content.Intent
 import android.content.pm.PackageManager
-import android.os.Build
+import android.net.Uri
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
-import android.widget.*
-import androidx.appcompat.app.AppCompatActivity
-import androidx.core.app.ActivityCompat
-import androidx.core.content.ContextCompat
+import android.provider.Settings
+import android.provider.AlarmClock
+import android.provider.MediaStore
+import android.speech.RecognizerIntent
+import android.speech.tts.TextToSpeech
 import android.view.inputmethod.EditorInfo
-import java.nio.charset.StandardCharsets
-import java.util.UUID
-import java.util.concurrent.atomic.AtomicInteger
+import android.widget.Button
+import android.widget.EditText
+import android.widget.ScrollView
+import android.widget.TextView
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
+import com.google.android.material.switchmaterial.SwitchMaterial
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.ByteArrayOutputStream
+import java.time.LocalDateTime
+import java.time.ZoneId
+import java.time.format.DateTimeParseException
+import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
-
     companion object {
-        private const val TAG = "KaizumiRemote"
-        private val SERVICE_UUID = UUID.fromString("8f5f4a5a-2f1a-4a9e-9b2a-3a6c9e1d2b4c")
-        private val WRITE_UUID = UUID.fromString("9f5f4a5a-2f1a-4a9e-9b2a-3a6c9e1d2b4c")
-        private val NOTIFY_UUID = UUID.fromString("a5f4a5a0-2f1a-4a9e-9b2a-3a6c9e1d2b4c")
-        private const val PROTOCOL_VERSION = 1
-        private const val REQ_PERMS = 1001
+        private const val MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
     }
 
-    private var bluetoothManager: BluetoothManager? = null
-    private var adapter: BluetoothAdapter? = null
-    private var scanner: BluetoothLeScanner? = null
-    private var gatt: BluetoothGatt? = null
-    private var notifyChar: BluetoothGattCharacteristic? = null
-    private var writeChar: BluetoothGattCharacteristic? = null
-    private var authenticated = false
-    private val mainHandler = Handler(Looper.getMainLooper())
-    private val msgCounter = AtomicInteger(0)
-    private var scanning = false
+    private val keyStore by lazy { ApiKeyStore(this) }
+    private val history = JSONArray()
+    private val screenScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var selectedDocument: SelectedDocument? = null
+    private var pendingAction: PendingAction? = null
+    private var busy = false
+    private var voiceDisclosureShown = false
+    private var tts: TextToSpeech? = null
+    private var ttsReady = false
 
-    private lateinit var logView: TextView
     private lateinit var statusView: TextView
-    private lateinit var tokenInput: EditText
-    private lateinit var commandInput: EditText
-    private lateinit var connectBtn: Button
-    private lateinit var sendBtn: Button
-    private lateinit var clearBtn: Button
+    private lateinit var conversationView: TextView
+    private lateinit var chatScroll: ScrollView
+    private lateinit var promptInput: EditText
+    private lateinit var webSearchSwitch: SwitchMaterial
+    private lateinit var sendButton: Button
+    private lateinit var voiceButton: Button
+    private lateinit var documentButton: Button
+
+    private val documentPicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            val mime = contentResolver.getType(uri).orEmpty()
+            val name = displayName(uri)
+            if (mime !in setOf("application/pdf", "image/jpeg", "image/png", "text/plain")) {
+                showError("Format non pris en charge. Choisissez un PDF, une image PNG/JPEG ou un fichier texte.")
+            } else {
+                selectedDocument = SelectedDocument(uri, mime, name)
+                documentButton.text = name.take(18)
+                statusView.text = getString(R.string.status_document_selected)
+            }
+        }
+    }
+
+    private val speechLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val recognized = result.data
+                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                ?.firstOrNull()
+                .orEmpty()
+            if (result.resultCode == RESULT_OK && recognized.isNotBlank()) {
+                promptInput.setText(recognized)
+                sendMessage()
+            } else if (result.resultCode == RESULT_OK) {
+                statusView.text = getString(R.string.status_no_speech)
+            }
+        }
+
+    private val microphonePermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (granted) startSpeechRecognition()
+            else showError("L’autorisation du microphone est nécessaire pour la saisie vocale.")
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_main)
-
-        logView = findViewById(R.id.logView)
+        setContentView(R.layout.activity_assistant)
         statusView = findViewById(R.id.statusView)
-        tokenInput = findViewById(R.id.tokenInput)
-        commandInput = findViewById(R.id.commandInput)
-        connectBtn = findViewById(R.id.connectBtn)
-        sendBtn = findViewById(R.id.sendBtn)
-        clearBtn = findViewById(R.id.clearBtn)
+        conversationView = findViewById(R.id.conversationView)
+        chatScroll = findViewById(R.id.chatScroll)
+        promptInput = findViewById(R.id.promptInput)
+        webSearchSwitch = findViewById(R.id.webSearchSwitch)
+        sendButton = findViewById(R.id.sendButton)
+        voiceButton = findViewById(R.id.voiceButton)
+        documentButton = findViewById(R.id.documentButton)
 
-        bluetoothManager = getSystemService(BLUETOOTH_SERVICE) as BluetoothManager
-        adapter = bluetoothManager?.adapter
-
-        connectBtn.setOnClickListener { onConnectPressed() }
-        sendBtn.setOnClickListener { sendCommand() }
-        commandInput.setOnEditorActionListener { _, actionId, _ ->
+        findViewById<Button>(R.id.keyButton).setOnClickListener { showApiKeyDialog() }
+        documentButton.setOnClickListener { documentPicker.launch(arrayOf("*/*")) }
+        findViewById<Button>(R.id.pcButton).setOnClickListener {
+            startActivity(Intent(this, RemoteActivity::class.java))
+        }
+        sendButton.setOnClickListener { sendMessage() }
+        voiceButton.setOnClickListener { requestVoiceInput() }
+        promptInput.setOnEditorActionListener { _, actionId, _ ->
             if (actionId == EditorInfo.IME_ACTION_SEND) {
-                sendCommand()
+                sendMessage()
                 true
-            } else false
-        }
-        clearBtn.setOnClickListener {
-            logView.text = ""
-            setStatus("Idle")
+            } else {
+                false
+            }
         }
 
-        if (!supportAdapter()) return
-        requestPermissionsIfNeeded()
-    }
-
-    private fun supportAdapter(): Boolean {
-        if (adapter == null) {
-            setStatus("No Bluetooth adapter on this device.")
-            return false
+        tts = TextToSpeech(this) { result ->
+            ttsReady = result == TextToSpeech.SUCCESS
+            if (ttsReady) tts?.language = Locale.getDefault()
         }
-        if (!adapter!!.isEnabled) {
-            setStatus("Bluetooth is off. Turn it on first.")
-            return false
-        }
-        return true
-    }
-
-    private fun requestPermissionsIfNeeded() {
-        val needed = mutableListOf<String>()
-        if (Build.VERSION.SDK_INT >= 31) {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT)
-                != PackageManager.PERMISSION_GRANTED) needed.add(Manifest.permission.BLUETOOTH_CONNECT)
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN)
-                != PackageManager.PERMISSION_GRANTED) needed.add(Manifest.permission.BLUETOOTH_SCAN)
+        statusView.text = if (keyStore.load() == null) {
+            "Ajoutez votre clé Gemini. Internet est requis."
         } else {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
-                != PackageManager.PERMISSION_GRANTED) needed.add(Manifest.permission.ACCESS_FINE_LOCATION)
-        }
-        if (needed.isNotEmpty()) {
-            ActivityCompat.requestPermissions(this, needed.toTypedArray(), REQ_PERMS)
+            "Prêt. Vos messages sont envoyés à Gemini lorsque vous les soumettez."
         }
     }
 
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == REQ_PERMS) {
-            setStatus("Permissions granted.")
+    private fun showApiKeyDialog() {
+        val input = EditText(this).apply {
+            hint = "Collez votre clé API Gemini"
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+            maxLines = 1
         }
+        val savedKey = keyStore.load()
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Clé API Gemini")
+            .setMessage(
+                "La clé est chiffrée avec Android Keystore sur cet appareil. " +
+                    "Vos messages et documents sélectionnés sont envoyés à Google Gemini."
+            )
+            .setView(input)
+            .setPositiveButton("Enregistrer", null)
+            .setNeutralButton(if (savedKey == null) null else "Supprimer la clé", null)
+            .setNegativeButton("Annuler", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val value = input.text.toString().trim()
+                if (value.isBlank()) {
+                    input.error = "Saisissez une clé Gemini."
+                    return@setOnClickListener
+                }
+                keyStore.save(value)
+                statusView.text = getString(R.string.status_key_saved)
+                dialog.dismiss()
+            }
+            if (savedKey != null) {
+                dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                    keyStore.clear()
+                    statusView.text = getString(R.string.status_key_removed)
+                    dialog.dismiss()
+                }
+            }
+        }
+        dialog.show()
     }
 
-    private fun onConnectPressed() {
-        if (gatt != null) {
-            disconnect()
+    private fun requestVoiceInput() {
+        if (!voiceDisclosureShown) {
+            AlertDialog.Builder(this)
+                .setTitle("Reconnaissance vocale")
+                .setMessage(
+                    "L’audio sera traité par le service de reconnaissance vocale configuré sur votre téléphone. " +
+                        "Le texte reconnu sera envoyé à Gemini pour obtenir une réponse."
+                )
+                .setPositiveButton("Continuer") { _, _ ->
+                    voiceDisclosureShown = true
+                    requestMicrophonePermissionOrStart()
+                }
+                .setNegativeButton("Annuler", null)
+                .show()
             return
         }
-        if (!supportAdapter()) return
-        startScan()
+        requestMicrophonePermissionOrStart()
     }
 
-    private fun startScan() {
-        scanner = adapter!!.bluetoothLeScanner
-        setStatus("Scanning for 'Kaizumi Remote'…")
-        log("Scanning for Kaizumi Remote…")
-        scanning = true
-        val settings = ScanSettings.Builder()
-            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
-            .build()
+    private fun requestMicrophonePermissionOrStart() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            startSpeechRecognition()
+        } else {
+            microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    private fun startSpeechRecognition() {
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+            .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            .putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
+            .putExtra(RecognizerIntent.EXTRA_PROMPT, "Parlez à NIANG IA")
+            .putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
         try {
-            scanner!!.startScan(null, settings, scanCallback)
-        } catch (e: SecurityException) {
-            setStatus("Bluetooth permission denied.")
-        }
-        mainHandler.postDelayed({ if (scanning) stopScan() }, 15000)
-    }
-
-    private fun stopScan() {
-        if (!scanning) return
-        scanning = false
-        try { scanner?.stopScan(scanCallback) } catch (_: Exception) {}
-    }
-
-    private val scanCallback = object : ScanCallback() {
-        override fun onScanResult(callbackType: Int, result: ScanResult) {
-            val name = result.device.name ?: ""
-            if (result.scanRecord?.serviceUuids?.contains(SERVICE_UUID) == true ||
-                name.contains("Kaizumi", ignoreCase = true)) {
-                stopScan()
-                log("Found: ${result.device.address} ($name)")
-                connectTo(result.device)
-            }
+            speechLauncher.launch(intent)
+        } catch (_: ActivityNotFoundException) {
+            showError("Aucun service de reconnaissance vocale n’est disponible sur ce téléphone.")
         }
     }
 
-    private fun connectTo(device: BluetoothDevice) {
-        setStatus("Connecting to ${device.address}…")
-        if (Build.VERSION.SDK_INT >= 31 &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT)
-            != PackageManager.PERMISSION_GRANTED) {
-            setStatus("BLUETOOTH_CONNECT permission missing.")
+    private fun sendMessage() {
+        if (busy) return
+        val prompt = promptInput.text.toString().trim()
+        val document = selectedDocument
+        if (prompt.isBlank() && document == null) {
+            promptInput.error = "Écrivez une question ou choisissez un document."
             return
         }
-        // autoConnect=false, high connection priority for low latency.
-        gatt = device.connectGatt(this, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
-        gatt?.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
-    }
-
-    private fun disconnect() {
-        try {
-            gatt?.disconnect()
-            gatt?.close()
-        } catch (_: Exception) {}
-        gatt = null
-        notifyChar = null
-        writeChar = null
-        authenticated = false
-        connectBtn.text = "Connect"
-        setStatus("Disconnected.")
-    }
-
-    private val gattCallback = object : BluetoothGattCallback() {
-        override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
-            if (newState == BluetoothProfile.STATE_CONNECTED) {
-                mainHandler.post {
-                    setStatus("Connected. Discovering services…")
-                    gatt?.discoverServices()
+        val key = try {
+            keyStore.load()
+        } catch (error: Exception) {
+            showError(error.message ?: "Impossible de lire la clé API. Saisissez-la à nouveau.")
+            return
+        }
+        if (key.isNullOrBlank()) {
+            showApiKeyDialog()
+            return
+        }
+        val webSearch = webSearchSwitch.isChecked
+        webSearchSwitch.isChecked = false
+        promptInput.text.clear()
+        appendMessage("Vous", prompt.ifBlank { "Analyse le document sélectionné." })
+        setBusy(true, "NIANG IA réfléchit…")
+        screenScope.launch {
+            try {
+                val attachment = document?.let { readAttachment(it) }
+                val reply = GeminiClient.generate(
+                    key,
+                    history,
+                    prompt,
+                    webSearch,
+                    attachment
+                )
+                if (reply.action != null) {
+                    pendingAction = PendingAction(key, reply, attachment == null)
+                    showActionConfirmation(reply.action)
+                } else {
+                    saveTurn(reply, attachment == null)
+                    presentAnswer(reply.text)
+                    setBusy(false, "Prêt")
                 }
-            } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                mainHandler.post {
-                    setStatus("Disconnected.")
-                    log("Disconnected.")
-                    gatt?.close()
-                    gatt = null
-                    notifyChar = null
-                    writeChar = null
-                    authenticated = false
-                    connectBtn.text = "Connect"
-                }
+                selectedDocument = null
+                documentButton.text = getString(R.string.document)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                setBusy(false, "Échec de la demande")
+                showError(error.message ?: "La demande à Gemini a échoué.")
             }
         }
+    }
 
-        override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
-            if (status != BluetoothGatt.GATT_SUCCESS) {
-                mainHandler.post { setStatus("Service discovery failed ($status).") }
-                return
-            }
-            val svc = g.getService(SERVICE_UUID) ?: run {
-                mainHandler.post { setStatus("Service not found on device.") }
-                return
-            }
-            writeChar = svc.getCharacteristic(WRITE_UUID)
-            notifyChar = svc.getCharacteristic(NOTIFY_UUID)
-            mainHandler.post {
-                setStatus("Ready. Enter token and send.")
-                connectBtn.text = "Disconnect"
-            }
-            if (notifyChar != null) {
-                try {
-                    g.setCharacteristicNotification(notifyChar, true)
-                    val cccd = notifyChar?.getDescriptor(
-                        UUID.fromString("00002902-0000-1000-8000-00805f9b34fb"))
-                    cccd?.let { d ->
-                        d.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                        g.writeDescriptor(d)
-                    }
-                } catch (e: Exception) {
-                    mainHandler.post { log("Notify setup: ${e.message}") }
+    private suspend fun readAttachment(document: SelectedDocument): GeminiAttachment =
+        withContext(Dispatchers.IO) {
+            val bytes = contentResolver.openInputStream(document.uri)?.use { input ->
+                val output = ByteArrayOutputStream()
+                val buffer = ByteArray(8192)
+                var total = 0
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    total += count
+                    require(total <= MAX_ATTACHMENT_BYTES) { "Le document dépasse la limite de 10 Mo." }
+                    output.write(buffer, 0, count)
                 }
+                output.toByteArray()
+            } ?: error("Impossible de lire le document sélectionné.")
+            GeminiAttachment(bytes, document.mimeType, document.name)
+        }
+
+    private fun showActionConfirmation(action: NativeAction) {
+        val description = when (action.name) {
+            "open_android_app" -> "Ouvrir ${action.arguments.optString("app")} sur ce téléphone"
+            "set_alarm" -> {
+                val hour = action.arguments.optInt("hour", -1)
+                val minute = action.arguments.optInt("minute", -1)
+                val label = action.arguments.optString("label")
+                "Créer une alarme à %02d:%02d (%s)".format(hour, minute, label)
+            }
+            "create_reminder" -> {
+                val title = action.arguments.optString("title").take(100)
+                val dateTime = action.arguments.optString("date_time").take(32)
+                "Ouvrir le calendrier pour créer « $title » le $dateTime"
+            }
+            "open_website" -> "Ouvrir ${action.arguments.optString("url")} dans le navigateur"
+            else -> "Exécuter une action Android"
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Autoriser l’action Android ?")
+            .setMessage("NIANG IA demande l’autorisation de :\n\n$description")
+            .setPositiveButton("Autoriser") { _, _ -> executePendingAction(action, true) }
+            .setNegativeButton("Refuser") { _, _ -> executePendingAction(action, false) }
+            .setOnCancelListener { executePendingAction(action, false) }
+            .show()
+    }
+
+    private fun executePendingAction(action: NativeAction, approved: Boolean) {
+        val pending = pendingAction ?: return
+        pendingAction = null
+        screenScope.launch {
+            try {
+                val result = if (approved) performAndroidAction(action) else "Action refusée par l’utilisateur."
+                val requestHistory = JSONArray(history.toString()).put(pending.reply.userContent)
+                val answer = GeminiClient.continueAfterAction(
+                    pending.apiKey,
+                    requestHistory,
+                    pending.reply.modelContent,
+                    action,
+                    result
+                )
+                saveTurn(pending.reply, pending.keepUserContent)
+                appendHistory(
+                    JSONObject()
+                        .put("role", "model")
+                        .put("parts", JSONArray().put(JSONObject().put("text", answer)))
+                )
+                presentAnswer(answer)
+                setBusy(false, "Prêt")
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                setBusy(false, "L’action n’a pas abouti")
+                showError(error.message ?: "L’action Android a échoué.")
             }
         }
-
-        override fun onCharacteristicChanged(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
-            val data = if (Build.VERSION.SDK_INT >= 33) characteristic.value else @Suppress("DEPRECATION") characteristic.value
-            mainHandler.post { onIncoming(data) }
-        }
-
-        override fun onDescriptorWrite(g: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
-            // CCCD configured; we can now auto-send auth if token is present.
-            val token = tokenInput.text.toString().trim()
-            if (token.isNotEmpty()) mainHandler.post { sendAuth(token) }
-        }
     }
 
-    private fun onIncoming(data: ByteArray?) {
-        if (data == null || data.size < 2) return
-        val bodyLen = ((data[0].toInt() and 0xFF) shl 8) or (data[1].toInt() and 0xFF)
-        if (data.size < 2 + bodyLen) return
-        val body = String(data, 2, bodyLen, StandardCharsets.UTF_8)
-        try {
-            val msg = org.json.JSONObject(body)
-            when (msg.optString("type")) {
-                "auth_ok" -> {
-                    authenticated = true
-                    setStatus("Authenticated. Connected to Kaizumi.")
-                    log("🔑 Authenticated.")
-                }
-                "auth_fail" -> {
-                    authenticated = false
-                    setStatus("Auth failed: ${msg.optJSONObject("payload")?.optString("error")}")
-                    log("⛔ ${msg.optJSONObject("payload")?.optString("error")}")
-                }
-                "response" -> {
-                    val p = msg.optJSONObject("payload")
-                    val text = p?.optString("text") ?: "(no text)"
-                    log("Kaizumi: $text")
-                    setStatus("Reply received.")
-                }
-                "event" -> {
-                    val p = msg.optJSONObject("payload")
-                    val kind = p?.optString("kind") ?: ""
-                    val text = p?.optString("text") ?: ""
-                    when (kind) {
-                        "phase" -> log("Phase: ${p?.optString("state")}")
-                        "tool" -> log("Tool ${p?.optString("name")} ${p?.optString("status")}")
-                        else -> log("[$kind] $text")
-                    }
-                }
-                "pong" -> log("Pong.")
+    private fun performAndroidAction(action: NativeAction): String {
+        val intent = when (action.name) {
+            "open_android_app" -> appIntent(action.arguments.optString("app"))
+            "set_alarm" -> {
+                val hour = action.arguments.optInt("hour", -1)
+                val minute = action.arguments.optInt("minute", -1)
+                require(hour in 0..23 && minute in 0..59) { "L’heure de l’alarme est invalide." }
+                Intent(AlarmClock.ACTION_SET_ALARM)
+                    .putExtra(AlarmClock.EXTRA_HOUR, hour)
+                    .putExtra(AlarmClock.EXTRA_MINUTES, minute)
+                    .putExtra(AlarmClock.EXTRA_MESSAGE, action.arguments.optString("label").take(60))
+                    .putExtra(AlarmClock.EXTRA_SKIP_UI, false)
             }
-        } catch (e: Exception) {
-            log("Malformed reply: $body")
+            "create_reminder" -> {
+                val title = action.arguments.optString("title").trim().take(100)
+                require(title.isNotBlank()) { "Le titre du rappel est manquant." }
+                val dateTime = try {
+                    LocalDateTime.parse(action.arguments.optString("date_time"))
+                } catch (_: DateTimeParseException) {
+                    error("La date du rappel doit être fournie au format AAAA-MM-JJTHH:MM:SS.")
+                }
+                val begin = dateTime.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
+                require(begin > System.currentTimeMillis()) { "La date du rappel doit être dans le futur." }
+                Intent(Intent.ACTION_INSERT, android.provider.CalendarContract.Events.CONTENT_URI)
+                    .putExtra(android.provider.CalendarContract.EXTRA_EVENT_BEGIN_TIME, begin)
+                    .putExtra(android.provider.CalendarContract.EXTRA_EVENT_END_TIME, begin + 30 * 60 * 1000)
+                    .putExtra(android.provider.CalendarContract.Events.TITLE, title)
+            }
+            "open_website" -> {
+                val uri = Uri.parse(action.arguments.optString("url"))
+                require(uri.scheme in setOf("http", "https") && !uri.host.isNullOrBlank() && uri.userInfo == null) {
+                    "Seuls les liens Web publics http/https sont autorisés."
+                }
+                Intent(Intent.ACTION_VIEW, uri)
+            }
+            else -> error("Action Android inconnue.")
         }
+        startActivity(intent)
+        return "Android a accepté la demande d’ouverture, mais l’action finale n’est pas vérifiée. Ne prétends pas qu’elle est terminée."
     }
 
-    private fun sendAuth(token: String) {
-        send(envelope("auth", mapOf("token" to token)))
-    }
-
-    private fun sendCommand() {
-        if (!authenticated) {
-            val token = tokenInput.text.toString().trim()
-            if (token.isNotEmpty()) sendAuth(token)
-            else { setStatus("Authenticate first."); return }
+    private fun appIntent(app: String): Intent {
+        val category = when (app) {
+            "browser" -> Intent.CATEGORY_APP_BROWSER
+            "camera" -> return Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+            "calendar" -> Intent.CATEGORY_APP_CALENDAR
+            "contacts" -> Intent.CATEGORY_APP_CONTACTS
+            "email" -> Intent.CATEGORY_APP_EMAIL
+            "settings" -> return Intent(Settings.ACTION_SETTINGS)
+            "wifi_settings" -> return Intent(Settings.ACTION_WIFI_SETTINGS)
+            "bluetooth_settings" -> return Intent(Settings.ACTION_BLUETOOTH_SETTINGS)
+            else -> error("Cette application n’est pas dans la liste autorisée.")
         }
-        val text = commandInput.text.toString().trim()
-        if (text.isEmpty()) return
-        send(envelope("command", mapOf("text" to text)))
-        log("You: $text")
-        commandInput.text.clear()
+        return Intent(Intent.ACTION_MAIN).addCategory(category)
     }
 
-    private fun envelope(type: String, payload: Map<String, Any?>): ByteArray {
-        val id = msgCounter.incrementAndGet().toString()
-        val msg = org.json.JSONObject()
-            .put("version", PROTOCOL_VERSION)
-            .put("type", type)
-            .put("id", id)
-            .put("payload", org.json.JSONObject(payload))
-        val body = msg.toString().toByteArray(StandardCharsets.UTF_8)
-        val frame = ByteArray(2 + body.size)
-        frame[0] = ((body.size shr 8) and 0xFF).toByte()
-        frame[1] = (body.size and 0xFF).toByte()
-        System.arraycopy(body, 0, frame, 2, body.size)
-        return frame
-    }
-
-    private fun send(data: ByteArray) {
-        val c = writeChar ?: run { setStatus("Not connected."); return }
-        try {
-            gatt?.writeCharacteristic(c, data, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
-        } catch (e: Exception) {
-            setStatus("Send failed: ${e.message}")
+    private fun saveTurn(reply: GeminiReply, keepUserContent: Boolean) {
+        if (keepUserContent) {
+            appendHistory(reply.userContent)
+        } else {
+            appendHistory(textOnlyUserContent(promptFrom(reply.userContent)))
         }
+        appendHistory(reply.modelContent)
     }
 
-    private fun log(s: String) {
-        logView.append("$s\n")
-        // keep last ~200 lines
-        val lines = logView.text.toString().lines()
-        if (lines.size > 200) {
-            logView.text = lines.takeLast(200).joinToString("\n") + "\n"
+    private fun appendHistory(content: JSONObject) {
+        history.put(content)
+        while (history.length() > 16) history.remove(0)
+    }
+
+    private fun textOnlyUserContent(text: String) = JSONObject()
+        .put("role", "user")
+        .put("parts", JSONArray().put(JSONObject().put("text", text)))
+
+    private fun promptFrom(content: JSONObject): String {
+        val parts = content.optJSONArray("parts") ?: return ""
+        return (0 until parts.length())
+            .mapNotNull { parts.optJSONObject(it)?.optString("text") }
+            .joinToString("\n")
+    }
+
+    private fun presentAnswer(text: String) {
+        appendMessage("NIANG IA", text)
+        if (ttsReady) tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "niang-response")
+    }
+
+    private fun appendMessage(speaker: String, text: String) {
+        conversationView.append("\n\n$speaker\n$text")
+        chatScroll.post { chatScroll.fullScroll(ScrollView.FOCUS_DOWN) }
+    }
+
+    private fun displayName(uri: Uri): String {
+        contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            val index = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+            if (index >= 0 && cursor.moveToFirst()) return cursor.getString(index)
         }
+        return uri.lastPathSegment?.substringAfterLast('/') ?: "Document"
     }
 
-    private fun setStatus(s: String) {
-        statusView.text = s
+    private fun setBusy(value: Boolean, status: String) {
+        busy = value
+        sendButton.isEnabled = !value
+        voiceButton.isEnabled = !value
+        statusView.text = status
+    }
+
+    private fun showError(message: String) {
+        statusView.text = getString(R.string.status_error)
+        AlertDialog.Builder(this)
+            .setTitle("NIANG IA")
+            .setMessage(message)
+            .setPositiveButton("OK", null)
+            .show()
     }
 
     override fun onDestroy() {
+        screenScope.cancel()
+        tts?.stop()
+        tts?.shutdown()
         super.onDestroy()
-        disconnect()
     }
+
+    private data class SelectedDocument(val uri: Uri, val mimeType: String, val name: String)
+    private data class PendingAction(
+        val apiKey: String,
+        val reply: GeminiReply,
+        val keepUserContent: Boolean
+    )
 }

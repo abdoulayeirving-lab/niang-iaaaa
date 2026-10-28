@@ -8,7 +8,7 @@
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="Kaizumi Remote"
+        android:text="@string/remote_title"
         android:textSize="22sp"
         android:textStyle="bold"
         android:layout_marginBottom="4dp" />
@@ -17,7 +17,7 @@
         android:id="@+id/statusView"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Idle"
+        android:text="@string/idle"
         android:textSize="14sp"
         android:layout_marginBottom="12dp" />
 
@@ -25,38 +25,40 @@
         android:id="@+id/tokenInput"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:hint="Bridge token (from config/bridge_token.txt)"
+        android:hint="@string/bridge_token_hint"
         android:inputType="textPassword"
+        android:importantForAutofill="no"
         android:layout_marginBottom="8dp" />
 
     <Button
         android:id="@+id/connectBtn"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Connect"
+        android:text="@string/connect"
         android:layout_marginBottom="12dp" />
 
     <EditText
         android:id="@+id/commandInput"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:hint="Command…  (e.g. play some music)"
+        android:hint="@string/command_hint"
         android:imeOptions="actionSend"
         android:inputType="text"
+        android:importantForAutofill="no"
         android:layout_marginBottom="8dp" />
 
     <Button
         android:id="@+id/sendBtn"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Send"
+        android:text="@string/send"
         android:layout_marginBottom="12dp" />
 
     <Button
         android:id="@+id/clearBtn"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Clear log"
+        android:text="@string/clear_log"
         android:layout_marginBottom="12dp" />
 
     <ScrollView

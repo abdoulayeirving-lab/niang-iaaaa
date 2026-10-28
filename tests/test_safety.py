@@ -20,6 +20,8 @@ class RiskClassificationTest(unittest.TestCase):
     def test_low_risk_read_only(self):
         self.assertEqual(safety.classify("web_search", {}), safety.Risk.LOW)
         self.assertEqual(safety.classify("system_status", {}), safety.Risk.LOW)
+        self.assertEqual(safety.classify("set_live_translation", {"action": "enable"}), safety.Risk.LOW)
+        self.assertEqual(safety.classify("proactive_suggestions", {"action": "enable"}), safety.Risk.LOW)
 
     def test_file_delete_is_high(self):
         self.assertEqual(
@@ -46,6 +48,21 @@ class RiskClassificationTest(unittest.TestCase):
     def test_open_app_medium(self):
         self.assertEqual(safety.classify("open_app", {"app_name": "Chrome"}), safety.Risk.MEDIUM)
 
+    def test_live_camera_requires_confirmation_to_stream(self):
+        start = {"action": "start"}
+        self.assertEqual(safety.classify("live_camera", start), safety.Risk.HIGH)
+        self.assertTrue(safety.needs_confirmation("live_camera", start))
+        self.assertIn("webcam frames", safety.describe("live_camera", start))
+        self.assertFalse(safety.needs_confirmation("live_camera", {"action": "stop"}))
+
+    def test_smart_lock_unlock_requires_confirmation(self):
+        args = {"action": "unlock", "device": "front door"}
+        self.assertEqual(safety.classify("smart_home_control", args), safety.Risk.HIGH)
+        self.assertTrue(safety.needs_confirmation("smart_home_control", args))
+        self.assertFalse(safety.needs_confirmation(
+            "smart_home_control", {"action": "lock", "device": "front door"}
+        ))
+
     def test_browser_form_submission_is_high_risk(self):
         args = {"action": "submit_form", "text": "Enregistrer"}
         self.assertEqual(safety.classify("browser_control", args), safety.Risk.HIGH)
@@ -60,6 +77,54 @@ class RiskClassificationTest(unittest.TestCase):
         self.assertEqual(
             safety.classify("browser_control", {"action": "fill_form"}),
             safety.Risk.MEDIUM,
+        )
+
+    def test_video_studio_status_is_read_only_but_analysis_is_medium(self):
+        self.assertEqual(
+            safety.classify("video_studio", {"action": "status"}),
+            safety.Risk.LOW,
+        )
+        self.assertEqual(
+            safety.classify("video_studio", {"action": "analyze"}),
+            safety.Risk.MEDIUM,
+        )
+
+    def test_computer_control_requires_confirmation_except_stop_and_screen_info(self):
+        self.assertEqual(
+            safety.classify("computer_control", {"action": "click", "x": 20, "y": 30}),
+            safety.Risk.HIGH,
+        )
+        self.assertTrue(safety.needs_confirmation(
+            "computer_control", {"action": "click", "x": 20, "y": 30}
+        ))
+        self.assertEqual(
+            safety.classify("computer_control", {"action": "screen_describe"}),
+            safety.Risk.HIGH,
+        )
+        self.assertIn("sent to Gemini", safety.describe(
+            "computer_control", {"action": "screen_describe"}
+        ))
+        self.assertEqual(
+            safety.classify("computer_control", {"action": "screen_info"}),
+            safety.Risk.LOW,
+        )
+        self.assertEqual(
+            safety.classify("computer_control", {"action": "stop"}),
+            safety.Risk.LOW,
+        )
+
+    def test_screen_upload_and_computer_text_input_require_confirmation(self):
+        screen_args = {"angle": "screen", "text": "read the window"}
+        self.assertEqual(safety.classify("screen_process", screen_args), safety.Risk.HIGH)
+        self.assertTrue(safety.needs_confirmation("screen_process", screen_args))
+        self.assertIn("send that image", safety.describe("screen_process", screen_args))
+        self.assertEqual(
+            safety.classify("computer_settings", {"action": "type_text", "value": "private text"}),
+            safety.Risk.HIGH,
+        )
+        self.assertEqual(
+            safety.classify("computer_settings", {"description": "type a message"}),
+            safety.Risk.HIGH,
         )
 
     def test_unknown_tool_defaults_to_medium(self):
@@ -165,6 +230,22 @@ class SanitizeTest(unittest.TestCase):
         self.assertNotIn("student name", output.getvalue())
         self.assertNotIn("Private Student", output.getvalue())
         self.assertNotIn("93841", output.getvalue())
+
+    def test_computer_use_content_is_redacted_from_logs(self):
+        computer_args = safety.sanitize("computer_control", {
+            "action": "type",
+            "text": "private text",
+            "title": "Private document - Word",
+            "x": 20,
+        })
+        self.assertEqual(computer_args["text"], "[private]")
+        self.assertEqual(computer_args["title"], "[private]")
+        self.assertEqual(computer_args["x"], 20)
+        screen_args = safety.sanitize("screen_process", {
+            "angle": "screen",
+            "text": "read confidential page",
+        })
+        self.assertEqual(screen_args["text"], "[private]")
 
 
 if __name__ == "__main__":

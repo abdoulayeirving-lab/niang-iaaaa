@@ -27,6 +27,7 @@ winotify
 pystray
 keyboard
 python-pptx
+python-docx
 openpyxl
 pypdf
 google-auth-oauthlib

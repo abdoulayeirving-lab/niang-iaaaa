@@ -64,13 +64,37 @@ from actions.gmail             import gmail_action
 from actions.pdf_reader        import read_pdf as read_pdf_action, pdf_qa
 from actions.autostart         import autostart_action
 from actions.vision_click      import vision_click_action
-from actions.document_qa       import read_document as read_document_action, document_qa as document_qa_action
+from actions.document_qa import (
+    read_document as read_document_action,
+    document_qa as document_qa_action,
+    search_documents as search_documents_action,
+)
+from actions.data_analysis import analyze_data as analyze_data_action
 from actions.monitor           import monitor_action, check_rules as check_monitor_rules, check_email_watch, email_watch_action
 from actions.guardian          import guardian_action, check_guardian, battery_health
 from actions.translate         import translate_action
+from actions.translation_mode import (
+    read_live_translation,
+    translation_instruction,
+    translation_mode_update,
+)
+from actions.proactive_suggestions import proactive_suggestions as proactive_suggestions_action
+from actions.whatsapp_call import (
+    WhatsAppCallAssistant,
+    whatsapp_call_action,
+)
 from actions.media_control     import media_control_action
 from actions.calendar_actions          import calendar_action
 from actions.drive             import drive_action
+from vision.live_camera        import LiveCamera
+
+
+def _record_proactive_usage(tool_name: str) -> None:
+    try:
+        from actions.proactive_suggestions import record_tool_use
+        record_tool_use(tool_name)
+    except Exception as exc:
+        print(f"[Suggestions] Could not record local usage: {exc}")
 
 
 def get_base_dir():
@@ -299,6 +323,25 @@ def _get_voice_from_memory(memory: dict | None) -> str:
     return voice or "Aoede"
 
 
+def _get_voice_style_from_memory(memory: dict | None) -> str:
+    """Return the saved delivery style, defaulting to natural speech."""
+    prefs = memory.get("preferences", {}) if isinstance(memory, dict) else {}
+    entry = prefs.get("assistant_voice_style")
+    style = entry.get("value") if isinstance(entry, dict) else entry
+    style = str(style or "natural").strip().lower()
+    return style if style in VOICE_STYLE_GUIDANCE else "natural"
+
+
+VOICE_STYLE_GUIDANCE = {
+    "natural": "Speak naturally with balanced pacing and expression.",
+    "calm": "Use a calm, gentle delivery with unhurried pacing.",
+    "warm": "Use a warm, friendly delivery while staying clear and natural.",
+    "energetic": "Use an upbeat, lively delivery without rushing.",
+    "expressive": "Use expressive intonation that fits the meaning of each sentence.",
+    "measured": "Use deliberate pacing and crisp articulation.",
+}
+
+
 def _get_api_key() -> str:
     from api_keys import next_key
     return next_key()
@@ -315,8 +358,24 @@ def _load_system_prompt() -> str:
     except Exception:
         return (
             "You are NIANG IA, a sharp and efficient AI assistant. "
-            "Be concise, direct, and always use the provided tools to complete tasks. "
-            "Never simulate or guess results â€” always call the appropriate tool."
+            "NIANG IA was created and developed by Abdoulaye Niang, its sole creator. "
+            "He is Senegalese, a student, and passionate about artificial intelligence. "
+            "State this clearly when asked who created NIANG IA. Do not claim he created "
+            "the underlying AI model or third-party services. "
+            "Before screen-dependent actions, inspect the current screen; keep task "
+            "context across turns, but let a fresh screen observation override memory. "
+            "Reuse an existing visible page when possible. Desktop captures are "
+            "point-in-time only, not continuous. Report only actions confirmed by "
+            "tool results, and state clearly when a window or tab is inaccessible. "
+            "Never invent facts, sources, links, or results, or claim to have searched, "
+            "read, executed, launched, or verified something unless you actually did. "
+            "Report actions as successful only after a confirming result. State "
+            "uncertainty, ask for missing details, and correct errors openly. "
+            "For important or changing information, use available tools and reliable "
+            "sources; if verification is unavailable, say so. In coding, distinguish "
+            "proposed, changed, executed, and tested work; never claim tests passed "
+            "unless they ran. Be transparent about access and capabilities. "
+            "Be concise, direct, and use the provided tools to complete tasks."
         )
 
 
@@ -364,9 +423,11 @@ TOOL_DECLARATIONS = [
     {
         "name": "open_app",
         "description": (
-            "Opens any application on the Windows computer. "
+            "Quickly opens Windows applications through a hidden CMD start request; "
+            "the recognized name YouTube opens https://www.youtube.com. "
             "Use this whenever the user asks to open, launch, or start any app, "
-            "website, or program. Always call this tool â€” never just say you opened it."
+            "website, or program. Pass only the app/site name, never a CMD command. "
+            "Always call this tool â€” never just say you opened it."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -495,6 +556,9 @@ TOOL_DECLARATIONS = [
         "description": (
             "Navigates and reads websites in the browser, inspects visible headings, "
             "links, buttons, and non-password fields, searches pages, and fills fields. "
+            "Reuse the current page when possible. This tool controls its own managed "
+            "browser page and may not access the user's other browser windows or tabs; "
+            "use screen observation and guarded desktop controls for those windows. "
             "Use inspect to discover the actual interface and available selectors. "
             "Base each next step on the actual page result. "
             "Use submit_form only after describing the exact form submission and "
@@ -639,11 +703,19 @@ TOOL_DECLARATIONS = [
     },
     {
         "name": "computer_control",
-        "description": "Direct computer control: type, click, hotkeys, scroll, move mouse, screenshots, find elements on screen.",
+        "description": (
+            "Guarded local Windows UI control: capture screen, inspect accessible "
+            "controls, move/click/drag/type, wait for visual changes, and verify "
+            "visible outcomes. Observe the current screen before any screen-dependent "
+            "action and again after important changes. The screenshot is a point-in-time "
+            "view, not continuous monitoring. All input or private-screen actions "
+            "require explicit confirmation. Use Ctrl+Alt+Pause as emergency stop "
+            "after enabling it."
+        ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action":      {"type": "STRING", "description": "type | smart_type | click | double_click | right_click | hotkey | press | scroll | move | copy | paste | screenshot | wait | clear_field | focus_window | screen_describe | screen_find | screen_click | random_data | user_data"},
+                "action":      {"type": "STRING", "description": "type | smart_type | click | double_click | right_click | hotkey | press | scroll | move | drag | mouse_down | mouse_up | copy | paste | screenshot | capture_screen | screen_info | active_window | find_ui_elements | wait_for_visual_change | verify_action | stop | enable_emergency_stop | disable_emergency_stop | wait | clear_field | focus_window | screen_describe | screen_find | screen_click | random_data | user_data"},
                 "text":        {"type": "STRING", "description": "Text to type or paste"},
                 "x":           {"type": "INTEGER", "description": "X coordinate"},
                 "y":           {"type": "INTEGER", "description": "Y coordinate"},
@@ -653,11 +725,21 @@ TOOL_DECLARATIONS = [
                 "amount":      {"type": "INTEGER", "description": "Scroll amount (default: 3)"},
                 "seconds":     {"type": "NUMBER",  "description": "Seconds to wait"},
                 "title":       {"type": "STRING",  "description": "Window title for focus_window"},
-                "description": {"type": "STRING",  "description": "Instruction pour screen_describe ou ?l?ment ? localiser pour screen_find/screen_click"},
+                "description": {"type": "STRING",  "description": "Element to find on a fresh screenshot; visual clicks require confidence >= 0.8"},
                 "type":        {"type": "STRING",  "description": "Data type for random_data"},
                 "field":       {"type": "STRING",  "description": "Field for user_data: name|email|city"},
                 "clear_first": {"type": "BOOLEAN", "description": "Clear field before typing (default: true)"},
                 "path":        {"type": "STRING",  "description": "Save path for screenshot"},
+                "image":       {"type": "STRING",  "description": "Local image template for locating a visible UI element"},
+                "button":      {"type": "STRING",  "description": "Mouse button: left | right | middle"},
+                "x1":          {"type": "INTEGER", "description": "Drag start X"},
+                "y1":          {"type": "INTEGER", "description": "Drag start Y"},
+                "x2":          {"type": "INTEGER", "description": "Drag end X"},
+                "y2":          {"type": "INTEGER", "description": "Drag end Y"},
+                "duration":    {"type": "NUMBER",  "description": "Movement duration in seconds"},
+                "timeout":     {"type": "NUMBER",  "description": "Maximum wait duration in seconds"},
+                "threshold":   {"type": "NUMBER",  "description": "Minimum mean pixel difference for screen-change detection"},
+                "expected":    {"type": "STRING",  "description": "Visible accessible label or text to verify"},
             },
             "required": ["action"]
         }
@@ -782,6 +864,24 @@ TOOL_DECLARATIONS = [
         }
     },
     {
+        "name": "set_voice_style",
+        "description": (
+            "Changes and saves NIANG IA's spoken delivery style. "
+            "Use only when the user asks to adjust how the voice sounds; "
+            "this is separate from changing the voice itself or the assistant mood."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "style": {
+                    "type": "STRING",
+                    "description": "One of: natural | calm | warm | energetic | expressive | measured"
+                }
+            },
+            "required": ["style"]
+        }
+    },
+    {
         "name": "save_memory",
         "description": (
             "Save an important personal fact about the user to long-term memory. "
@@ -862,6 +962,7 @@ TOOL_DECLARATIONS = [
         "name": "task_manager",
         "description": (
             "Check or control background agent tasks started via agent_task. "
+            "Reports the current phase, completed step count, and active step. "
             "Use for: 'how is my task going?', 'status of my task', 'cancel that task', "
             "'what tasks are running?'. You get a task_id when you start agent_task."
         ),
@@ -912,6 +1013,27 @@ TOOL_DECLARATIONS = [
                 "mode":   {"type": "STRING", "description": "gesture | air_mouse | volume | motion | posture | objects (for start)"},
                 "text":   {"type": "STRING", "description": "Optional question, OCR text, or face profile name"},
                 "name":   {"type": "STRING", "description": "Face profile name for register_face"}
+            },
+            "required": ["action"]
+        }
+    },
+    {
+        "name": "live_camera",
+        "description": (
+            "Opt-in live webcam input for the current Gemini Live conversation. "
+            "Frames are streamed to Gemini approximately once per second while enabled. "
+            "Only start after the user directly asks to turn on or use the live camera; "
+            "the UI displays a red LIVE CAMERA indicator while streaming. "
+            "Stop immediately when asked. Camera streaming stops automatically when "
+            "the Gemini session disconnects."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {
+                    "type": "STRING",
+                    "description": "start | stop | status"
+                }
             },
             "required": ["action"]
         }
@@ -1021,6 +1143,85 @@ TOOL_DECLARATIONS = [
         }
     },
     {
+        "name": "create_document",
+        "description": (
+            "Creates a complete structured Word document (.docx) in "
+            "Documents/Kaizumi. Generate substantial, organized content from the "
+            "user's request with a title and sections containing prose, bullets, "
+            "and optional tables. After creating, report the exact saved path."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "title": {"type": "STRING", "description": "Document title"},
+                "filename": {"type": "STRING", "description": "Optional filename without extension"},
+                "author": {"type": "STRING", "description": "Optional document author"},
+                "sections": {
+                    "type": "ARRAY",
+                    "description": "Ordered document sections; create enough detail to satisfy the user's request",
+                    "items": {
+                        "type": "OBJECT",
+                        "properties": {
+                            "title": {"type": "STRING", "description": "Section heading"},
+                            "level": {"type": "INTEGER", "description": "Heading level 1-3 (default 1)"},
+                            "body": {"type": "STRING", "description": "Section prose; use newline-separated paragraphs"},
+                            "bullets": {"type": "ARRAY", "items": {"type": "STRING"}, "description": "Optional bullet list"},
+                            "table": {
+                                "type": "OBJECT",
+                                "properties": {
+                                    "headers": {"type": "ARRAY", "items": {"type": "STRING"}},
+                                    "rows": {"type": "ARRAY", "items": {"type": "ARRAY", "items": {"type": "STRING"}}}
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "required": ["title", "sections"]
+        }
+    },
+    {
+        "name": "analyze_data",
+        "description": (
+            "Analyzes a local CSV or Excel .xlsx dataset and creates a Word "
+            "report with row counts, missing values, numeric min/max/mean/median, "
+            "and most frequent categories. Analysis is deterministic and local; "
+            "dataset contents are not sent to Gemini. Processes at most 10,000 "
+            "rows, 50 columns, and 20 MB. Use when the user asks for an analysis "
+            "report from a data file."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "source": {"type": "STRING", "description": "Path or filename of a local CSV or .xlsx file"},
+                "report_name": {"type": "STRING", "description": "Optional Word report filename without extension"}
+            },
+            "required": ["source"]
+        }
+    },
+    {
+        "name": "video_studio",
+        "description": (
+            "NIANG IA Video Studio: inspect a local video with OpenCV, report "
+            "metadata and sampled visual-change candidates, save a local JSON "
+            "report, or create a new polished promo edit with phrase-aligned "
+            "smooth-wipe/dissolve transitions, synchronized audio crossfades, "
+            "burnt-in captions, subtle reframing, and normalized audio. Edit "
+            "requires a local video with subtitles and CapCut-bundled FFmpeg; "
+            "it never changes the source and does not create a CapCut project. "
+            "Media is not uploaded. Use status to check available editor support."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "status | analyze | edit"},
+                "source": {"type": "STRING", "description": "Full local video path; required for analyze or edit"},
+                "style": {"type": "STRING", "description": "Optional intended style; not yet applied automatically"}
+            },
+            "required": ["action"]
+        }
+    },
+    {
         "name": "create_spreadsheet",
         "description": (
             "Creates an Excel (.xlsx) spreadsheet with headers and data rows and saves it "
@@ -1042,18 +1243,20 @@ TOOL_DECLARATIONS = [
     {
         "name": "smart_home_control",
         "description": (
-            "Controls smart home devices (lights, switches, plugs, thermostats) registered "
-            "in config/smart_home.json. Supports Home Assistant, a custom webhook, or a "
-            "simulated mode for testing. Actions: turn_on, turn_off, toggle, set_level, "
-            "status. Use for 'turn on the living room light', 'set brightness to 50', "
-            "'what is the state of the AC'."
+            "Controls configured lights, switches, fans, covers, thermostats, locks, "
+            "media players, scenes, and Home Assistant areas. Actions: turn_on, turn_off, "
+            "toggle, set_level, set_temperature, open_cover, close_cover, lock, unlock, "
+            "activate_scene, status. To control a whole room, pass its configured area "
+            "name/id and turn_on or turn_off. Destructive or sensitive actions require "
+            "explicit confirmation."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action": {"type": "STRING", "description": "turn_on | turn_off | toggle | set_level | status (default: status)"},
+                "action": {"type": "STRING", "description": "turn_on | turn_off | toggle | set_level | set_temperature | open_cover | close_cover | lock | unlock | activate_scene | status"},
                 "device": {"type": "STRING", "description": "Device id or name from smart_home.json"},
-                "value":  {"type": "NUMBER", "description": "Level for set_level (e.g. brightness percent 0-100)"}
+                "area":   {"type": "STRING", "description": "Configured Home Assistant area id/name for turn_on or turn_off"},
+                "value":  {"type": "NUMBER", "description": "Brightness percent for set_level, or temperature for set_temperature"}
             },
             "required": ["action"]
         }
@@ -1225,6 +1428,26 @@ TOOL_DECLARATIONS = [
         }
     },
     {
+        "name": "search_documents",
+        "description": (
+            "Searches local documents in Documents, Downloads, and Desktop, or "
+            "in one folder the user specifies. Supports PDF, Word, PowerPoint, "
+            "Excel, CSV, text, Markdown, HTML, JSON, XML, and log files. "
+            "Search is local and bounded; only matching excerpts are returned "
+            "to Gemini to answer the user's query. Tell the user that matching "
+            "excerpts are shared with Gemini. Never search outside the requested "
+            "folders or the default personal folders."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "query": {"type": "STRING", "description": "Terms or question to search for in documents"},
+                "folder": {"type": "STRING", "description": "Optional: Documents | Downloads | Desktop | all | or a specific folder path"}
+            },
+            "required": ["query"]
+        }
+    },
+    {
         "name": "email_watch",
         "description": (
             "Turns on or off an automatic watcher that alerts the user as soon "
@@ -1255,6 +1478,67 @@ TOOL_DECLARATIONS = [
                 "from":  {"type": "STRING", "description": "Optional source language (auto-detected if omitted)"}
             },
             "required": ["text"]
+        }
+    },
+    {
+        "name": "set_live_translation",
+        "description": (
+            "Enables, disables, or checks continuous spoken interpretation for "
+            "the live microphone conversation. When enabled, NIANG IA translates "
+            "each utterance into the selected target language instead of answering "
+            "it. Actions: enable, disable, status. Source language is optional "
+            "and defaults to automatic detection."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "enable | disable | status"},
+                "from": {"type": "STRING", "description": "Optional source language; omitted means auto-detect"},
+                "to": {"type": "STRING", "description": "Target language, required when enabling"}
+            },
+            "required": ["action"]
+        }
+    },
+    {
+        "name": "proactive_suggestions",
+        "description": (
+            "Manages opt-in personalized suggestions based on repeated tool use. "
+            "Actions: enable, disable, status, suggest. When enabled, NIANG IA "
+            "stores only allow-listed tool names and dates locally for up to 30 "
+            "days, never tool arguments or conversation content. Suggestions "
+            "appear in the daily briefing and require repeated use on at least "
+            "three different days."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "enable | disable | status | suggest"}
+            },
+            "required": ["action"]
+        }
+    },
+    {
+        "name": "whatsapp_call",
+        "description": (
+            "Manual-assist WhatsApp calling only. It never searches contacts, "
+            "dials, or hangs up. The user must select and verify the exact "
+            "WhatsApp contact/number, personally connect the call, and tell the "
+            "other person NIANG IA is an AI. Actions: prepare, devices, status, "
+            "connect, mute, resume, stop. 'connect' streams live call audio and "
+            "selected display names to Gemini and requires explicit confirmation. "
+            "NIANG IA does not retain local call transcripts or recordings; "
+            "provider policies apply. A successful Gemini connection does not verify "
+            "the WhatsApp call state."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "prepare | devices | status | connect | mute | resume | stop"},
+                "contact_name": {"type": "STRING", "description": "Exact WhatsApp contact name manually verified by the user; required for connect"},
+                "contact_confirmed": {"type": "BOOLEAN", "description": "True only after the user selected the exact contact/number, the call is connected, and the person was told NIANG IA is an AI"},
+                "owner_name": {"type": "STRING", "description": "Optional authorized user's name for NIANG IA's introduction"}
+            },
+            "required": ["action"]
         }
     },
     {
@@ -1373,6 +1657,7 @@ for _decl in TOOL_DECLARATIONS:
         "task_manager", "code_helper", "game_updater",
         "computer_settings", "computer_control", "calendar", "drive",
         "smart_home_control", "browser_control", "send_message", "autostart",
+        "whatsapp_call",
     }:
         _decl.setdefault("parameters", {}).setdefault("properties", {})[
             "confirm"
@@ -1417,6 +1702,14 @@ class KaizumiLive:
         self.enable_bluetooth = enable_bluetooth
         self._schedules     = []
         self._sched_lock    = threading.Lock()
+        self._live_camera = LiveCamera()
+        self._whatsapp_call = WhatsAppCallAssistant(
+            state_callback=lambda state, detail: self.ui.set_whatsapp_call_status(
+                state.value, detail,
+            ),
+            model=LIVE_MODEL,
+        )
+        self.ui.on_whatsapp_call_control = self._whatsapp_call_control
 
         self.telegram_token = None
         self.telegram_chat  = None
@@ -1744,6 +2037,75 @@ class KaizumiLive:
             self.ui.set_persona(*self._persona_info())
             return f"Mood set to: {mood}."
 
+        def _set_voice_style(args):
+            style = str(args.get("style", "")).strip().lower()
+            if style not in VOICE_STYLE_GUIDANCE:
+                return ("Invalid voice style. Use: natural, calm, warm, "
+                        "energetic, expressive, or measured.")
+            update_memory({"preferences": {"assistant_voice_style": {"value": style}}})
+            self._schedule_session_reload()
+            return f"Voice delivery style set to: {style}."
+
+        def _set_live_translation(args):
+            updates, result = translation_mode_update(args)
+            if result == "status":
+                enabled, source, target = read_live_translation(load_memory())
+                if not enabled:
+                    return "Live translation is disabled."
+                return (
+                    f"Live translation is enabled: "
+                    f"{source or 'auto-detect'} to {target}."
+                )
+            if updates is None:
+                return result
+            update_memory(updates)
+            self._schedule_session_reload()
+            return result + " Reconnecting to apply the translation mode."
+
+        def _proactive_suggestions(args):
+            return proactive_suggestions_action(parameters=args)
+
+        def _whatsapp_call(args):
+            memory = load_memory()
+            return whatsapp_call_action(
+                parameters=args,
+                assistant=self._whatsapp_call,
+                voice_name=_get_voice_from_memory(memory),
+                voice_guidance=VOICE_STYLE_GUIDANCE[
+                    _get_voice_style_from_memory(memory)
+                ],
+            )
+
+        def _live_camera_control(args):
+            action = str(args.get("action", "status")).strip().lower()
+            if action == "start":
+                from actions.vision_gesture import _service as vision_service
+                if vision_service.is_running:
+                    raise RuntimeError(
+                        "Stop the other vision camera mode before starting live camera."
+                    )
+                self._live_camera.start()
+                ui.set_live_camera_status(True)
+                ui.set_vision_signal("LIVE CAMERA: frames are streamed to Gemini")
+                return "Live camera is on. Webcam frames are being sent to Gemini."
+            if action == "stop":
+                self._live_camera.stop()
+                ui.set_live_camera_status(False)
+                ui.set_vision_signal("Live camera is off")
+                return "Live camera is off. No more webcam frames are being sent."
+            if action == "status":
+                active = self._live_camera.is_active
+                return f"Live camera is {'on' if active else 'off'}."
+            return "Unknown live camera action. Use start, stop, or status."
+
+        def _vision_gesture(args):
+            action = str(args.get("action", "")).strip().lower()
+            if self._live_camera.is_active and action not in ("status", "stop"):
+                raise RuntimeError(
+                    "Stop live camera before starting another camera operation."
+                )
+            return vision_gesture(parameters=args, player=ui, speak=speak)
+
         def _api_add_key(args):
             import api_keys
             key = str(args.get("key", "")).strip()
@@ -1809,12 +2171,29 @@ class KaizumiLive:
                 sheet_name=args.get("sheet_name", "Sheet1"),
             )
 
+        def _office_docx(args):
+            from actions.office_builder import create_document as _make_docx
+            return _make_docx(
+                title=args.get("title", ""),
+                sections=args.get("sections") or [],
+                filename=args.get("filename"),
+                author=args.get("author", "NIANG IA"),
+            )
+
+        def _analyze_data(args):
+            return analyze_data_action(parameters=args, response=None, player=ui)
+
+        def _video_studio(args):
+            from actions.video_studio import video_studio_action
+            return video_studio_action(parameters=args)
+
         def _smart_home(args):
             from actions.smart_home import smart_home_control as _sh_control
             return _sh_control(
                 action=args.get("action", "status"),
                 device=args.get("device"),
                 value=args.get("value"),
+                area=args.get("area"),
             )
 
         def _browser_control(args):
@@ -1856,7 +2235,7 @@ class KaizumiLive:
             "system_status":     (lambda a: system_status(parameters=a, player=ui), 45),
             "task_manager":      (lambda a: task_manager(parameters=a, player=ui), 60),
             "clipboard":         (lambda a: clipboard_action(parameters=a, player=ui), 45),
-            "vision_gesture":    (lambda a: vision_gesture(parameters=a, player=ui, speak=speak), 120),
+            "vision_gesture":    (_vision_gesture, 120),
             "recall_memory":     (_recall, 20),
             "forget_memory":     (_forget, 10),
             "clear_memory":      (_clear_mem, 10),
@@ -1869,6 +2248,11 @@ class KaizumiLive:
             "set_mode":          (_set_mode, 10),
             "set_voice":         (_set_voice, 10),
             "set_mood":          (_set_mood, 10),
+            "set_voice_style":   (_set_voice_style, 10),
+            "set_live_translation": (_set_live_translation, 10),
+            "proactive_suggestions": (_proactive_suggestions, 10),
+            "whatsapp_call":      (_whatsapp_call, 30),
+            "live_camera":       (_live_camera_control, 15),
             "gmail":             (lambda a: gmail_action(parameters=a, response=None, player=ui), 60),
             "read_pdf":          (lambda a: read_pdf_action(parameters=a, response=None, player=ui), 60),
             "pdf_qa":            (lambda a: pdf_qa(parameters=a, response=None, player=ui), 90),
@@ -1881,6 +2265,7 @@ class KaizumiLive:
             "media_control":     (lambda a: media_control_action(parameters=a, response=None, player=ui), 20),
             "read_document":     (lambda a: read_document_action(parameters=a, response=None, player=ui), 45),
             "document_qa":       (lambda a: document_qa_action(parameters=a, response=None, player=ui), 90),
+            "search_documents":  (lambda a: search_documents_action(parameters=a, response=None, player=ui), 180),
             "api_add_key":       (_api_add_key, 15),
             "google_auth":       (_google_auth, 30),
             "google_auth_status": (_google_auth_status, 15),
@@ -1888,6 +2273,9 @@ class KaizumiLive:
             "drive":             (lambda a: drive_action(parameters=a, response=None, player=ui), 60),
             "schedule":          (lambda a: self._schedule(a), 30),
             "create_presentation": (_office_pptx, 60),
+            "create_document":     (_office_docx, 60),
+            "analyze_data":        (_analyze_data, 180),
+            "video_studio":        (_video_studio, 90),
             "create_spreadsheet":  (_office_xlsx, 60),
             "smart_home_control":  (_smart_home, 30),
         }
@@ -1940,7 +2328,10 @@ class KaizumiLive:
         else:
             print(f"[Telegram] ðŸ”§ {name} {_sanitize(name, args)}")
         fn, timeout = entry
-        return await run_sync_tool(lambda: fn(args), name, timeout=timeout)
+        result = await run_sync_tool(lambda: fn(args), name, timeout=timeout)
+        if result.ok:
+            _record_proactive_usage(name)
+        return result
 
     def _build_config(self) -> types.LiveConnectConfig:
         from datetime import datetime
@@ -1949,6 +2340,7 @@ class KaizumiLive:
         mem_str    = format_memory_for_prompt(memory)
         mode, mood = _get_style_from_memory(memory)
         voice      = _get_voice_from_memory(memory)
+        voice_style = _get_voice_style_from_memory(memory)
         sys_prompt = _load_system_prompt()
 
         now      = datetime.now()
@@ -1964,10 +2356,15 @@ class KaizumiLive:
             f"Mode: {mode}\n"
             f"Mood: {mood}\n"
             f"Voice: {voice}\n"
+            f"Voice delivery: {VOICE_STYLE_GUIDANCE[voice_style]}\n"
+            "Apply this delivery without changing the selected voice.\n"
             "Follow the mode/mood rules from the system prompt.\n\n"
         )
 
         parts = [time_ctx]
+        translation_ctx = translation_instruction(memory)
+        if translation_ctx:
+            parts.append(translation_ctx)
         recent_ctx = self._rolling_digest(limit=1400)
         if recent_ctx:
             parts.append(
@@ -1977,6 +2374,19 @@ class KaizumiLive:
         if mem_str:
             parts.append(mem_str)
         parts.append(style_ctx)
+        parts.append(
+            "[WINDOWS COMPUTER-USE PROTOCOL]\n"
+            "For a multi-step desktop task, observe the current screen/window first, "
+            "identify controls through UI Automation when available, and act on one "
+            "confirmed step at a time. Use only coordinates from a fresh screen "
+            "observation. After each meaningful action, wait for a visual change or "
+            "verify an accessible label; execution alone does not prove success. "
+            "Never claim a click, keystroke, save, or export succeeded without "
+            "observable verification. Do not invent confirmation tokens. A "
+            "computer_control screen description/search sends the captured image "
+            "to Gemini and requires explicit confirmation. Use stop or the enabled "
+            "Ctrl+Alt+Pause emergency shortcut immediately when asked to stop.\n\n"
+        )
         parts.append(sys_prompt)
 
         return types.LiveConnectConfig(
@@ -2105,7 +2515,7 @@ class KaizumiLive:
         if needs_confirmation(name, args, confirm=confirm, confirm_token=confirm_token):
             token = issue_confirmation_token(name, args) if not confirm else ""
             print(f"[NIANG IA] â›” {name} blocked â€” confirmation required")
-            log_tool(name, args, error="confirmation required")
+            log_tool(name, sanitize(name, args), error="confirmation required")
             if not self.ui.muted:
                 self.ui.set_state("LISTENING")
             return types.FunctionResponse(
@@ -2129,30 +2539,87 @@ class KaizumiLive:
                 from agent.resilience import run_sync_tool
                 r = await run_sync_tool(lambda: handler(args), name, timeout=timeout)
                 result = r.content or f"{name} done."
+                if r.ok:
+                    _record_proactive_usage(name)
             else:
                 result = f"Unknown tool: {name}"
 
         except Exception as e:
             result = f"Tool '{name}' failed: {e}"
-            traceback.print_exc()
-            log_tool(name, args, error=e)
-            self.ui.write_log(f"ERR: {name} â€” {str(e)[:120]}")
+            private_ui_tool = name in {
+                "computer_control", "computer_settings", "screen_process",
+            }
+            if private_ui_tool:
+                print("[NIANG IA] Computer-use action raised an error [details redacted]")
+            else:
+                traceback.print_exc()
+            if name == "whatsapp_call":
+                log_tool(name, sanitize(name, args), error="call action failed")
+            elif private_ui_tool:
+                log_tool(name, sanitize(name, args), error="computer-use action failed")
+            else:
+                log_tool(name, args, error=e)
+            if name == "whatsapp_call":
+                self.ui.write_log("ERR: WhatsApp call audio action failed.")
+            elif private_ui_tool:
+                self.ui.write_log("ERR: Computer-use action failed.")
+            else:
+                self.ui.write_log(f"ERR: {name} â€” {str(e)[:120]}")
             try:
-                self.speak(f"Sir, {name} hit an error. {str(e)[:80]}")
+                if private_ui_tool:
+                    self.speak("The computer-use action failed.")
+                else:
+                    self.speak(f"Sir, {name} hit an error. {str(e)[:80]}")
             except Exception:
                 pass
-            self.broadcast_remote({"type": "tool", "name": name, "status": "error",
-                                   "summary": str(e)[:120]})
+            self.broadcast_remote({
+                "type": "tool",
+                "name": name,
+                "status": "error",
+                "summary": (
+                    "WhatsApp call audio action failed."
+                    if name == "whatsapp_call"
+                    else "Computer-use action failed."
+                    if private_ui_tool
+                    else str(e)[:120]
+                ),
+            })
 
-        self.broadcast_remote({"type": "tool", "name": name, "status": "done",
-                               "summary": str(result)[:120]})
+        self.broadcast_remote({
+            "type": "tool",
+            "name": name,
+            "status": "done",
+            "summary": (
+                "WhatsApp call audio action completed."
+                if name == "whatsapp_call"
+                else "Computer-use action completed; result details are private."
+                if name in {"computer_control", "computer_settings", "screen_process"}
+                else str(result)[:120]
+            ),
+        })
 
         if not self.ui.muted:
             self.ui.set_state("LISTENING")
 
-        log_tool(name, args, result=result)
+        if name in {
+            "whatsapp_call", "computer_control", "computer_settings", "screen_process",
+        }:
+            log_tool(
+                name,
+                sanitize(name, args),
+                result=(
+                    "[call action result redacted]"
+                    if name == "whatsapp_call" else "[computer-use result redacted]"
+                ),
+            )
+        else:
+            log_tool(name, args, result=result)
         if name == "browser_control":
             print(f"[NIANG IA] browser_control completed")
+        elif name == "whatsapp_call":
+            print("[NIANG IA] WhatsApp call audio action completed [details redacted]")
+        elif name in {"computer_control", "computer_settings", "screen_process"}:
+            print(f"[NIANG IA] {name} completed [details redacted]")
         else:
             print(f"[NIANG IA] ðŸ“¤ {name} â†’ {str(result)[:80]}")
 
@@ -2161,6 +2628,15 @@ class KaizumiLive:
             id=fc.id, name=name,
             response={"result": result}
         )
+
+    def _whatsapp_call_control(self, action: str) -> None:
+        if action == "mute":
+            result = self._whatsapp_call.mute()
+        elif action == "stop":
+            result = self._whatsapp_call.stop()
+        else:
+            return
+        self.ui.write_log(f"SYS: {result}")
 
     def _schedule(self, args: dict) -> str:
         """In-app timed actions: when they fire, NIANG IA speaks + notifies the
@@ -2623,6 +3099,30 @@ class KaizumiLive:
                     audio=types.Blob(data=msg["data"], mime_type=msg["mime_type"])
                 )
 
+    async def _stream_live_camera(self):
+        last_sequence = -1
+        last_sent = 0.0
+        try:
+            while True:
+                if not self._live_camera.is_active:
+                    await asyncio.sleep(0.2)
+                    continue
+                now = time.monotonic()
+                if now - last_sent >= 1.0:
+                    frame = await asyncio.to_thread(self._live_camera.latest_jpeg)
+                    if frame is not None and frame[0] != last_sequence:
+                        async with self._send_lock:
+                            await self.session.send_realtime_input(
+                                video=types.Blob(data=frame[1], mime_type="image/jpeg")
+                            )
+                        last_sequence = frame[0]
+                        last_sent = now
+                await asyncio.sleep(0.1)
+        finally:
+            if await asyncio.to_thread(self._live_camera.stop):
+                self.ui.set_live_camera_status(False)
+                self.ui.set_vision_signal("Live camera stopped: Gemini session disconnected")
+
     async def _listen_audio(self):
         print("[NIANG IA] ðŸŽ¤ Mic started")
         loop = asyncio.get_event_loop()
@@ -2862,6 +3362,7 @@ class KaizumiLive:
                         tg.create_task(self._watch_speaking())
                         tg.create_task(self._scheduler_loop())
                         tg.create_task(self._monitor_loop())
+                        tg.create_task(self._stream_live_camera())
 
                 except Exception as e:
                     log(f"Session error: {e}", level="ERROR")

@@ -14,6 +14,7 @@ checks across the codebase.
 """
 
 import json
+import hashlib
 import secrets
 import threading
 from enum import IntEnum
@@ -38,9 +39,15 @@ TOOL_RISK = {
     "pdf_qa":            Risk.LOW,
     "read_document":     Risk.LOW,
     "document_qa":       Risk.LOW,
+    "search_documents":  Risk.MEDIUM,
+    "analyze_data":      Risk.MEDIUM,
+    "video_studio":      Risk.MEDIUM,
     "monitor_alerts":    Risk.LOW,
     "pc_health":         Risk.LOW,
     "translate":         Risk.LOW,
+    "set_live_translation": Risk.LOW,
+    "proactive_suggestions": Risk.LOW,
+    "whatsapp_call":       Risk.LOW,
     "flight_finder":     Risk.LOW,
     "youtube_video":     Risk.LOW,
     "daily_briefing":    Risk.LOW,
@@ -69,6 +76,7 @@ TOOL_RISK = {
     "computer_settings": Risk.MEDIUM,
     "computer_control":  Risk.MEDIUM,
     "vision_gesture":    Risk.MEDIUM,
+    "live_camera":       Risk.MEDIUM,
     "vision_click":      Risk.MEDIUM,
     "screen_process":    Risk.LOW,
     "smart_home_control": Risk.MEDIUM,
@@ -98,6 +106,28 @@ TOOL_RISK = {
 # (tool_name, action) -> Risk. High-impact / irreversible actions are HIGH.
 # `None` as the action key means "any other action" for that tool.
 _ACTION_RISK = {
+    "video_studio": {
+        "status": Risk.LOW,
+        "analyze": Risk.MEDIUM,
+        None: Risk.MEDIUM,
+    },
+    "computer_control": {
+        "screen_size": Risk.LOW,
+        "screen_info": Risk.LOW,
+        "get_screen_info": Risk.LOW,
+        "stop": Risk.LOW,
+        "mouse_up": Risk.LOW,
+        "list_windows": Risk.HIGH,
+        "windows": Risk.HIGH,
+        "what_is_open": Risk.HIGH,
+        None: Risk.HIGH,
+    },
+    "live_camera": {
+        "start": Risk.HIGH,
+        "stop": Risk.LOW,
+        "status": Risk.LOW,
+        None: Risk.HIGH,
+    },
     "file_controller": {
         "delete": Risk.HIGH,
         "move": Risk.HIGH,
@@ -172,6 +202,17 @@ _ACTION_RISK = {
         "submit_form": Risk.HIGH,
         None: Risk.MEDIUM,
     },
+    "smart_home_control": {
+        "unlock": Risk.HIGH,
+        None: Risk.MEDIUM,
+    },
+    "whatsapp_call": {
+        "connect": Risk.HIGH,
+        "join": Risk.HIGH,
+        "resume": Risk.HIGH,
+        "unmute": Risk.HIGH,
+        None: Risk.LOW,
+    },
 }
 
 # Params that may carry the user's explicit "yes" — the model must set this to
@@ -207,6 +248,12 @@ def _fingerprint(name: str, args: dict | None) -> str:
     """Canonical fingerprint of a blocked call, so a token can't be replayed
     against a different tool or different arguments."""
     safe = sanitize(name, args or {})
+    if name == "whatsapp_call":
+        for key in ("contact_name", "owner_name"):
+            if args and key in args:
+                safe[f"{key}_fingerprint"] = hashlib.sha256(
+                    str(args[key]).encode("utf-8")
+                ).hexdigest()
     return json.dumps({"name": name, "args": safe}, sort_keys=True, default=str)
 
 
@@ -238,6 +285,21 @@ def classify(name: str, args: dict | None) -> Risk:
     """Return the risk level for a concrete tool call (name + args)."""
     args = args or {}
     action = str(args.get("action", "")).lower().strip()
+    if name == "screen_process":
+        return Risk.HIGH
+    if name == "computer_settings":
+        action = action.replace(" ", "_").replace("-", "_")
+        if not action and args.get("description"):
+            return Risk.HIGH
+        if action in {
+            "type_text", "write_on_screen", "type", "write", "press_key",
+            "screenshot", "take_screenshot", "capture_screen",
+            "copy", "paste", "cut", "save", "save_file", "close_tab",
+            "enter", "press_enter",
+            "close_app", "close_window", "quit_app", "exit_app", "kill_app",
+            "run", "open_run",
+        }:
+            return Risk.HIGH
     overrides = _ACTION_RISK.get(name)
     if overrides is not None:
         risk = overrides.get(action, overrides.get(None))
@@ -266,6 +328,45 @@ def describe(name: str, args: dict | None) -> str:
     args = args or {}
     action = str(args.get("action", "")).lower().strip()
 
+    if name == "whatsapp_call" and action in {"connect", "join"}:
+        contact = str(args.get("contact_name", "")).strip() or "the manually selected contact"
+        return (
+            f"join the WhatsApp call with {contact}; live call audio and the "
+            "selected display names will be sent to Gemini for AI conversation"
+        )
+    if name == "whatsapp_call" and action == "resume":
+        return "resume sending live WhatsApp call audio to Gemini and the AI voice to the call"
+    if name == "computer_control":
+        if action in {"screen_describe", "screen_find"}:
+            return (
+                f"{action.replace('_', ' ')} using a screenshot of the current desktop; "
+                "the screenshot will be sent to Gemini for visual analysis"
+            )
+        if action == "screen_click":
+            return (
+                "send a screenshot of the current desktop to Gemini to locate a target, "
+                "then click it only if visual confidence is at least 0.8"
+            )
+        if action in {"screenshot", "copy", "user_data"}:
+            return f"read potentially private computer data ({action})"
+        return f"control or inspect the Windows interface ({action or 'unspecified action'})"
+    if name == "screen_process":
+        source = str(args.get("angle", "screen")).lower()
+        return (
+            f"capture the current {'webcam' if source == 'camera' else 'screen'} and "
+            "send that image and the question to Gemini for analysis"
+        )
+    if name == "computer_settings":
+        action = action.replace(" ", "_").replace("-", "_")
+    if name == "computer_settings" and not action and args.get("description"):
+        return "ask Gemini to classify the computer-control instruction, then perform its selected action"
+    if name == "computer_settings" and action in {"screenshot", "take_screenshot", "capture_screen"}:
+        return "capture and analyze the current screen; its image will be sent to Gemini"
+    if name == "computer_settings" and action in {
+        "type_text", "write_on_screen", "type", "write", "press_key", "paste",
+    }:
+        return f"type text or send a key to the active Windows application ({action})"
+
     if name == "file_controller":
         target = args.get("name") or args.get("path") or "item"
         verbs = {
@@ -278,6 +379,9 @@ def describe(name: str, args: dict | None) -> str:
             "organize_desktop": "organize desktop files",
         }
         return verbs.get(action, f"{action} {target}")
+
+    if name == "live_camera" and action == "start":
+        return "start streaming webcam frames to Gemini for this conversation"
 
     if name == "cmd_control":
         cmd = args.get("command") or args.get("cmd") or args.get("text") or ""
@@ -310,7 +414,8 @@ def describe(name: str, args: dict | None) -> str:
         return f"submit the form using {target}; this may save or change website data"
 
     if name == "smart_home_control":
-        return f"{action} the {args.get('device', 'smart home device')}"
+        target = args.get("area") or args.get("device", "smart home device")
+        return f"{action} {target}"
 
     # Fallback: tool name + first couple of args
     brief = " ".join(str(v) for v in args.values())[:60]
@@ -331,7 +436,14 @@ def sanitize(name: str, args: dict | None) -> dict:
     safe = {}
     for k, v in args.items():
         lk = str(k).lower()
-        if lk in _SECRET_KEYS or "token" in lk or "key" in lk or "secret" in lk:
+        if (
+            name in {"computer_control", "computer_settings", "screen_process"}
+            and lk in {"text", "value", "description", "expected", "path", "image", "title"}
+        ):
+            safe[k] = "[private]"
+        elif name == "whatsapp_call" and lk in {"contact_name", "owner_name"}:
+            safe[k] = "[private]"
+        elif lk in _SECRET_KEYS or "token" in lk or "key" in lk or "secret" in lk:
             safe[k] = "***"
         elif isinstance(v, dict):
             safe[k] = sanitize(name, v)

@@ -25,6 +25,7 @@ def get_base_dir() -> Path:
 
 BASE_DIR         = get_base_dir()
 MEMORY_PATH      = BASE_DIR / "memory" / "long_term.json"
+INSTALLER_PROFILE_PATH = BASE_DIR / "memory" / "installer_profile.json"
 _lock            = Lock()
 MAX_VALUE_LENGTH = 400
 
@@ -59,22 +60,42 @@ def _empty_memory() -> dict:
 
 
 def load_memory() -> dict:
-    if not MEMORY_PATH.exists():
+    if not MEMORY_PATH.exists() and not INSTALLER_PROFILE_PATH.exists():
         return _empty_memory()
 
     with _lock:
-        try:
-            data = json.loads(MEMORY_PATH.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                base = _empty_memory()
-                for key in base:
+        data = _empty_memory()
+        if MEMORY_PATH.exists():
+            try:
+                loaded = json.loads(MEMORY_PATH.read_text(encoding="utf-8"))
+                if not isinstance(loaded, dict):
+                    return data
+                data.update(loaded)
+                for key in _empty_memory():
                     if key not in data:
                         data[key] = {}
+            except (OSError, json.JSONDecodeError) as e:
+                print(f"[Memory] ⚠️ Load error: {e}")
                 return data
-            return _empty_memory()
-        except Exception as e:
-            print(f"[Memory] ⚠️ Load error: {e}")
-            return _empty_memory()
+
+        if not INSTALLER_PROFILE_PATH.exists():
+            return data
+
+        try:
+            profile = json.loads(INSTALLER_PROFILE_PATH.read_text(encoding="utf-8-sig"))
+            if not isinstance(profile, dict):
+                raise ValueError("Installer profile must be a JSON object")
+            _recursive_update(data, profile)
+            tmp = MEMORY_PATH.with_suffix(MEMORY_PATH.suffix + ".tmp")
+            tmp.write_text(
+                json.dumps(data, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            os.replace(tmp, MEMORY_PATH)
+            INSTALLER_PROFILE_PATH.unlink()
+        except (OSError, json.JSONDecodeError, ValueError, TypeError) as e:
+            print(f"[Memory] ⚠️ Could not import installer profile: {e}")
+        return data
 
 
 def save_memory(memory: dict) -> None:

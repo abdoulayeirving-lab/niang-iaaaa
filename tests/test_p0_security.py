@@ -120,15 +120,18 @@ class ApiKeysExistTest(unittest.TestCase):
         import ui
         self._tmp = tempfile.TemporaryDirectory()
         self._old_file = ui.API_FILE
+        self._old_installer_key_file = ui.INSTALLER_API_KEY_FILE
         self._old_env = os.environ.get("KAIZUMI_GEMINI_API_KEY")
         self._old_env2 = os.environ.get("KAIZUMI_GEMINI_API_KEYS")
         os.environ.pop("KAIZUMI_GEMINI_API_KEY", None)
         os.environ.pop("KAIZUMI_GEMINI_API_KEYS", None)
         ui.API_FILE = Path(self._tmp.name) / "api_keys.json"
+        ui.INSTALLER_API_KEY_FILE = Path(self._tmp.name) / "installer_gemini_key.txt"
         self.ui = ui
 
     def tearDown(self):
         self.ui.API_FILE = self._old_file
+        self.ui.INSTALLER_API_KEY_FILE = self._old_installer_key_file
         if self._old_env is not None:
             os.environ["KAIZUMI_GEMINI_API_KEY"] = self._old_env
         if self._old_env2 is not None:
@@ -157,6 +160,10 @@ class ApiKeysExistTest(unittest.TestCase):
 
     def test_valid_key_list_is_ready(self):
         self._write('{"gemini_api_keys": ["AIzaSyB-valid"]}')
+        self.assertTrue(self._exists())
+
+    def test_installer_key_file_is_ready(self):
+        self.ui.INSTALLER_API_KEY_FILE.write_text("AQexample-key", encoding="utf-8")
         self.assertTrue(self._exists())
 
     def test_malformed_json_is_not_ready(self):

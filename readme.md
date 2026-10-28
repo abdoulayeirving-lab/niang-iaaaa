@@ -46,14 +46,15 @@ external APIs. It is **free to self-host** — you only need a Gemini API key
 | Area | What Kaizumi does |
 |------|-------------------|
 | 🎙️ **Real-time voice** | Natural, low-latency speech-to-speech conversation in any language |
-| 👁️ **Visual awareness** | Screen analysis, screenshot understanding, webcam vision, click-on-command |
+| 🎬 **Video Studio** | Local video inspection and subtitle-guided promo renders with transitions and audio mastering |
+| 👁️ **Visual awareness** | Screen analysis, screenshot understanding, opt-in live webcam input, click-on-command |
 | 🧠 **Persistent memory** | Remembers your name, preferences, projects, and plans across sessions |
-| 🖥️ **Full PC control** | Launch apps, manage files, run terminal commands, change settings |
-| 📱 **Bluetooth phone app** | Native Android app controls Kaizumi over BLE — no USB, no ADB, no website |
+| 🖥️ **Guarded Computer Use** | Observe Windows UI Automation controls, operate mouse/keyboard, and verify visible results |
+| 📱 **Android app** | Standalone Gemini voice/chat assistant with optional Bluetooth control of the Windows PC |
 | 💬 **Telegram control** | Remote-control from any Telegram chat (text + voice notes) |
 | 🕐 **Guardian** | Watches battery, RAM, CPU, disk, and temperature; alerts on thresholds |
 | 🗓️ **Google integration** | Gmail, Calendar, Drive via OAuth (device flow) |
-| 🧩 **53 tools** | Web search, reminders, PDF/Word/Excel/PowerPoint, YouTube, weather, translation, and more |
+| 🧩 **50+ tools** | Web search, reminders, PDF/Word/Excel/PowerPoint, YouTube, weather, translation, and more |
 | 🎭 **Modes & moods** | 6 modes × 4 moods change Kaizumi's personality |
 | 🎨 **Themed UI** | 4 themes (cyber, ocean, aurora, sunset) + animated canvas |
 | 🔊 **30+ voices** | Pick from 30 Gemini voices (male/female, warm/clear/soft…) |
@@ -77,10 +78,17 @@ external APIs. It is **free to self-host** — you only need a Gemini API key
 
 ## 🚀 Quick Start
 
-For a Windows install, run `START_NIANG_IA.bat`. It creates a virtual
-environment, installs dependencies, and opens the app. The first setup needs
-an internet connection; provide your own Gemini API key when prompted or in
-`config/api_keys.json`.
+For a Windows install, run `START_NIANG_IA.bat`. It installs the bundled
+Python 3.12.10 automatically when Python 3.11 or 3.12 is not already available,
+then creates a virtual environment and installs app dependencies. Installing
+Python works offline; dependency and Playwright browser installation on first
+launch requires internet. The Windows installer also offers an optional
+personalization page for the name NIANG IA should use and its default response
+language. A following setup page links directly to Google AI Studio to create a
+Gemini API key and accepts pasting it during installation. The name and language
+are imported into NIANG IA's memory on first launch; a pasted key is saved
+locally as a separate configuration file. Both pages can be skipped. You can
+also configure a Gemini API key later in `config/api_keys.json`.
 
 For a manual install:
 
@@ -139,9 +147,13 @@ System ready in minutes.
 ## 🪟 Building a Windows release
 
 Run `python build_release.py` to create a clean source archive and staging
-folder in `dist/`. The release excludes local API keys, runtime configuration,
-logs, memory, caches, backups, and virtual environments. It includes the model
-files in `models/`; verify their redistribution terms before publishing.
+folder in `dist/`. The build downloads the official Python 3.12.10 x64
+installer from python.org and checks its SHA-256 against the pinned value
+before packaging it. The release excludes local API keys, runtime
+configuration, logs, memory data, caches, backups, and virtual environments.
+It includes the model files in `models/`; verify their redistribution terms
+before publishing. The NIANG IA logo in `assets/niang_ia.ico` is used for the
+installer and its Windows shortcuts.
 
 To compile the Windows installer, install Inno Setup 6 and run:
 
@@ -149,9 +161,10 @@ To compile the Windows installer, install Inno Setup 6 and run:
 & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" NIANG_IA.iss
 ```
 
-The installer and ZIP are built from the same staging folder. Both require an
-internet connection on first launch to install Python dependencies and
-Playwright browsers. Users must configure their own Gemini API key.
+The installer and ZIP are built from the same staging folder. Python 3.12.10
+is bundled and installs without an internet connection. First-launch dependency
+and Playwright browser installation still needs internet. Users must configure
+their own Gemini API key.
 
 ---
 
@@ -187,29 +200,62 @@ files).
 ### Smart home (`smart_home.json`)
 
 Supports **Home Assistant**, **generic webhooks**, or a **simulated** mode —
-plus a per-device config (rooms, switches, lights, thermostats…).
+plus a per-device config (switches, lights, thermostats, covers, locks, media
+players, and scenes). Home Assistant mode also supports configured whole-area
+on/off controls. Store Home Assistant long-lived tokens only in the local,
+git-ignored `config/smart_home.json`; never paste them into chat. Unlocking a
+lock requires explicit user confirmation.
+
+Example Home Assistant configuration:
+
+```json
+{
+    "enabled": true,
+    "mode": "home_assistant",
+    "home_assistant": {
+        "url": "http://homeassistant.local:8123",
+        "token": "YOUR_LOCAL_LONG_LIVED_TOKEN"
+    },
+    "devices": [
+        {"id": "living-room-light", "name": "Living room light", "entity": "light.living_room"},
+        {"id": "evening-scene", "name": "Evening scene", "entity": "scene.evening"}
+    ],
+    "areas": [
+        {"id": "living_room", "name": "Living room"}
+    ]
+}
+```
+
+Ask NIANG IA to control a configured device, activate a configured scene, or
+turn a configured area on/off. Area ids are Home Assistant area ids.
 
 ---
 
 ## 📱 Remote Control
 
-Kaizumi has **two** remote channels: Bluetooth (native Android app) and
-Telegram. Both route commands through the **same Gemini Live session** as local
-voice, so every tool, the safety gate, and memory behave identically.
+The Android app provides its own Gemini assistant and an optional Bluetooth
+remote for the Windows app. Telegram commands, in contrast, run through the
+Windows assistant's Gemini Live session.
 
-### 1. Bluetooth — native Android app (no USB / no ADB / no website)
+### 1. Android app and optional Bluetooth PC remote
 
 ```bash
 python main.py --remote
 ```
 
-- Starts a BLE GATT peripheral advertising as **"Kaizumi Remote"**.
-- Build & install the Android app from `android/` (see
-  [`android/README.md`](android/README.md)). The build token is automatically
+- The Android app supports standalone text/voice chat, optional Gemini Web
+  Search, selected PDF/image/text documents, and confirmed Android actions
+  (apps/settings, calendar reminders, alarms, and public links).
+- It requires internet and a user-provided Gemini API key; it does not offer
+  offline operation or Windows-only automation features.
+- Run `--remote` to additionally start the BLE GATT peripheral advertising as
+  **"Kaizumi Remote"**.
+- Build and install the Android app from `android/` (see
+  [`android/README.md`](android/README.md)). The bridge token is automatically
   generated in `config/bridge_token.txt` on first run.
-- Open the app, enter the token, tap **Connect** — it pairs via the
+- In the Android app, open **Contrôle PC**, enter the token, and tap **Connect** — it pairs via the
   encrypted characteristic, authenticates, and shows *Authenticated*.
-- Type a command and tap **Send** — Kaizumi replies and streams live events
+- Type a command and tap **Send** — NIANG IA replies and streams live events
   (tool status, phase changes, system alerts) to your phone.
 
 ### 2. Telegram — remote control from anywhere
@@ -240,7 +286,7 @@ and enforces it centrally — no per-tool ad-hoc checks.
 
 - **HIGH-risk actions** (delete/move files, run terminal commands, send
   email/SMS, kill processes, auto-update games, shutdown/restart, drive
-  deletes, …) **require your explicit verbal confirmation** before they run.
+  deletes, live webcam streaming, …) **require your explicit verbal confirmation** before they run.
 - When a high-risk tool is requested, Kaizumi asks *"May I …?"* and waits for
   an explicit **yes** before re-invoking the action.
 - The model is instructed to **never set `confirm=true` on its own** — only
@@ -267,16 +313,18 @@ Kaizumi exposes **53 tools** to the model. The full list lives in `main.py`
 | Category | Tools |
 |----------|-------|
 | 🖥️ **System** | `system_status`, `task_manager`, `computer_settings`, `autostart`, `clipboard`, `media_control`, `notify`, `pc_health` |
-| 🗂️ **Files** | `file_controller`, `open_app`, `desktop_control`, `read_pdf`, `pdf_qa`, `read_document`, `document_qa`, `create_presentation`, `create_spreadsheet` |
-| 🌐 **Web** | `web_search`, `browser_control`, `youtube_video`, `weather_report`, `flight_finder`, `translate` |
-| 💬 **Communication** | `send_message`, `gmail`, `email_watch`, `calendar`, `drive`, `google_auth`, `google_auth_status` |
+| 🗂️ **Files** | `file_controller`, `open_app`, `desktop_control`, `read_pdf`, `pdf_qa`, `read_document`, `document_qa`, `search_documents`, `create_document`, `analyze_data`, `create_presentation`, `create_spreadsheet` |
+| 🌐 **Web** | `web_search`, `browser_control`, `youtube_video`, `weather_report`, `flight_finder`, `translate`, `set_live_translation`, `proactive_suggestions` |
+| 💬 **Communication** | `send_message`, `gmail`, `email_watch`, `calendar`, `drive`, `google_auth`, `google_auth_status`, `whatsapp_call` |
 | 🤖 **Automation** | `cmd_control`, `code_helper`, `dev_agent`, `agent_task`, `schedule`, `daily_briefing`, `game_updater`, `smart_home_control` |
-| 👁️ **Vision** | `screen_process`, `vision_gesture`, `vision_click`, `wake_word` |
-| 🧠 **Memory** | `save_memory`, `recall_memory`, `forget_memory`, `clear_memory`, `set_mode`, `set_voice`, `set_mood` |
+| 👁️ **Vision** | `screen_process`, `vision_gesture`, `live_camera`, `vision_click`, `wake_word` |
+| 🧠 **Memory** | `save_memory`, `recall_memory`, `forget_memory`, `clear_memory`, `set_mode`, `set_voice`, `set_voice_style`, `set_mood` |
 | 🔑 **Admin** | `api_add_key` |
 
 Every tool is dispatched through a single handler table with per-tool
 timeouts and a loop guard that stops identical-arg / ping-pong tool loops.
+Background agent plans are limited to five validated steps and known tools;
+task status reports the current phase and step progress.
 
 ---
 
@@ -288,6 +336,92 @@ timeouts and a loop guard that stops identical-arg / ping-pong tool loops.
 - **Voices:** 30 Gemini voices (Aoede, Charon, Fenrir, Kore, Puck, Zephyr,
   …) — set with `set_voice` or Telegram `/voice`. Preferences persist across
   sessions in memory.
+- **Voice delivery:** Choose `natural`, `calm`, `warm`, `energetic`,
+  `expressive`, or `measured` with `set_voice_style`; the preference is saved.
+- **Live webcam:** Ask NIANG IA to start the live camera to share webcam frames
+  with Gemini during the current conversation. Starting requires explicit
+  confirmation, a red UI indicator stays visible while sharing, and streaming
+  stops when asked or when the Gemini session disconnects. Microphone audio
+  was already streamed live by the existing conversation mode.
+- **Personal document search:** `search_documents` searches local files in
+  Documents, Downloads, Desktop, or a specific folder you request. The scan is
+  limited to 300 supported files (20 MB each); only the top five matching
+  excerpts are returned to Gemini, so relevant private text is sent to Google
+  for the answer. It does not search the whole computer or cloud accounts.
+- **Live speech translation:** `set_live_translation` enables spoken
+  interpretation into a chosen target language (source language can be
+  auto-detected), or disables/checks the mode. The preference is stored locally
+  and applied when the live session reconnects. In translation mode, NIANG IA
+  translates microphone speech instead of responding to its meaning.
+- **Proactive suggestions:** `proactive_suggestions` lets you opt in to
+  suggestions based on repeated use. When enabled, NIANG IA stores only a
+  small allow-listed tool name and date locally (never arguments or message
+  contents), for up to 30 days. Suggestions are based on use on at least three
+  different days and appear in the daily briefing; disabling also deletes the
+  stored usage history. No background microphone or activity monitoring runs.
+- **Calendar briefing:** When Google Calendar is already authorized, the
+  daily briefing includes the next events for the local calendar day. Without
+  authorization, it skips the calendar section; no new background sync runs.
+- **WhatsApp call assistant (manual-assist):** `whatsapp_call` never selects
+  contacts, places, detects, or hangs up calls. The user verifies the contact
+  and number, starts the WhatsApp call manually, and informs the other person
+  that NIANG IA is an AI before connecting. A separate Gemini Live session
+  receives live call audio and selected display names. NIANG IA does not retain
+  local transcripts or recordings; Google's service policies apply. It
+  requires two distinct, isolated virtual audio routes configured in
+  `config/whatsapp_call.json`; copy `config/whatsapp_call.example.json`, use
+  separate virtual cable A and B pairs, and set `isolation_confirmed` to true
+  only after verifying that the routes do not feed back into one another. Route
+  WhatsApp output to cable A's playback end, NIANG IA capture to cable A's
+  capture end, NIANG IA output to cable B's playback end, and WhatsApp's
+  microphone to cable B's capture end. Do not use speaker-to-microphone
+  loopback. In the JSON, `incoming_audio_device` is cable A's capture endpoint;
+  `outgoing_audio_device` is cable B's playback endpoint. The current machine
+  has no such virtual routes, so this mode remains unavailable until the user
+  installs and configures a virtual audio mixer/cable.
+  Use **STOP AI AUDIO** if the other person declines; this stops NIANG IA only,
+  not WhatsApp, and refusal detection is not automatic. This does not control
+  WhatsApp Desktop or implement the WhatsApp Business Calling API. No call
+  summary is available because transcripts are not retained. Gemini/cloud audio
+  processing requires the user's explicit confirmation. To use it, ask NIANG IA
+  to prepare, manually verify and start the WhatsApp call, disclose the AI, then
+  ask it to join; confirm the explicit consent prompt before audio is sent.
+- **Local data reports:** `analyze_data` reads a local CSV or `.xlsx` and
+  generates a Word report with descriptive statistics. It processes at most
+  10,000 rows, 50 columns, and 20 MB per file; dataset contents are analyzed
+  locally and are not uploaded to Gemini.
+- **Video Studio:** `video_studio status` checks CapCut in standard
+  install locations. `video_studio analyze` reads a local AVI, M4V, MKV, MOV,
+  MP4, or WEBM file with OpenCV and saves metadata plus sampled visual-change
+  candidates as JSON under `outputs/video_studio/`. Frames are inspected locally
+  and are not uploaded. The report does not identify story content, speech,
+  or verified scene boundaries. `video_studio edit` creates a rendered copy
+  using existing subtitle phrase boundaries, smooth-wipe/dissolve transitions,
+  synchronized audio crossfades, burnt-in captions, restrained reframing/color
+  adjustment, and normalized audio. It does not modify the source or create a
+  CapCut project. This automated promo preset requires an existing subtitle
+  track and CapCut's bundled FFmpeg; it is not a substitute for editorial review.
+  CapCut 9.6.0.4097 is installed under `%LOCALAPPDATA%/CapCut/Apps/CapCut.exe`.
+- **Guarded Windows Computer Use:** `computer_control` provides screen
+  resolution/scaling and monitor information, local screenshots, active-window
+  details, accessible controls from the foreground window, mouse and keyboard
+  input, visual-change waits, and accessible-label verification. Input actions
+  and access to private screen/window content require the normal one-time
+  confirmation token before execution; screen descriptions and visual element
+  searches explicitly disclose that the screenshot is sent to Gemini. Results
+  report whether an action executed and whether its visible outcome was verified.
+  `stop` cancels interruptible work and releases held mouse buttons. After
+  explicitly enabling the emergency hook, `Ctrl+Alt+Pause` stops ongoing typing,
+  movement, or dragging; moving the pointer to the top-left screen corner also
+  activates PyAutoGUI's built-in fail-safe. The emergency hook can be disabled
+  with `disable_emergency_stop`. This uses the existing `pyautogui`, `pywinauto`,
+  `mss`, and `keyboard` dependencies. Windows secure/UAC desktops and controls
+  that expose no UI Automation metadata cannot be operated or verified.
+  Coordinate-based input is limited to the primary display; `mss` screenshots
+  and monitor information include the full virtual desktop when supported.
+  The separate `screen_process` screen/webcam analysis and `computer_settings`
+  text-entry, clipboard, Run-dialog, and save/close actions also require explicit
+  confirmation through the same gate; typed text is redacted from its action log.
 
 ---
 
@@ -295,10 +429,11 @@ timeouts and a loop guard that stops identical-arg / ping-pong tool loops.
 
 - **Gemini Live API** (`models/gemini-3.1-flash-live-preview`) powers real-time
   speech-to-speech interaction. Voice, screen, and control code run on-device;
-  speech understanding/generation and tool reasoning happen via Google's Gemini
-  API.
+  speech understanding/generation, optional live webcam frames, and tool
+  reasoning are sent to Google's Gemini API.
 - **Planner/executor** (`agent/`) breaks multi-step requests into tool calls,
-  runs them in order, and auto-recovers: retry → skip → replan → abort.
+  validates the plan, runs steps in order, reports progress, and auto-recovers:
+  retry → skip → replan → abort.
 - **Resilience layer** (`agent/resilience.py`) wraps every tool with a hard
   timeout and bounded retries — a hung tool can't freeze the session.
 - **Loop guard** (`agent/loop_guard.py`) detects identical-arg / ping-pong
@@ -331,7 +466,7 @@ kaizumi/
 ├── agent/                     # planner, executor, error recovery, task queue
 ├── memory/                    # persistent memory (CRUD, pruning, secrets)
 ├── remote/                    # Bluetooth BLE transport (GATT peripheral)
-├── android/                   # native Android companion app (Kotlin)
+├── android/                   # standalone Android assistant + optional BLE remote (Kotlin)
 ├── docs/PROTOCOL.md           # Bluetooth wire protocol spec
 ├── config/                    # configuration (git-ignored)
 └── tests/                     # unit tests (no API keys, no network)

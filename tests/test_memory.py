@@ -5,6 +5,7 @@ Run: python -m unittest tests.test_memory -v
 """
 
 import os
+import json
 import sys
 import tempfile
 import unittest
@@ -28,10 +29,15 @@ class MemoryTest(unittest.TestCase):
             import json
             json.dump({}, f)
         mm.MEMORY_PATH = mm.Path(self.tmp)
+        mm.INSTALLER_PROFILE_PATH = mm.Path(self.tmp + ".installer_profile.json")
 
     def tearDown(self):
         try:
             mm.Path(self.tmp).unlink()
+        except Exception:
+            pass
+        try:
+            mm.INSTALLER_PROFILE_PATH.unlink()
         except Exception:
             pass
 
@@ -72,6 +78,35 @@ class MemoryTest(unittest.TestCase):
         mem = mm.load_memory()
         val = mem["notes"]["long_note"]["value"]
         self.assertLessEqual(len(val), mm.MAX_VALUE_LENGTH + 1)
+
+    def test_import_installer_profile_into_existing_memory(self):
+        mm.remember("favorite_color", "blue", "preferences")
+        mm.INSTALLER_PROFILE_PATH.write_text(
+            '{"identity":{"name":{"value":"Awa"},'
+            '"language":{"value":"Wolof"}},'
+            '"preferences":{"response_style":{"value":"brief"}}}',
+            encoding="utf-8",
+        )
+
+        memory = mm.load_memory()
+
+        self.assertEqual(memory["identity"]["name"]["value"], "Awa")
+        self.assertEqual(memory["identity"]["language"]["value"], "Wolof")
+        self.assertEqual(memory["preferences"]["favorite_color"]["value"], "blue")
+        self.assertEqual(memory["preferences"]["response_style"]["value"], "brief")
+        self.assertFalse(mm.INSTALLER_PROFILE_PATH.exists())
+        self.assertEqual(
+            json.loads(mm.MEMORY_PATH.read_text(encoding="utf-8"))["identity"]["name"]["value"],
+            "Awa",
+        )
+
+    def test_invalid_installer_profile_is_not_deleted(self):
+        mm.INSTALLER_PROFILE_PATH.write_text("{invalid", encoding="utf-8")
+
+        memory = mm.load_memory()
+
+        self.assertEqual(memory["identity"], {})
+        self.assertTrue(mm.INSTALLER_PROFILE_PATH.exists())
 
 
 if __name__ == "__main__":

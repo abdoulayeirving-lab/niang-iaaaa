@@ -49,10 +49,16 @@ def calendar_action(parameters: dict, response=None, player=None) -> str:
 
         if action in ("list", "upcoming", "today", "agenda"):
             max_results = int(params.get("max_results", 10) or 10)
-            tz = timezone(timedelta(hours=5))
-            now = datetime.now(tz)
-            time_min = now.isoformat()
-            time_max = (now + timedelta(days=30)).isoformat()
+            now = datetime.now().astimezone()
+            if action == "today":
+                time_min = now.isoformat()
+                tomorrow = (now + timedelta(days=1)).replace(
+                    hour=0, minute=0, second=0, microsecond=0
+                )
+                time_max = tomorrow.isoformat()
+            else:
+                time_min = now.isoformat()
+                time_max = (now + timedelta(days=30)).isoformat()
             events = svc.events().list(
                 calendarId=params.get("calendar_id", "primary"),
                 timeMin=time_min, timeMax=time_max,
@@ -60,8 +66,10 @@ def calendar_action(parameters: dict, response=None, player=None) -> str:
                 orderBy="startTime",
             ).execute().get("items", [])
             if not events:
+                if action == "today":
+                    return "No upcoming events today, sir."
                 return "No upcoming events in the next 30 days, sir."
-            lines = ["📅 Upcoming events:"]
+            lines = ["📅 Today's agenda:" if action == "today" else "📅 Upcoming events:"]
             for ev in events:
                 start = (ev.get("start") or {}).get("dateTime") or (ev.get("start") or {}).get("date", "?")
                 lines.append(f"• {_fmt(start)}  {ev.get('summary', '(no title)')}")

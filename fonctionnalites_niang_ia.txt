@@ -1,0 +1,4 @@
+Fonctionnalités proposées pour NIANG IA :
+- Contrôle direct de la souris
+- Contrôle des vidéos (lecture, pause, suivant...)
+- Capacité à interagir avec des éléments visuels (casser des cases)

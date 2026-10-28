@@ -22,7 +22,8 @@ DEFAULT_CONFIG = {
     "webhook": {
         "url": ""
     },
-    "devices": []
+    "devices": [],
+    "areas": []
 }
 
 # simulated mode keeps an in-memory state map so the tool is testable offline
@@ -57,7 +58,7 @@ def _sim_get(device_id: str) -> dict:
     return _SIM_STATE.get(device_id, {"state": "off"})
 
 
-def _ha_request(cfg: dict, method: str, path: str, body=None):
+def _ha_request_legacy(cfg: dict, method: str, path: str, body=None):
     ha = cfg.get("home_assistant", {})
     base = (ha.get("url") or "").rstrip("/")
     token = ha.get("token") or ""
@@ -76,15 +77,42 @@ def _ha_request(cfg: dict, method: str, path: str, body=None):
         return json.loads(raw) if raw else None
 
 
-def _control_home_assistant(device: dict, action: str, value):
+def _ha_request(cfg: dict, method: str, path: str, body=None):
+    ha = cfg.get("home_assistant", cfg)
+    base = (ha.get("url") or "").rstrip("/")
+    token = ha.get("token") or ""
+    if not base or not token:
+        raise RuntimeError(
+            "Home Assistant is not configured (url/token missing in config/smart_home.json)."
+        )
+    req = urllib.request.Request(
+        f"{base}{path}",
+        method=method,
+        headers={
+            "Authorization": "Bearer " + token,
+            "Content-Type": "application/json",
+        },
+    )
+    if body is not None:
+        req.data = json.dumps(body).encode("utf-8")
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        raw = resp.read().decode("utf-8")
+        return json.loads(raw) if raw else None
+
+
+def _control_home_assistant(cfg: dict, device: dict, action: str, value):
     entity = device.get("entity") or ""
     if not entity:
         raise RuntimeError(f"Device '{device.get('name')}' has no 'entity' set.")
-    domain = entity.split(".")[0] if "." in entity else "homeassistant"
+    domain, separator, object_id = entity.partition(".")
+    if not separator or not domain or not object_id:
+        raise RuntimeError(f"Invalid Home Assistant entity id: {entity!r}.")
     value = _coerce_value(value)
 
     if action == "status":
-        state = _ha_request({"home_assistant": _cfg_ha_global()}, "GET", f"/api/states/{entity}")
+        state = _ha_request(cfg, "GET", f"/api/states/{entity}")
+        if not isinstance(state, dict):
+            raise RuntimeError(f"Home Assistant returned invalid state for {entity}.")
         attrs = state.get("attributes", {})
         level = ""
         if "brightness" in attrs:
@@ -94,22 +122,61 @@ def _control_home_assistant(device: dict, action: str, value):
         return f"{device.get('name')}: {state.get('state')}{level}"
 
     service_map = {
-        "turn_on": "turn_on",
-        "turn_off": "turn_off",
-        "toggle": "toggle",
-        "set_level": "turn_on",
+        "turn_on": (domain, "turn_on", None),
+        "turn_off": (domain, "turn_off", None),
+        "toggle": (domain, "toggle", None),
+        "set_level": (domain, "turn_on", {"light"}),
+        "set_temperature": (domain, "set_temperature", {"climate"}),
+        "open_cover": (domain, "open_cover", {"cover"}),
+        "close_cover": (domain, "close_cover", {"cover"}),
+        "lock": (domain, "lock", {"lock"}),
+        "unlock": (domain, "unlock", {"lock"}),
+        "activate_scene": ("scene", "turn_on", {"scene"}),
     }
-    service = service_map.get(action)
-    if not service:
+    service_info = service_map.get(action)
+    if not service_info:
         raise RuntimeError(f"Unknown action '{action}'.")
+    service_domain, service, required_domains = service_info
+    if required_domains and domain not in required_domains:
+        expected = ", ".join(sorted(required_domains))
+        raise RuntimeError(f"Action '{action}' requires a {expected} entity.")
     body = {"entity_id": entity}
     if action == "set_level":
         body["brightness_pct"] = max(0, min(100, int(value)))
-    _ha_request(_cfg_ha_global(), "POST", f"/api/services/{domain}/{service}", body)
+    elif action == "set_temperature":
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise ValueError("set_temperature requires a numeric temperature value.")
+        body["temperature"] = value
+    if service_domain not in {
+        "light", "switch", "fan", "cover", "climate", "lock", "scene",
+        "script", "media_player",
+    }:
+        raise RuntimeError(f"Home Assistant domain '{service_domain}' is not supported.")
+    _ha_request(cfg, "POST", f"/api/services/{service_domain}/{service}", body)
     return f"{device.get('name')}: {action} OK"
 
 
-_cfg_ha_global = lambda: _load_config().get("home_assistant", {})
+def _find_area(cfg: dict, key: str):
+    key = (key or "").strip().lower()
+    for area in cfg.get("areas", []):
+        if str(area.get("id", "")).lower() == key or str(area.get("name", "")).lower() == key:
+            return area
+    return None
+
+
+def _control_area(cfg: dict, area: dict, action: str) -> str:
+    if action not in ("turn_on", "turn_off"):
+        raise RuntimeError("Area control supports only turn_on and turn_off.")
+    area_id = str(area.get("id", "")).strip()
+    if not area_id:
+        raise RuntimeError(f"Area '{area.get('name')}' has no Home Assistant area id.")
+    _ha_request(
+        cfg,
+        "POST",
+        f"/api/services/homeassistant/{action}",
+        {"target": {"area_id": area_id}},
+    )
+    return f"{area.get('name')}: {action} OK"
 
 
 def _control_webhook(cfg: dict, device: dict, action: str, value):
@@ -131,6 +198,10 @@ def _control_webhook(cfg: dict, device: dict, action: str, value):
 
 
 def _coerce_value(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value
     try:
         return int(value)
     except (TypeError, ValueError):
@@ -142,7 +213,8 @@ def _coerce_value(value):
 
 def _list_status(cfg: dict) -> str:
     devices = cfg.get("devices", [])
-    if not devices:
+    areas = cfg.get("areas", [])
+    if not devices and not areas:
         return "No devices configured. Add them to config/smart_home.json"
     lines = []
     for d in devices:
@@ -151,13 +223,23 @@ def _list_status(cfg: dict) -> str:
             lines.append(f"- {d.get('name')} ({d.get('type')}): {st.get('state')}")
         else:
             try:
-                lines.append(f"- {d.get('name')}: {_control_home_assistant(d, 'status', None)}")
+                lines.append(
+                    f"- {d.get('name')}: "
+                    f"{_control_home_assistant(cfg, d, 'status', None)}"
+                )
             except Exception as e:
                 lines.append(f"- {d.get('name')}: error ({e})")
+    for area in areas:
+        lines.append(f"- Area: {area.get('name')} (id: {area.get('id')})")
     return "\n".join(lines)
 
 
-def smart_home_control(action: str = "status", device: str = None, value=None) -> str:
+def smart_home_control(
+    action: str = "status",
+    device: str = None,
+    value=None,
+    area: str = None,
+) -> str:
     """Public entry point called from main.py tool dispatch."""
     cfg = _load_config()
 
@@ -170,6 +252,17 @@ def smart_home_control(action: str = "status", device: str = None, value=None) -
     if action in ("status", "list", "all") and device in (None, "", "all", "all_devices"):
         return _list_status(cfg)
 
+    if area:
+        selected_area = _find_area(cfg, area)
+        if selected_area is None:
+            return f"Area '{area}' not found in config/smart_home.json"
+        if mode != "home_assistant":
+            return "Area control requires Home Assistant mode."
+        try:
+            return _control_area(cfg, selected_area, action)
+        except Exception as e:
+            return f"Smart home error: {e}"
+
     dev = _find_device(cfg, device) if device else None
     if device and dev is None:
         return f"Device '{device}' not found in config/smart_home.json"
@@ -178,7 +271,7 @@ def smart_home_control(action: str = "status", device: str = None, value=None) -
 
     try:
         if mode == "home_assistant":
-            return _control_home_assistant(dev, action, value)
+            return _control_home_assistant(cfg, dev, action, value)
         if mode == "webhook":
             return _control_webhook(cfg, dev, action, value)
         # simulated

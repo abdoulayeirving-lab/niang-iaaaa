@@ -810,7 +810,11 @@ def computer_settings(
     if not action:
         return "No action could be determined, sir."
 
-    print(f"[Settings] ⚙️ Action: {action}  Value: {value}")
+    sensitive_actions = {
+        "type_text", "write_on_screen", "type", "write", "paste", "copy", "cut",
+    }
+    logged_value = "[redacted]" if action in sensitive_actions else value
+    print(f"[Settings] Action: {action}  Value: {logged_value}")
 
 
     if action == "volume_set":

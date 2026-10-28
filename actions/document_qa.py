@@ -39,8 +39,139 @@ _SEARCH_DIRS = [
     Path.home() / "Documents",
     Path.home() / "Downloads",
     Path.home() / "Desktop",
-    Path.home(),
 ]
+_SEARCH_EXTENSIONS = {
+    ".csv", ".docx", ".htm", ".html", ".json", ".log", ".md", ".pdf",
+    ".pptx", ".txt", ".xlsx", ".xml",
+}
+_MAX_SEARCH_FILES = 300
+_MAX_SEARCH_FILE_BYTES = 20 * 1024 * 1024
+_MAX_SEARCH_RESULTS = 5
+
+
+def _search_roots(folder: str) -> list[Path]:
+    folder = (folder or "").strip()
+    if not folder or folder.lower() in ("all", "personal"):
+        candidates = _SEARCH_DIRS
+    else:
+        aliases = {
+            "documents": Path.home() / "Documents",
+            "downloads": Path.home() / "Downloads",
+            "desktop": Path.home() / "Desktop",
+        }
+        candidate = aliases.get(folder.lower(), Path(folder).expanduser())
+        if not candidate.is_absolute():
+            candidate = candidate.resolve()
+        if not candidate.exists() or not candidate.is_dir():
+            raise ValueError(f"Folder not found: {candidate}")
+        candidates = [candidate]
+
+    roots = []
+    seen = set()
+    for candidate in candidates:
+        if not candidate.exists() or not candidate.is_dir():
+            continue
+        resolved = candidate.resolve()
+        if resolved not in seen:
+            roots.append(resolved)
+            seen.add(resolved)
+    if not roots:
+        raise ValueError("No accessible document folders were found.")
+    return roots
+
+
+def _iter_search_files(roots: list[Path]):
+    scanned = 0
+    for root in roots:
+        for current, dirs, filenames in os.walk(root, followlinks=False):
+            current_path = Path(current)
+            dirs[:] = [
+                name for name in dirs
+                if not name.startswith(".")
+                and not (current_path / name).is_symlink()
+            ]
+            for filename in filenames:
+                path = current_path / filename
+                if filename.startswith(".") or path.suffix.lower() not in _SEARCH_EXTENSIONS:
+                    continue
+                if path.is_symlink():
+                    continue
+                yield path
+                scanned += 1
+                if scanned >= _MAX_SEARCH_FILES:
+                    return
+
+
+def search_documents(
+    parameters: dict,
+    response=None,
+    player=None,
+    session_memory=None,
+) -> str:
+    """Search selected local document folders and return a few relevant excerpts."""
+    params = parameters or {}
+    query = str(params.get("query", "")).strip()
+    if len(query) < 2:
+        return "Give me at least two characters to search for, sir."
+
+    try:
+        roots = _search_roots(str(params.get("folder", "")))
+    except (OSError, ValueError) as exc:
+        return f"Could not search that folder: {exc}"
+
+    terms = {
+        term.lower() for term in re.findall(r"[\w'-]{2,}", query, flags=re.UNICODE)
+    }
+    if not terms:
+        return "I couldn't find searchable words in that query, sir."
+
+    results = []
+    scanned = skipped = 0
+    for path in _iter_search_files(roots):
+        scanned += 1
+        try:
+            if path.stat().st_size > _MAX_SEARCH_FILE_BYTES:
+                skipped += 1
+                continue
+            text = _extract_text(str(path))
+        except Exception as exc:
+            print(f"[DocumentSearch] Skipped {path}: {exc}")
+            skipped += 1
+            continue
+
+        normalized = re.sub(r"\s+", " ", text).strip()
+        if not normalized:
+            continue
+        lowered = normalized.lower()
+        score = sum(lowered.count(term) for term in terms)
+        if not score:
+            continue
+
+        positions = [lowered.find(term) for term in terms if lowered.find(term) >= 0]
+        start = max(0, min(positions) - 100)
+        excerpt = normalized[start:start + 320]
+        if start:
+            excerpt = "…" + excerpt
+        if start + 320 < len(normalized):
+            excerpt += "…"
+        results.append((score, path, excerpt))
+
+    results.sort(key=lambda result: (-result[0], str(result[1]).lower()))
+    if not results:
+        suffix = f" Skipped {skipped} unreadable or oversized file(s)." if skipped else ""
+        return f"No matching documents found in the selected folders ({scanned} files checked).{suffix}"
+
+    lines = [
+        f"Found {len(results)} matching document(s) after checking {scanned} file(s).",
+        "Matching excerpts are shared with Gemini to answer your question.",
+    ]
+    for score, path, excerpt in results[:_MAX_SEARCH_RESULTS]:
+        lines.append(f"\n{path}\nRelevance: {score}\n{excerpt}")
+    if skipped:
+        lines.append(f"\nSkipped {skipped} unreadable or oversized file(s).")
+    if scanned >= _MAX_SEARCH_FILES:
+        lines.append(f"\nScan limit reached ({_MAX_SEARCH_FILES} files). Narrow the folder to search further.")
+    return "\n".join(lines)
 
 
 def _resolve_source(raw: str) -> str:

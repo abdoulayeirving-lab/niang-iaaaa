@@ -39,6 +39,7 @@ config/*.json
 !config/*.example.json
 config/telegram_offset.txt
 config/bridge_token.txt
+config/installer_gemini_key.txt
 
 # IDE
 .idea/

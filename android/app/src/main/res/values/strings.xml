@@ -1,4 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Kaizumi Remote</string>
+    <string name="app_name">NIANG IA</string>
+    <string name="assistant_status_start">Ajoutez votre clé Gemini pour commencer.</string>
+    <string name="conversation_privacy">Vos échanges restent en mémoire uniquement pendant cette session.</string>
+    <string name="api_key">Clé API</string>
+    <string name="document">Document</string>
+    <string name="pc_control">Contrôle PC</string>
+    <string name="web_search_per_message">Autoriser la recherche Web pour ce message</string>
+    <string name="prompt_hint">Écrivez à NIANG IA…</string>
+    <string name="speak">Parler</string>
+    <string name="send">Envoyer</string>
+    <string name="remote_title">NIANG IA — Commande du PC</string>
+    <string name="idle">Inactif</string>
+    <string name="bridge_token_hint">Jeton Bluetooth (config/bridge_token.txt)</string>
+    <string name="connect">Connecter</string>
+    <string name="command_hint">Commande à envoyer au PC…</string>
+    <string name="clear_log">Effacer le journal</string>
+    <string name="status_document_selected">Document sélectionné. Il sera envoyé à Gemini avec votre prochain message.</string>
+    <string name="status_no_speech">Aucune parole n’a été reconnue. Vous pouvez réessayer.</string>
+    <string name="status_key_saved">Clé enregistrée de manière chiffrée sur cet appareil.</string>
+    <string name="status_key_removed">Clé API supprimée de cet appareil.</string>
+    <string name="status_error">Erreur</string>
 </resources>
