@@ -90,8 +90,9 @@ Gemini API key and accepts pasting it during installation. The name and language
 are imported into NIANG IA's memory on first launch; a pasted key is saved
 locally as a separate configuration file. Both pages can be skipped. You can
 also configure a Gemini API key later in `config/api_keys.json`.
-After Gemini connects, NIANG IA greets the user aloud in the configured language
-on each application launch; this greeting is skipped in Text-only mode.
+After Gemini connects, NIANG IA greets the user aloud using the saved preferred
+name and configured language on each application launch; if no name is saved,
+it greets without guessing one. This greeting is skipped in Text-only mode.
 In the left `COMMAND DECK`, select `CHECK FOR UPDATES` to check GitHub for a newer
 stable release. If one is available, NIANG IA asks permission before downloading
 the Windows installer to `Downloads`, verifies its size and SHA-256 digest
