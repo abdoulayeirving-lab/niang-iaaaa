@@ -1,6 +1,6 @@
 import os, json, time, math, random, threading
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 from collections import deque
 from PIL import Image, ImageTk, ImageDraw, ImageFont, ImageOps
 import sys
@@ -187,6 +187,7 @@ class KaizumiUI:
         self._voiceover_alias_open = False
         self._voiceover_window = None
         self._analysis_report = ""
+        self._update_check_in_progress = False
         self.on_whatsapp_call_control = None
         self.vision_mode = "STANDBY"
         self.vision_signal = "Awaiting camera input"
@@ -320,6 +321,13 @@ class KaizumiUI:
         if self._selected_paths:
             self._refresh_file_card()
         self._draw_mute_button()
+        self._update_button.configure(
+            fg=self.col["pri"],
+            bg=self.col["panel"],
+            activeforeground=self.col["bg"],
+            activebackground=self.col["pri"],
+            highlightbackground=self.col["mid"],
+        )
         self._refresh_input_style()
         self._apply_deck_theme()
 
@@ -728,6 +736,117 @@ class KaizumiUI:
                           activebackground=self.col["pri"], activeforeground=self.col["bg"],
                           highlightbackground=self.col["dim"])
         self._refresh_deck_status()
+
+    def _check_for_updates(self):
+        if self._update_check_in_progress:
+            return
+        self._update_check_in_progress = True
+        self._update_button.configure(state="disabled", text="VÉRIFICATION…")
+
+        def worker():
+            try:
+                from app_update import CURRENT_VERSION, check_for_update
+                update = check_for_update(CURRENT_VERSION)
+                self.root.after(0, self._finish_update_check, update, None)
+            except Exception as exc:
+                self.root.after(0, self._finish_update_check, None, str(exc))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_update_check(self, update, error):
+        self._update_check_in_progress = False
+        self._update_button.configure(state="normal", text="↻ MISE À JOUR")
+        if error:
+            self.write_log(f"ERR: Vérification des mises à jour impossible : {error}")
+            messagebox.showerror(
+                "Mise à jour NIANG IA",
+                f"Impossible de vérifier les mises à jour GitHub.\n\n{error}",
+                parent=self.root,
+            )
+            return
+        if update is None:
+            from app_update import CURRENT_VERSION
+            self._update_button.configure(text="NIANG IA À JOUR")
+            self.root.after(5000, self._reset_update_button)
+            self.write_log("SYS: NIANG IA est déjà à jour.")
+            return
+
+        self._update_button.configure(text=f"VERSION {update.version}")
+        self.write_log(f"SYS: Mise à jour NIANG IA {update.version} disponible.")
+        if messagebox.askyesno(
+            "Mise à jour disponible",
+            f"NIANG IA {update.version} est disponible.\n\n"
+            "Télécharger et vérifier l'installateur officiel dans votre dossier "
+            "Téléchargements ?",
+            parent=self.root,
+        ):
+            self._download_update(update)
+
+    def _download_update(self, update):
+        self._update_button.configure(state="disabled", text="TÉLÉCHARGEMENT 0 %")
+
+        def report_progress(percent):
+            try:
+                self.root.after(0, self._set_update_download_progress, percent)
+            except tk.TclError:
+                pass
+
+        def worker():
+            try:
+                from app_update import download_update
+                installer = download_update(update, progress=report_progress)
+                self.root.after(0, self._finish_update_download, installer, None)
+            except Exception as exc:
+                self.root.after(0, self._finish_update_download, None, str(exc))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _set_update_download_progress(self, percent):
+        self._update_button.configure(text=f"TÉLÉCHARGEMENT {percent} %")
+
+    def _finish_update_download(self, installer, error):
+        self._update_button.configure(state="normal", text="↻ MISE À JOUR")
+        if error:
+            self.write_log(f"ERR: Téléchargement de la mise à jour impossible : {error}")
+            messagebox.showerror(
+                "Téléchargement impossible",
+                f"L'installateur n'a pas été téléchargé ou vérifié.\n\n{error}",
+                parent=self.root,
+            )
+            return
+
+        self._update_button.configure(text="INSTALLATEUR PRÊT")
+        self.root.after(8000, self._reset_update_button)
+        self.write_log(f"SYS: Installateur vérifié téléchargé : {installer}")
+        if messagebox.askyesno(
+            "Installateur vérifié",
+            f"L'installateur a été téléchargé et vérifié :\n{installer}\n\n"
+            "Lancer maintenant l'installation ? NIANG IA se fermera pour permettre "
+            "la mise à jour.",
+            parent=self.root,
+        ):
+            self._launch_update_installer(installer)
+
+    def _reset_update_button(self):
+        try:
+            if self._update_button.winfo_exists():
+                self._update_button.configure(text="↻ MISE À JOUR")
+        except tk.TclError:
+            pass
+
+    def _launch_update_installer(self, installer):
+        try:
+            import subprocess
+            subprocess.Popen([str(installer)], close_fds=True)
+        except OSError as exc:
+            self.write_log(f"ERR: Lancement de l'installateur impossible : {exc}")
+            messagebox.showerror(
+                "Lancement impossible",
+                f"Exécutez manuellement cet installateur :\n{installer}\n\n{exc}",
+                parent=self.root,
+            )
+            return
+        self.root.after(500, self._close_application)
 
     def _build_file_drop_area(self):
         self._file_card = tk.Frame(
@@ -1297,6 +1416,22 @@ class KaizumiUI:
         self._silent_canvas.bind("<Button-1>", lambda e: self._toggle_silent_mode())
         self._draw_silent_button()
 
+        self._update_button = tk.Button(
+            self.root,
+            text="↻ MISE À JOUR",
+            command=self._check_for_updates,
+            fg=self.col["pri"],
+            bg=self.col["panel"],
+            activeforeground=self.col["bg"],
+            activebackground=self.col["pri"],
+            font=("Segoe UI", 8, "bold"),
+            borderwidth=0,
+            cursor="hand2",
+            highlightthickness=1,
+            highlightbackground=self.col["mid"],
+        )
+        self._update_button.place(x=294, y=BTN_Y, width=140, height=32)
+
     def _draw_silent_button(self):
         c = getattr(self, "_silent_canvas", None)
         if c is None:
@@ -1426,6 +1561,7 @@ class KaizumiUI:
         self._mute_canvas.place(x=18, y=footer_y)
         if getattr(self, "_silent_canvas", None) is not None:
             self._silent_canvas.place(x=136, y=footer_y)
+        self._update_button.place(x=294, y=footer_y, width=140, height=32)
         if W >= 900:
             self._left_deck.place(x=16, y=96, width=184, height=max(260, H - 210))
             self._right_deck.place(x=W - 216, y=96, width=200, height=max(260, H - 210))

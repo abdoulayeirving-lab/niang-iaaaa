@@ -92,6 +92,12 @@ locally as a separate configuration file. Both pages can be skipped. You can
 also configure a Gemini API key later in `config/api_keys.json`.
 After Gemini connects, NIANG IA greets the user aloud in the configured language
 on each application launch; this greeting is skipped in Text-only mode.
+In the left `COMMAND DECK`, select `CHECK FOR UPDATES` to check GitHub for a newer
+stable release. If one is available, NIANG IA asks permission before downloading
+the Windows installer to `Downloads`, verifies its size and SHA-256 digest
+against GitHub's release metadata, and asks before launching it. NIANG IA closes
+before installation so the installer can safely replace its files. The check
+only contacts the public GitHub release API and sends no application data.
 
 Download the latest Windows installer from the
 [GitHub Releases page](https://github.com/abdoulayeirving-lab/niang-iaaaa/releases/latest).
@@ -560,13 +566,16 @@ python -m unittest discover -s tests -v
 python -m pytest tests -q
 ```
 
-Run focused analysis and SSRF checks with:
+Run focused update, analysis, startup-greeting, and SSRF checks with:
 
 ```powershell
-python -m unittest tests.test_intelligent_analysis tests.test_p0_security.DocumentQaSsrTest tests.test_document_search -v
+python -m unittest tests.test_app_update tests.test_startup_greeting tests.test_intelligent_analysis tests.test_p0_security.DocumentQaSsrTest tests.test_document_search -v
 ```
 
-These tests mock Gemini and exercise extraction, PDF OCR fallback, image
+The updater tests verify stable-version detection, trusted GitHub release links,
+download size and SHA-256, redirect validation, and cleanup after failures.
+They do not download or run an installer. The analysis tests mock Gemini and
+exercise extraction, PDF OCR fallback, image
 validation/analysis handoff, audio/video upload cleanup, real WAV assembly, URL
 empty-page handling, and SSRF redirect/DNS checks. They do not require a Gemini
 key or contact Google.

@@ -11,7 +11,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 DIST = ROOT / "dist"
-VERSION = "1.0.13"
+VERSION = (ROOT / "VERSION.txt").read_text(encoding="ascii").strip()
 STAGE = DIST / f"NIANG_IA_{VERSION}"
 ARCHIVE = DIST / f"NIANG_IA_{VERSION}_windows.zip"
 PYTHON_INSTALLER_NAME = "python-3.12.10-amd64.exe"
@@ -50,6 +50,8 @@ ROOT_FILES = (
     "safety.py",
     "telegram_bot.py",
     "ui.py",
+    "app_update.py",
+    "VERSION.txt",
 )
 EXCLUDED_DIRS = {
     ".git",
