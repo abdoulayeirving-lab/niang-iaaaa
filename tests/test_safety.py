@@ -79,6 +79,20 @@ class RiskClassificationTest(unittest.TestCase):
             safety.Risk.MEDIUM,
         )
 
+    def test_workspace_reads_are_low_risk_and_writes_or_checks_require_confirmation(self):
+        for name in ("workspace_list_files", "workspace_read_file", "workspace_search"):
+            with self.subTest(name=name):
+                self.assertEqual(safety.classify(name, {}), safety.Risk.LOW)
+                self.assertFalse(safety.needs_confirmation(name, {}))
+
+        for name in (
+            "workspace_write_file", "workspace_edit_file",
+            "workspace_apply_patch", "workspace_run_check",
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(safety.classify(name, {}), safety.Risk.HIGH)
+                self.assertTrue(safety.needs_confirmation(name, {}))
+
     def test_video_studio_status_is_read_only_but_analysis_is_medium(self):
         self.assertEqual(
             safety.classify("video_studio", {"action": "status"}),
@@ -101,7 +115,7 @@ class RiskClassificationTest(unittest.TestCase):
             safety.classify("computer_control", {"action": "screen_describe"}),
             safety.Risk.HIGH,
         )
-        self.assertIn("sent to Gemini", safety.describe(
+        self.assertIn("disabled", safety.describe(
             "computer_control", {"action": "screen_describe"}
         ))
         self.assertEqual(
@@ -112,12 +126,28 @@ class RiskClassificationTest(unittest.TestCase):
             safety.classify("computer_control", {"action": "stop"}),
             safety.Risk.LOW,
         )
+        self.assertEqual(
+            safety.classify("computer_control", {"action": "screen_monitor_start"}),
+            safety.Risk.HIGH,
+        )
+        self.assertTrue(safety.needs_confirmation(
+            "computer_control", {"action": "screen_monitor_start"}
+        ))
+        for action in ("screen_monitor_status", "screen_monitor_stop"):
+            with self.subTest(action=action):
+                self.assertEqual(
+                    safety.classify("computer_control", {"action": action}),
+                    safety.Risk.LOW,
+                )
 
-    def test_screen_upload_and_computer_text_input_require_confirmation(self):
+    def test_screen_analysis_is_disabled_and_camera_or_text_input_requires_confirmation(self):
         screen_args = {"angle": "screen", "text": "read the window"}
         self.assertEqual(safety.classify("screen_process", screen_args), safety.Risk.HIGH)
         self.assertTrue(safety.needs_confirmation("screen_process", screen_args))
-        self.assertIn("send that image", safety.describe("screen_process", screen_args))
+        self.assertIn("no screenshot", safety.describe("screen_process", screen_args))
+        camera_args = {"angle": "camera", "text": "describe the camera"}
+        self.assertTrue(safety.needs_confirmation("screen_process", camera_args))
+        self.assertIn("send that image", safety.describe("screen_process", camera_args))
         self.assertEqual(
             safety.classify("computer_settings", {"action": "type_text", "value": "private text"}),
             safety.Risk.HIGH,
@@ -216,6 +246,16 @@ class SanitizeTest(unittest.TestCase):
         out = safety.sanitize("any", {"access_token": "abc123", "path": "C:/x"})
         self.assertEqual(out["access_token"], "***")
         self.assertEqual(out["path"], "C:/x")
+
+    def test_workspace_source_content_is_redacted_from_logs(self):
+        for tool, field in (
+            ("workspace_write_file", "content"),
+            ("workspace_edit_file", "replace"),
+            ("workspace_apply_patch", "patch"),
+        ):
+            with self.subTest(tool=tool):
+                result = safety.sanitize(tool, {field: "private project source"})
+                self.assertEqual(result[field], "[source content redacted]")
 
     def test_browser_page_data_is_not_written_to_logs(self):
         import logger

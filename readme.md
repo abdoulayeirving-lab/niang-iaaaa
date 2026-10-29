@@ -167,6 +167,64 @@ fetcher only permits public HTTP(S) pages, limits downloads to 5 MiB, checks
 DNS results and each redirect, and refuses private or local network addresses.
 Login-only and script-rendered content may not be available.
 
+For interactive browsing, ask NIANG IA to open a website and then inspect or
+interact with it. Its managed Playwright browser keeps tabs for the life of the
+app and supports listing/switching tabs, page-state inspection, navigation
+history, visible-control inspection, text entry, form filling, option selection,
+screenshots, and waiting for elements. Ask it to inspect the page before
+choosing a control; it must not claim a change was saved unless the page
+confirms it. Website searches reuse the current tab, including YouTube search
+when the active tab is already YouTube. Form submission still requires explicit
+confirmation. The browser only allows public HTTP(S) hosts by default; DNS
+results and redirected/subresource requests to private, loopback, link-local,
+reserved, or metadata addresses are blocked. For a trusted local development
+host only, set `NIANG_IA_BROWSER_ALLOWED_LOCAL_HOSTS` to an exact comma-separated
+hostname list (for example `localhost,127.0.0.1`) before launching NIANG IA.
+This explicit exception weakens the private-network protection for those exact
+hosts; do not allowlist hosts you do not control. Screenshots are saved to
+`Downloads`. The managed browser cannot inspect tabs in unrelated browser
+windows.
+
+### Project workspace tools
+
+For code tasks, set `NIANG_IA_WORKSPACE_ROOT` to the one project directory
+NIANG IA is allowed to list, read, search, or edit, then start the app from the
+same PowerShell session:
+
+```powershell
+$env:NIANG_IA_WORKSPACE_ROOT = "C:\path\to\your\project"
+python main.py
+```
+
+In the installed app, set this environment variable in Windows before
+launching NIANG IA. The `workspace_*` tools accept relative paths only, reject
+path traversal and symbolic links, hide common credential/environment files,
+skip generated and version-control directories, and cap text files at 1 MB.
+Code writes and the fixed project-check commands require the app's explicit
+confirmation flow. NIANG IA can create or replace a file, or make a targeted
+exact-text edit; targeted edits are applied only when the observed match count
+equals the requested count. It can also apply context-verified unified diffs to
+existing files; every patch target and hunk is checked before any file is
+written. The only check commands are `python-tests`,
+`python-unittest`, `python-compile`, `npm-test`, `npm-build`, `npm-lint`,
+`git-status`, and `git-diff-check`; arbitrary shell strings are not accepted.
+Checks run without a shell in the selected directory, with a 120-second cap
+and a reduced environment, but as the current Windows user. Test/build code
+from an untrusted repository can still access that user's files through the
+operating system; review the project before approving a check. This is not an
+OS-level sandbox. Starting persistent development servers is not exposed by
+these tools. Existing general desktop/file/command tools remain separate
+features governed by their existing confirmation rules.
+
+The local screen monitor targets a 30 ms interval after explicit confirmation;
+the actual sampling rate depends on Windows capture performance and is reported
+in its status. It samples a reduced grayscale representation and reports only
+change counts and timestamps. It does not retain screenshots, OCR text, or send
+screen images to Gemini.
+Screen-description and visual-search actions that upload captures are disabled.
+The monitor detects pixel changes only; it does not understand visible text or
+objects. Stop it with `computer_control` action `screen_monitor_stop`.
+
 Press `Ctrl+Shift+V` to open voice-over generation. Enter text or leave the
 field empty to narrate the currently selected documents, then choose a voice,
 language, pace, and tone. The Gemini TTS service creates a real WAV file with
@@ -367,13 +425,13 @@ and enforces it centrally — no per-tool ad-hoc checks.
 
 ## 🧩 Tools
 
-Kaizumi exposes **53 tools** to the model. The full list lives in `main.py`
+Kaizumi exposes **69 tools** to the model. The full list lives in `main.py`
 (`_build_tool_schemas`); highlights:
 
 | Category | Tools |
 |----------|-------|
 | 🖥️ **System** | `system_status`, `task_manager`, `computer_settings`, `autostart`, `clipboard`, `media_control`, `notify`, `pc_health` |
-| 🗂️ **Files** | `file_controller`, `open_app`, `desktop_control`, `read_pdf`, `pdf_qa`, `read_document`, `document_qa`, `search_documents`, `create_document`, `analyze_data`, `create_presentation`, `create_spreadsheet` |
+| 🗂️ **Files** | `file_controller`, `workspace_list_files`, `workspace_read_file`, `workspace_write_file`, `workspace_edit_file`, `workspace_apply_patch`, `workspace_search`, `workspace_run_check`, `open_app`, `desktop_control`, `read_pdf`, `pdf_qa`, `read_document`, `document_qa`, `search_documents`, `create_document`, `analyze_data`, `create_presentation`, `create_spreadsheet` |
 | 🌐 **Web** | `web_search`, `browser_control`, `youtube_video`, `weather_report`, `flight_finder`, `translate`, `set_live_translation`, `proactive_suggestions` |
 | 💬 **Communication** | `send_message`, `gmail`, `email_watch`, `calendar`, `drive`, `google_auth`, `google_auth_status`, `whatsapp_call` |
 | 🤖 **Automation** | `cmd_control`, `code_helper`, `dev_agent`, `agent_task`, `schedule`, `daily_briefing`, `game_updater`, `smart_home_control` |

@@ -73,6 +73,13 @@ TOOL_RISK = {
     "wake_word":         Risk.MEDIUM,
     "clipboard":         Risk.MEDIUM,
     "browser_control":   Risk.MEDIUM,
+    "workspace_list_files": Risk.LOW,
+    "workspace_read_file": Risk.LOW,
+    "workspace_search": Risk.LOW,
+    "workspace_write_file": Risk.HIGH,
+    "workspace_edit_file": Risk.HIGH,
+    "workspace_apply_patch": Risk.HIGH,
+    "workspace_run_check": Risk.HIGH,
     "computer_settings": Risk.MEDIUM,
     "computer_control":  Risk.MEDIUM,
     "vision_gesture":    Risk.MEDIUM,
@@ -117,6 +124,9 @@ _ACTION_RISK = {
         "get_screen_info": Risk.LOW,
         "stop": Risk.LOW,
         "mouse_up": Risk.LOW,
+        "screen_monitor_status": Risk.LOW,
+        "screen_monitor_stop": Risk.LOW,
+        "screen_monitor_start": Risk.HIGH,
         "list_windows": Risk.HIGH,
         "windows": Risk.HIGH,
         "what_is_open": Risk.HIGH,
@@ -338,23 +348,23 @@ def describe(name: str, args: dict | None) -> str:
         return "resume sending live WhatsApp call audio to Gemini and the AI voice to the call"
     if name == "computer_control":
         if action in {"screen_describe", "screen_find"}:
-            return (
-                f"{action.replace('_', ' ')} using a screenshot of the current desktop; "
-                "the screenshot will be sent to Gemini for visual analysis"
-            )
+            return f"{action.replace('_', ' ')} is disabled to prevent screen images being sent to Gemini"
         if action == "screen_click":
-            return (
-                "send a screenshot of the current desktop to Gemini to locate a target, "
-                "then click it only if visual confidence is at least 0.8"
-            )
+            return "screen-based clicking is disabled to prevent screen images being sent to Gemini"
+        if action == "screen_monitor_start":
+            return "start local-only screen change sampling with a 30 ms target; no images or text are saved or uploaded"
+        if action in {"screen_monitor_status", "screen_monitor_stop"}:
+            return f"{action.replace('_', ' ')} for local-only screen change sampling"
         if action in {"screenshot", "copy", "user_data"}:
             return f"read potentially private computer data ({action})"
         return f"control or inspect the Windows interface ({action or 'unspecified action'})"
     if name == "screen_process":
         source = str(args.get("angle", "screen")).lower()
+        if source != "camera":
+            return "read local screen-monitor change counts only; no screenshot is captured or sent to Gemini"
         return (
-            f"capture the current {'webcam' if source == 'camera' else 'screen'} and "
-            "send that image and the question to Gemini for analysis"
+            "capture the webcam only for this explicit request and send that image "
+            "and question to Gemini for analysis"
         )
     if name == "computer_settings":
         action = action.replace(" ", "_").replace("-", "_")
@@ -413,6 +423,18 @@ def describe(name: str, args: dict | None) -> str:
         target = args.get("text") or args.get("selector") or "the current form"
         return f"submit the form using {target}; this may save or change website data"
 
+    if name == "workspace_write_file":
+        return f"create or replace {args.get('path', 'a file')} inside the configured workspace"
+    if name == "workspace_edit_file":
+        return f"edit {args.get('path', 'a file')} inside the configured workspace"
+    if name == "workspace_apply_patch":
+        return "apply a verified code patch to existing files inside the configured workspace"
+    if name == "workspace_run_check":
+        return (
+            f"run the approved {args.get('check', 'project')} check in the configured "
+            "workspace as the current Windows user"
+        )
+
     if name == "smart_home_control":
         target = args.get("area") or args.get("device", "smart home device")
         return f"{action} {target}"
@@ -437,6 +459,14 @@ def sanitize(name: str, args: dict | None) -> dict:
     for k, v in args.items():
         lk = str(k).lower()
         if (
+            name in {
+                "workspace_write_file", "workspace_edit_file",
+                "workspace_apply_patch",
+            }
+            and lk in {"content", "find", "replace", "patch"}
+        ):
+            safe[k] = "[source content redacted]"
+        elif (
             name in {"computer_control", "computer_settings", "screen_process"}
             and lk in {"text", "value", "description", "expected", "path", "image", "title"}
         ):

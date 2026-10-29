@@ -682,39 +682,9 @@ def _smart_type(text: str, clear_first: bool = True) -> str:
 
 
 def _describe_screen() -> str:
-    """Describe the current screen using Gemini after explicit confirmation."""
-    import io
-    import google.generativeai as genai
-
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        api_key = json.load(f)["gemini_api_key"]
-
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-3.5-flash-lite")
-
-    _ensure_pyautogui()
-    width, height = _pg().size()
-    screenshot = _pg().screenshot()
-
-    buffer = io.BytesIO()
-    screenshot.save(buffer, format="PNG")
-
-    prompt = (
-        f"Capture d'écran de {width}x{height} pixels. "
-        "Décris en français les applications, fenêtres et éléments "
-        "réellement visibles. Résume uniquement les textes lisibles. "
-        "Ne devine pas ce qui est illisible. Réponds de façon concise."
+    raise RuntimeError(
+        "Screen-image analysis is disabled: NIANG IA never sends screenshots to Gemini."
     )
-
-    response = model.generate_content([
-        {"mime_type": "image/png", "data": buffer.getvalue()},
-        prompt
-    ])
-
-    result = getattr(response, "text", None)
-    if not result or not result.strip():
-        raise RuntimeError("Gemini did not return a usable screen description.")
-    return result.strip()
 
 
 def _parse_visual_target(text: str, width: int, height: int) -> dict | None:
@@ -748,39 +718,9 @@ def _parse_visual_target(text: str, width: int, height: int) -> dict | None:
 
 
 def _analyze_screen_for_element(description: str) -> dict | None:
-    """
-    Takes a screenshot and asks Gemini to find the coordinates
-    of a described element on screen. Returns (x, y) or None.
-    """
-    import google.generativeai as genai
-    import io
-    if not description.strip():
-        raise ValueError("Provide a visual description of the element to find.")
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        api_key = json.load(f)["gemini_api_key"]
-
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-3.5-flash-lite")
-    _ensure_pyautogui()
-    width, height = _pg().size()
-    screenshot = _pg().screenshot()
-    buffer = io.BytesIO()
-    screenshot.save(buffer, format="PNG")
-
-    prompt = (
-        f"This is a screenshot of a computer screen ({width}x{height} pixels). "
-        f"Find the element: '{description}'. Return only JSON with integer x and y "
-        "center coordinates, a confidence number from 0 to 1, e.g. "
-        '{"x":120,"y":240,"confidence":0.93}. If not found, return NOT_FOUND.'
+    raise RuntimeError(
+        "Visual screen search is disabled: NIANG IA never sends screenshots to Gemini."
     )
-    response = model.generate_content([
-        {"mime_type": "image/png", "data": buffer.getvalue()},
-        prompt
-    ])
-    text = getattr(response, "text", "")
-    if not text:
-        raise RuntimeError("Gemini returned no coordinates for the visual search.")
-    return _parse_visual_target(text.strip(), width, height)
 
 _SENSITIVE_PARAM_KEYS = {
     "text", "value", "password", "content", "message", "data",
@@ -833,6 +773,9 @@ def computer_control(
       active_window : Current foreground window title and bounds
       find_ui_elements : Accessible controls from the active Windows window
       wait_for_visual_change : Wait for a real screen change
+      screen_monitor_start : Sample screen changes locally at a 30 ms target (no uploads)
+      screen_monitor_status : Show local monitor state and change counts only
+      screen_monitor_stop : Stop local screen monitoring
       verify_action : Verify visible text through Windows UI Automation
       mouse_down / mouse_up : Hold or release a mouse button
       stop : Release held mouse buttons and cancel interruptible input
@@ -851,7 +794,40 @@ def computer_control(
     _log(f"[ComputerControl] Action: {action}  Params: {_safe_params(parameters)}")
 
     try:
-        if action == "type":
+        if action == "screen_monitor_start":
+            from actions.local_screen_monitor import start_monitor
+            result = start_monitor()
+            return _action_result(
+                action,
+                executed=result["state"] in {"starting", "running"},
+                result=result,
+                verified=result["state"] == "running",
+                error=result.get("error") or "",
+            )
+
+        elif action == "screen_monitor_status":
+            from actions.local_screen_monitor import monitor_status
+            result = monitor_status()
+            return _action_result(
+                action,
+                executed=True,
+                result=result,
+                verified=result["state"] in {"running", "stopped"},
+                error=result.get("error") or "",
+            )
+
+        elif action == "screen_monitor_stop":
+            from actions.local_screen_monitor import stop_monitor
+            result = stop_monitor()
+            return _action_result(
+                action,
+                executed=result["state"] != "running",
+                result=result,
+                verified=result["state"] == "stopped",
+                error=result.get("error") or "",
+            )
+
+        elif action == "type":
             text = parameters.get("text", "")
             return _action_result(action, executed=True, result=_type_text(text))
 
@@ -1041,56 +1017,18 @@ def computer_control(
             return _action_result(action, executed=True, result=_get_screen_size(), verified=True)
 
         elif action == "screen_describe":
-            return _action_result(
-                action,
-                executed=True,
-                result=_describe_screen(),
-                verified=False,
+            raise RuntimeError(
+                "Screen-image analysis is disabled: NIANG IA never sends screenshots to Gemini."
             )
 
         elif action == "screen_find":
-            description = parameters.get("description", "")
-            target = _analyze_screen_for_element(description)
-            if target:
-                return _action_result(
-                    action,
-                    executed=True,
-                    result={
-                        "coordinates": [target["x"], target["y"]],
-                        "identified": description,
-                        "confidence": target["confidence"],
-                    },
-                    verified=target["confidence"] >= 0.8,
-                )
-            return _action_result(action, executed=True, result={"found": False}, verified=False)
+            raise RuntimeError(
+                "Visual screen search is disabled: NIANG IA never sends screenshots to Gemini."
+            )
 
         elif action == "screen_click":
-            description = parameters.get("description", "")
-            target = _analyze_screen_for_element(description)
-            if target and target["confidence"] < 0.8:
-                return _action_result(
-                    action,
-                    executed=False,
-                    result={"confidence": target["confidence"]},
-                    error="Visual target confidence is below the 0.8 click threshold.",
-                )
-            if target:
-                time.sleep(0.2)
-                _click(x=target["x"], y=target["y"])
-                return _action_result(
-                    action,
-                    executed=True,
-                    result={
-                        "description": description,
-                        "coordinates": [target["x"], target["y"]],
-                        "confidence": target["confidence"],
-                        "follow_up_verification_required": True,
-                    },
-                )
-            return _action_result(
-                action,
-                executed=False,
-                error=f"Could not find on screen: {description}",
+            raise RuntimeError(
+                "Visual screen clicking is disabled: NIANG IA never sends screenshots to Gemini."
             )
 
         elif action == "random_data":

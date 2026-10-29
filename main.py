@@ -424,9 +424,9 @@ TOOL_DECLARATIONS = [
         "name": "open_app",
         "description": (
             "Quickly opens Windows applications through a hidden CMD start request; "
-            "the recognized name YouTube opens https://www.youtube.com. "
-            "Use this whenever the user asks to open, launch, or start any app, "
-            "website, or program. Pass only the app/site name, never a CMD command. "
+            "use it for installed desktop applications, not websites. For websites, "
+            "use browser_control so NIANG IA can inspect and reuse its managed tabs. "
+            "Pass only the application name, never a CMD command. "
             "Always call this tool â€” never just say you opened it."
         ),
         "parameters": {
@@ -515,17 +515,15 @@ TOOL_DECLARATIONS = [
     {
         "name": "screen_process",
         "description": (
-            "Captures and analyzes the screen or webcam image and RETURNS the analysis "
-            "as text. MUST be called when user asks what is on screen, what you see, "
-            "analyze my screen, look at camera, etc. You have NO visual ability without "
-            "this tool. After it returns, speak the result naturally. "
-            "No other vision channel exists â€” this is the only way to see."
+            "Analyzes a webcam image only when explicitly requested. Screen captures "
+            "are never sent to Gemini; for the screen, report local monitor change "
+            "counts only and do not claim to understand visible content."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "angle": {"type": "STRING", "description": "'screen' to capture display, 'camera' for webcam. Default: 'screen'"},
-                "text":  {"type": "STRING", "description": "The question or instruction about the captured image"}
+                "angle": {"type": "STRING", "description": "'screen' for local-only status (no capture upload), 'camera' for explicit webcam analysis"},
+                "text":  {"type": "STRING", "description": "The question about the explicitly requested webcam image or local screen-monitor status"}
             },
             "required": ["text"]
         }
@@ -554,13 +552,15 @@ TOOL_DECLARATIONS = [
     {
         "name": "browser_control",
         "description": (
-            "Navigates and reads websites in the browser, inspects visible headings, "
-            "links, buttons, and non-password fields, searches pages, and fills fields. "
-            "Reuse the current page when possible. This tool controls its own managed "
-            "browser page and may not access the user's other browser windows or tabs; "
-            "use screen observation and guarded desktop controls for those windows. "
-            "Use inspect to discover the actual interface and available selectors. "
-            "Base each next step on the actual page result. "
+            "Controls NIANG IA's managed Playwright browser: open/reuse pages, list and "
+            "switch managed tabs, inspect page state and visible controls, navigate back "
+            "or forward, wait for elements, fill fields, select options, and capture "
+            "screenshots to Downloads. It may not access the user's other browser windows or tabs. "
+            "Inspect actual page state before interacting, reuse the active site tab for "
+            "searches when appropriate, and verify the resulting URL/title/state. "
+            "Only public HTTP(S) hosts are allowed by default. Local/private addresses "
+            "are blocked unless the user explicitly configures "
+            "NIANG_IA_BROWSER_ALLOWED_LOCAL_HOSTS with exact hostnames. "
             "Use submit_form only after describing the exact form submission and "
             "receiving explicit user approval; do not use click or Enter to bypass "
             "that confirmation. Never invent page content or claim a change was saved "
@@ -569,11 +569,14 @@ TOOL_DECLARATIONS = [
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action":      {"type": "STRING", "description": "go_to | search | inspect | click | type | scroll | fill_form | submit_form | smart_click | smart_type | get_text | press | close"},
+                "action":      {"type": "STRING", "description": "go_to | search | new_tab | tabs | switch_tab | state | back | forward | inspect | click | type | scroll | fill_form | select_option | submit_form | smart_click | smart_type | get_text | wait_for_element | screenshot | close_tab | press | close"},
                 "url":         {"type": "STRING", "description": "URL for go_to action"},
                 "query":       {"type": "STRING", "description": "Search query for search action"},
                 "selector":    {"type": "STRING", "description": "CSS selector for click/type or submit_form"},
                 "text":        {"type": "STRING", "description": "Text to click or type; submit button text for submit_form"},
+                "value":       {"type": "STRING", "description": "Option value for select_option"},
+                "tab_id":      {"type": "STRING", "description": "Managed tab ID for switch_tab or close_tab"},
+                "timeout_ms":  {"type": "INTEGER", "description": "Wait timeout in milliseconds (1000-30000)"},
                 "description": {"type": "STRING", "description": "Element description for smart_click/smart_type"},
                 "fields":      {
                     "type": "ARRAY",
@@ -593,6 +596,125 @@ TOOL_DECLARATIONS = [
             },
             "required": ["action"]
         }
+    },
+    {
+        "name": "workspace_list_files",
+        "description": (
+            "Lists files inside the exact folder configured in "
+            "NIANG_IA_WORKSPACE_ROOT. Use relative paths only; credentials, "
+            "environment files, version-control metadata, and dependency caches "
+            "are hidden. Returns an explicit setup error if no workspace is configured."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "path": {"type": "STRING", "description": "Relative folder inside the authorized workspace; default is its root"},
+                "max_entries": {"type": "INTEGER", "description": "Maximum entries to return (1-500)"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "workspace_read_file",
+        "description": (
+            "Reads a UTF-8 text file inside NIANG_IA_WORKSPACE_ROOT. Uses a "
+            "relative path, rejects symlinks/out-of-root paths, and refuses "
+            "credential/environment files and files over 1 MB."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "path": {"type": "STRING", "description": "Relative text-file path inside the authorized workspace"},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "workspace_write_file",
+        "description": (
+            "Creates or replaces a UTF-8 text file only inside the exact "
+            "NIANG_IA_WORKSPACE_ROOT directory configured by the user. Paths "
+            "must be relative; credential/environment files, symlinks, and "
+            "content over 1 MB are rejected. Requires explicit confirmation."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "path": {"type": "STRING", "description": "Relative target path inside the authorized workspace"},
+                "content": {"type": "STRING", "description": "Complete UTF-8 file content"},
+            },
+            "required": ["path", "content"],
+        },
+    },
+    {
+        "name": "workspace_edit_file",
+        "description": (
+            "Edits an existing UTF-8 text file inside NIANG_IA_WORKSPACE_ROOT "
+            "by replacing exact text only when its occurrence count matches "
+            "the expected count. Paths remain workspace-confined; requires "
+            "explicit confirmation."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "path": {"type": "STRING", "description": "Relative existing file path inside the authorized workspace"},
+                "find": {"type": "STRING", "description": "Exact non-empty text to replace"},
+                "replace": {"type": "STRING", "description": "Replacement text"},
+                "expected_occurrences": {"type": "INTEGER", "description": "Expected exact match count (1-100; default 1)"},
+            },
+            "required": ["path", "find", "replace"],
+        },
+    },
+    {
+        "name": "workspace_apply_patch",
+        "description": (
+            "Applies a context-verified unified diff to existing UTF-8 text files "
+            "inside NIANG_IA_WORKSPACE_ROOT. All paths and hunks are validated "
+            "before writes; paths must match between old and new headers. "
+            "File creation and deletion are not supported. Requires confirmation."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "patch": {"type": "STRING", "description": "Unified diff containing one or more existing-file updates"},
+            },
+            "required": ["patch"],
+        },
+    },
+    {
+        "name": "workspace_search",
+        "description": (
+            "Searches text inside NIANG_IA_WORKSPACE_ROOT only. Uses a relative "
+            "path, skips credentials, environment files, symlinks, generated "
+            "directories, and files over 1 MB."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "query": {"type": "STRING", "description": "Text to find"},
+                "path": {"type": "STRING", "description": "Relative file or folder to search; default is workspace root"},
+                "max_results": {"type": "INTEGER", "description": "Maximum matching lines to return (1-100)"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "workspace_run_check",
+        "description": (
+            "Runs one of a fixed set of project checks in NIANG_IA_WORKSPACE_ROOT "
+            "without a shell: python-tests, python-unittest, python-compile, "
+            "npm-test, npm-build, npm-lint, git-status, or git-diff-check. "
+            "Project test/build scripts execute as the current Windows user, "
+            "so only run checks for trusted projects. Requires confirmation."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "check": {"type": "STRING", "description": "One of the documented fixed check IDs"},
+                "timeout_seconds": {"type": "INTEGER", "description": "Timeout, limited to 1-120 seconds"},
+            },
+            "required": ["check"],
+        },
     },
     {
         "name": "file_controller",
@@ -704,18 +826,18 @@ TOOL_DECLARATIONS = [
     {
         "name": "computer_control",
         "description": (
-            "Guarded local Windows UI control: capture screen, inspect accessible "
+            "Guarded local Windows UI control: sample screen changes locally with "
+            "a 30 ms target interval (actual rate depends on Windows capture speed), "
+            "without saving or sending screenshots; inspect accessible "
             "controls, move/click/drag/type, wait for visual changes, and verify "
-            "visible outcomes. Observe the current screen before any screen-dependent "
-            "action and again after important changes. The screenshot is a point-in-time "
-            "view, not continuous monitoring. All input or private-screen actions "
-            "require explicit confirmation. Use Ctrl+Alt+Pause as emergency stop "
-            "after enabling it."
+            "visible outcomes. Screen descriptions and visual search that require "
+            "uploading a screenshot to Gemini are disabled. Monitoring start requires "
+            "explicit confirmation; stop and status are available at any time."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action":      {"type": "STRING", "description": "type | smart_type | click | double_click | right_click | hotkey | press | scroll | move | drag | mouse_down | mouse_up | copy | paste | screenshot | capture_screen | screen_info | active_window | find_ui_elements | wait_for_visual_change | verify_action | stop | enable_emergency_stop | disable_emergency_stop | wait | clear_field | focus_window | screen_describe | screen_find | screen_click | random_data | user_data"},
+                "action":      {"type": "STRING", "description": "type | smart_type | click | double_click | right_click | hotkey | press | scroll | move | drag | mouse_down | mouse_up | copy | paste | screenshot | capture_screen | screen_info | screen_monitor_start | screen_monitor_status | screen_monitor_stop | active_window | find_ui_elements | wait_for_visual_change | verify_action | stop | enable_emergency_stop | disable_emergency_stop | wait | clear_field | focus_window | screen_describe (disabled) | screen_find (disabled) | screen_click (disabled) | random_data | user_data"},
                 "text":        {"type": "STRING", "description": "Text to type or paste"},
                 "x":           {"type": "INTEGER", "description": "X coordinate"},
                 "y":           {"type": "INTEGER", "description": "Y coordinate"},
@@ -1657,7 +1779,9 @@ for _decl in TOOL_DECLARATIONS:
         "task_manager", "code_helper", "game_updater",
         "computer_settings", "computer_control", "calendar", "drive",
         "smart_home_control", "browser_control", "send_message", "autostart",
-        "whatsapp_call",
+        "whatsapp_call", "workspace_write_file", "workspace_edit_file",
+        "workspace_apply_patch",
+        "workspace_run_check",
     }:
         _decl.setdefault("parameters", {}).setdefault("properties", {})[
             "confirm"
@@ -2413,10 +2537,73 @@ class KaizumiLive:
                 args["fields"] = mapped_fields
             return browser_control(parameters=args, player=ui)
 
+        def _workspace_tool(function_name, args):
+            from agent import workspace_tools
+            function = getattr(workspace_tools, function_name)
+            return function(**args)
+
         return {
             "open_app":          (lambda a: open_app(parameters=a, response=None, player=ui), 60),
             "weather_report":    (lambda a: weather_action(parameters=a, player=ui), 60),
             "browser_control":   (_browser_control, 120),
+            "workspace_list_files": (
+                lambda a: _workspace_tool(
+                    "list_files",
+                    {"path": a.get("path", "."), "max_entries": a.get("max_entries", 200)},
+                ),
+                20,
+            ),
+            "workspace_read_file": (
+                lambda a: _workspace_tool("read_file", {"path": a.get("path", "")}),
+                20,
+            ),
+            "workspace_write_file": (
+                lambda a: _workspace_tool(
+                    "write_file",
+                    {"path": a.get("path", ""), "content": a.get("content", "")},
+                ),
+                30,
+            ),
+            "workspace_edit_file": (
+                lambda a: _workspace_tool(
+                    "edit_file",
+                    {
+                        "path": a.get("path", ""),
+                        "find": a.get("find", ""),
+                        "replace": a.get("replace", ""),
+                        "expected_occurrences": a.get("expected_occurrences", 1),
+                    },
+                ),
+                30,
+            ),
+            "workspace_apply_patch": (
+                lambda a: _workspace_tool(
+                    "apply_patch",
+                    {"patch": a.get("patch", "")},
+                ),
+                60,
+            ),
+            "workspace_search": (
+                lambda a: _workspace_tool(
+                    "search_text",
+                    {
+                        "query": a.get("query", ""),
+                        "path": a.get("path", "."),
+                        "max_results": a.get("max_results", 50),
+                    },
+                ),
+                30,
+            ),
+            "workspace_run_check": (
+                lambda a: _workspace_tool(
+                    "run_check",
+                    {
+                        "check": a.get("check", ""),
+                        "timeout_seconds": a.get("timeout_seconds", 60),
+                    },
+                ),
+                135,
+            ),
             "file_controller":   (lambda a: file_controller(parameters=a, player=ui), 60),
             "send_message":      (lambda a: send_message(parameters=a, response=None, player=ui, session_memory=None), 60),
             "reminder":          (lambda a: reminder(parameters=a, response=None, player=ui), 30),
@@ -3345,7 +3532,9 @@ class KaizumiLive:
                     await asyncio.sleep(0.1)
         except Exception as e:
             print(f"[NIANG IA] âŒ Mic: {e}")
-            raise
+            self.ui.write_log(
+                "ERR: Microphone indisponible — NIANG IA reste utilisable par texte."
+            )
 
     def _safe_put_mic(self, data):
         try:
@@ -3484,16 +3673,29 @@ class KaizumiLive:
 
     async def _play_audio(self):
         print("[NIANG IA] ðŸ”Š Play started")
-        loop = asyncio.get_event_loop()
+        stream = None
+        try:
+            if sd is None:
+                raise RuntimeError("sounddevice is not installed")
+            stream = sd.RawOutputStream(
+                samplerate=RECEIVE_SAMPLE_RATE,
+                channels=CHANNELS,
+                dtype="int16",
+                blocksize=CHUNK_SIZE,
+            )
+            stream.start()
+        except Exception as e:
+            print(f"[NIANG IA] Audio output unavailable: {e}")
+            self.ui.write_log(
+                "ERR: Sortie audio indisponible — les réponses restent accessibles dans la conversation."
+            )
+            if stream is not None:
+                try:
+                    stream.close()
+                except Exception as close_error:
+                    print(f"[NIANG IA] Audio stream cleanup failed: {close_error}")
+            stream = None
 
-        # SÃ¼rekli aÃ§Ä±k output stream â€” PyAudio'daki stream.write() davranÄ±ÅŸÄ±yla aynÄ±
-        stream = sd.RawOutputStream(
-            samplerate=RECEIVE_SAMPLE_RATE,
-            channels=CHANNELS,
-            dtype="int16",
-            blocksize=CHUNK_SIZE,
-        )
-        stream.start()
         try:
             while True:
                 chunk = await self.audio_in_queue.get()
@@ -3506,17 +3708,30 @@ class KaizumiLive:
                 if not self._is_speaking:
                     self.set_speaking(True)
                 self._last_play_ts = time.monotonic()
-                await asyncio.to_thread(stream.write, chunk)
+                if stream is not None:
+                    try:
+                        await asyncio.to_thread(stream.write, chunk)
+                    except Exception as e:
+                        print(f"[NIANG IA] Audio playback stopped: {e}")
+                        self.ui.write_log(
+                            "ERR: Sortie audio interrompue — NIANG IA continue en mode texte."
+                        )
+                        try:
+                            stream.stop()
+                            stream.close()
+                        except Exception as close_error:
+                            print(f"[NIANG IA] Audio stream cleanup failed: {close_error}")
+                        stream = None
                 if self.audio_in_queue.empty() and self._turn_complete:
                     self._turn_complete = False
                     self.set_speaking(False)
-        except Exception as e:
-            print(f"[NIANG IA] âŒ Play: {e}")
-            raise
         finally:
             self.set_speaking(False)
-            stream.stop()
-            stream.close()
+            if stream is not None:
+                try:
+                    stream.stop()
+                finally:
+                    stream.close()
 
     async def run(self):
         self._loop = asyncio.get_event_loop()

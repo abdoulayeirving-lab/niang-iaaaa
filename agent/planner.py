@@ -25,6 +25,9 @@ ALLOWED_TOOLS = {
     "translate", "media_control", "read_document", "document_qa", "search_documents", "calendar",
     "drive", "schedule", "create_presentation", "create_spreadsheet",
     "smart_home_control", "create_document", "analyze_data",
+    "workspace_list_files", "workspace_read_file", "workspace_write_file",
+    "workspace_edit_file", "workspace_apply_patch",
+    "workspace_search", "workspace_run_check",
 }
 
 
@@ -35,8 +38,21 @@ ABSOLUTE RULES:
 - NEVER use generated_code or write Python scripts. It does not exist.
 - NEVER reference previous step results in parameters. Every step is independent.
 - Use web_search for ANY information retrieval, research, or current data.
-- Use file_controller to save content to disk.
-- Use cmd_control to open files or run system commands.
+- Use file_controller for ordinary user files outside code workspaces.
+- For source-code projects, use workspace_* tools only; they are confined to the
+  user-configured NIANG_IA_WORKSPACE_ROOT. Never use cmd_control for project work.
+  - For a small, targeted source edit, prefer workspace_edit_file after reading
+    the target file. Set expected_occurrences to the exact number of intended
+    matches; if the count is wrong, stop and inspect before attempting another edit.
+  - For a multi-line or multi-file change to existing source files, read the
+    relevant files, prepare a unified diff, and use workspace_apply_patch. The
+    patch is validated against current file context and requires confirmation.
+    Use workspace_write_file for new files. Never apply or run unreviewed code.
+- Use cmd_control only for separate desktop/system tasks; it is not a project
+  terminal or test runner.
+- A workspace root may be unconfigured. Report that prerequisite instead of
+  guessing another directory.
+- Never treat a tool's error, timeout, or safety-blocked result as success.
 - Max 5 steps. Use the minimum steps needed.
 
 AVAILABLE TOOLS AND THEIR PARAMETERS:
@@ -58,12 +74,49 @@ game_updater
   shutdown_when_done: boolean (optional)
 
 browser_control
-  action: "go_to" | "search" | "inspect" | "click" | "type" | "scroll" | "fill_form" | "get_text" | "press" | "close" (required)
+  action: "go_to" | "search" | "new_tab" | "tabs" | "switch_tab" | "state" | "back" | "forward" | "inspect" | "click" | "type" | "scroll" | "fill_form" | "select_option" | "get_text" | "wait_for_element" | "screenshot" | "close_tab" | "press" | "close" (required)
   url: string (for go_to)
   query: string (for search)
   text: string (for click/type)
   fields: object mapping CSS selectors to values (for fill_form; does not submit)
+  tab_id: string (for switch_tab or close_tab)
+  selector: string (for select_option or wait_for_element)
+  value: string (for select_option)
+  timeout_ms: integer (for wait_for_element, 1000-30000)
   direction: "up" | "down" (for scroll)
+  Before navigation or interaction, inspect tabs/page state rather than relying on conversation history.
+  Reuse the active site tab for follow-up searches. Private/local hosts are blocked unless
+  the user explicitly configures NIANG_IA_BROWSER_ALLOWED_LOCAL_HOSTS.
+
+workspace_list_files
+  path: relative folder inside the configured workspace (optional)
+  max_entries: integer, 1-500 (optional)
+
+workspace_read_file
+  path: relative UTF-8 text file inside the configured workspace (required)
+
+workspace_write_file
+  path: relative target file inside the configured workspace (required)
+  content: complete UTF-8 content (required; asks for confirmation)
+
+workspace_edit_file
+  path: relative existing file inside the configured workspace (required)
+  find: exact non-empty text to replace (required)
+  replace: replacement text (required)
+  expected_occurrences: exact expected match count, 1-100 (optional, default 1; asks for confirmation)
+
+workspace_apply_patch
+  patch: unified diff for existing UTF-8 workspace files (required; asks for confirmation)
+
+workspace_search
+  query: text to find (required)
+  path: relative file/folder inside the configured workspace (optional)
+  max_results: integer, 1-100 (optional)
+
+workspace_run_check
+  check: python-tests | python-unittest | python-compile | npm-test | npm-build |
+         npm-lint | git-status | git-diff-check (required; asks for confirmation)
+  timeout_seconds: integer, 1-120 (optional)
 
 file_controller
   action: "write" | "create_file" | "read" | "list" | "delete" | "move" | "copy" | "find" | "disk_usage" | "zip" | "unzip" (required)

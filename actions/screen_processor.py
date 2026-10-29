@@ -216,17 +216,20 @@ def screen_process(
         return "No question provided for screen analysis, sir."
 
     angle = (parameters or {}).get("angle", "screen").lower().strip()
+    if angle != "camera":
+        from actions.local_screen_monitor import monitor_status
+        status = monitor_status()
+        return (
+            "Screen-image analysis is disabled: NIANG IA never sends screenshots "
+            "to Gemini. Local screen monitor status: "
+            f"{status['state']}; changes detected: {status['changes_detected']}."
+        )
     print(f"[ScreenProcess] angle={angle!r}  text={user_text!r}")
 
     try:
-        if angle == "camera":
-            image_bytes = _capture_camera()
-            mime_type   = "image/jpeg"
-            print("[ScreenProcess] ðŸ“· Camera captured")
-        else:
-            image_bytes = _capture_screenshot()
-            mime_type   = "image/jpeg" if _PIL_OK else "image/png"
-            print("[ScreenProcess] ðŸ–¥ï¸ Screen captured")
+        image_bytes = _capture_camera()
+        mime_type   = "image/jpeg"
+        print("[ScreenProcess] ðŸ“· Camera captured")
     except Exception as e:
         import traceback; traceback.print_exc()
         print(f"[ScreenProcess] âŒ Capture error: {e}")
@@ -250,6 +253,5 @@ if __name__ == "__main__":
     result = screen_process({"angle": mode, "text": request}, player=None)
     print(f"Analyzed â€” {time.perf_counter()-t0:.3f}s")
     print(f"\n{'âœ…' if result else 'âŒ'}")
-
 
 

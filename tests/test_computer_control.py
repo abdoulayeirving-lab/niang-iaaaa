@@ -184,10 +184,9 @@ class ComputerControlTests(unittest.TestCase):
                 '{"x":100,"y":20,"confidence":0.93}', 100, 80
             )
 
-    def test_visual_click_is_blocked_below_confidence_threshold(self):
-        target = {"x": 20, "y": 30, "confidence": 0.79}
+    def test_visual_screen_click_is_disabled_without_uploading_a_capture(self):
         with (
-            patch.object(computer_control, "_analyze_screen_for_element", return_value=target),
+            patch.object(computer_control, "_analyze_screen_for_element") as analyze,
             patch.object(computer_control, "_click") as click,
         ):
             result = json.loads(computer_control.computer_control({
@@ -195,23 +194,9 @@ class ComputerControlTests(unittest.TestCase):
                 "description": "Save button",
             }))
         self.assertFalse(result["executed"])
-        self.assertIn("0.8 click threshold", result["error"])
+        self.assertIn("never sends screenshots to Gemini", result["error"])
+        analyze.assert_not_called()
         click.assert_not_called()
-
-    def test_visual_click_runs_only_for_confident_target_and_requires_followup(self):
-        target = {"x": 20, "y": 30, "confidence": 0.94}
-        with (
-            patch.object(computer_control, "_analyze_screen_for_element", return_value=target),
-            patch.object(computer_control, "_click") as click,
-        ):
-            result = json.loads(computer_control.computer_control({
-                "action": "screen_click",
-                "description": "Save button",
-            }))
-        click.assert_called_once_with(x=20, y=30)
-        self.assertTrue(result["executed"])
-        self.assertFalse(result["verified"])
-        self.assertTrue(result["result"]["follow_up_verification_required"])
 
     def test_active_window_controls_are_reported_with_accessible_roles(self):
         class FakeBounds:

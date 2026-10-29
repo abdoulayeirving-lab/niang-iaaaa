@@ -204,6 +204,28 @@ def _call_tool(tool: str, parameters: dict, speak: Callable | None) -> str:
         from actions.browser_control import browser_control
         return browser_control(parameters=parameters, player=None) or "Done."
 
+    elif tool == "workspace_list_files":
+        from agent.workspace_tools import list_files
+        return list_files(**parameters)
+    elif tool == "workspace_read_file":
+        from agent.workspace_tools import read_file
+        return read_file(**parameters)
+    elif tool == "workspace_write_file":
+        from agent.workspace_tools import write_file
+        return write_file(**parameters)
+    elif tool == "workspace_edit_file":
+        from agent.workspace_tools import edit_file
+        return edit_file(**parameters)
+    elif tool == "workspace_apply_patch":
+        from agent.workspace_tools import apply_patch
+        return apply_patch(**parameters)
+    elif tool == "workspace_search":
+        from agent.workspace_tools import search_text
+        return search_text(**parameters)
+    elif tool == "workspace_run_check":
+        from agent.workspace_tools import run_check
+        return run_check(**parameters)
+
     elif tool == "file_controller":
         from actions.file_controller import file_controller
         return file_controller(parameters=parameters, player=None) or "Done."
@@ -418,10 +440,25 @@ def _call_tool_with_timeout(tool: str, parameters: dict, speak: Callable | None,
             return fut.result(timeout=TOOL_TIMEOUT_S)
         except FutureTimeout:
             fut.cancel()
-            return (f"Tool '{tool}' timed out after {TOOL_TIMEOUT_S}s and was "
-                    f"stopped to protect the task queue.")
+            raise TimeoutError(
+                f"Tool '{tool}' timed out after {TOOL_TIMEOUT_S}s; its result is unknown."
+            )
         except Exception as e:
             raise
+
+
+def _is_browser_failure(result: str) -> bool:
+    lowered = result.strip().lower()
+    return lowered.startswith((
+        "blocked navigation:", "navigation blocked:", "navigation error:",
+        "browser error:", "browser action timed out.", "timeout loading:",
+        "click error:", "type error:", "form submission failed:", "could not ",
+        "unknown action:", "youtube search failed", "youtube is open, but",
+        "timed out waiting", "tab not found", "expected one",
+        "multiple fields", "no selector", "no back history",
+        "no forward history",
+    ))
+
 
 class AgentExecutor:
 
@@ -497,6 +534,12 @@ class AgentExecutor:
                         break
                     try:
                         result = _call_tool_with_timeout(tool, params, speak, cancel_flag)
+                        if result.strip().lower().startswith("blocked for safety:"):
+                            return f"Task stopped; no action was taken. {result}"
+                        if tool == "browser_control" and _is_browser_failure(result):
+                            raise RuntimeError(result)
+                        if tool == "workspace_run_check" and " failed with exit code " in result:
+                            raise RuntimeError(result)
                         step_results[step_num] = result 
                         completed_steps.append(step)
                         self._report_progress(
@@ -508,17 +551,14 @@ class AgentExecutor:
                         break
 
                     except UnknownToolError as e:
-                        # Deterministic, cheap: the tool simply doesn't exist.
-                        # Don't spend an LLM analysis round-trip on it â€” skip.
-                        print(f"[Executor] â­ï¸ Step {step_num}: {e} â€” skipping")
-                        completed_steps.append(step)
-                        step_results[step_num] = str(e)
+                        msg = f"Task stopped because the planned tool is unavailable: {e}"
+                        if speak:
+                            speak(msg)
                         self._report_progress(
-                            on_progress, "running", f"{step_num}: {desc}",
+                            on_progress, "failed", f"{step_num}: {desc}",
                             len(completed_steps), len(completed_steps) + len(steps),
                         )
-                        step_ok = True
-                        break
+                        return msg
 
                     except Exception as e:
                         error_msg = str(e)

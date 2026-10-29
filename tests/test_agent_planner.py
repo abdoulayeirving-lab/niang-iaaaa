@@ -25,6 +25,32 @@ class PlanValidationTest(unittest.TestCase):
                 ]
             }, "goal")
 
+    def test_accepts_workspace_edit_tool(self):
+        plan = _validate_plan({
+            "steps": [{
+                "tool": "workspace_edit_file",
+                "description": "Update a targeted source line",
+                "parameters": {
+                    "path": "src/app.py",
+                    "find": "old_value",
+                    "replace": "new_value",
+                },
+            }]
+        }, "edit the project")
+
+        self.assertEqual(plan["steps"][0]["tool"], "workspace_edit_file")
+
+    def test_accepts_workspace_apply_patch_tool(self):
+        plan = _validate_plan({
+            "steps": [{
+                "tool": "workspace_apply_patch",
+                "description": "Fix the related source and test files",
+                "parameters": {"patch": "--- a/app.py\n+++ b/app.py\n"},
+            }]
+        }, "fix the project")
+
+        self.assertEqual(plan["steps"][0]["tool"], "workspace_apply_patch")
+
     def test_rejects_malformed_and_unbounded_plans(self):
         with self.assertRaisesRegex(ValueError, "parameters must be an object"):
             _validate_plan({

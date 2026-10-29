@@ -4,8 +4,14 @@ import concurrent.futures
 import platform
 import shutil
 import subprocess
+import asyncio
+import json
+import time
+import uuid
 from pathlib import Path
+from urllib.parse import urlsplit
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
+from actions.browser_security import BrowserURLPolicyError, validate_browser_url
 
 def _get_default_browser_id() -> str:
     """Returns raw default browser identifier string for current OS."""
@@ -156,6 +162,10 @@ class _BrowserThread:
         self._engine_name   = "chromium" # Bilgi için sakla
         self._exe_path      = None
         self._channel       = None
+        self._tabs          = {}
+        self._active_tabs   = {False: None, True: None}
+        self._tab_sequence  = 0
+        self._blocked_requests = []
 
     def start(self):
         if self._thread and self._thread.is_alive():
@@ -228,18 +238,88 @@ class _BrowserThread:
         else:
             return await self._get_normal_page()
 
+    def _register_page(self, page, incognito: bool = False) -> str:
+        for tab_id, entry in self._tabs.items():
+            if entry["page"] is page:
+                self._active_tabs[incognito] = tab_id
+                return tab_id
+
+        self._tab_sequence += 1
+        tab_id = f"tab-{self._tab_sequence}"
+        self._tabs[tab_id] = {"page": page, "incognito": incognito}
+        self._active_tabs[incognito] = tab_id
+        page.on("close", lambda: self._forget_page(tab_id))
+        return tab_id
+
+    def _forget_page(self, tab_id: str) -> None:
+        entry = self._tabs.pop(tab_id, None)
+        if entry is None:
+            return
+        incognito = entry["incognito"]
+        if self._active_tabs[incognito] == tab_id:
+            self._active_tabs[incognito] = next(
+                (
+                    candidate
+                    for candidate, data in reversed(list(self._tabs.items()))
+                    if data["incognito"] == incognito
+                ),
+                None,
+            )
+
+    async def _protect_context(self, context, incognito: bool) -> None:
+        context.on("page", lambda page: self._register_page(page, incognito))
+        await context.route("**/*", self._guard_request)
+        if hasattr(context, "route_web_socket"):
+            await context.route_web_socket("**/*", self._guard_websocket)
+
+    async def _guard_request(self, route) -> None:
+        try:
+            await asyncio.to_thread(validate_browser_url, route.request.url)
+        except BrowserURLPolicyError as exc:
+            self._blocked_requests.append((route.request.url, str(exc)))
+            await route.abort()
+            return
+        await route.continue_()
+
+    async def _guard_websocket(self, route) -> None:
+        url = route.url
+        parsed = urlsplit(url)
+        scheme = {"ws": "http", "wss": "https"}.get(parsed.scheme.lower())
+        try:
+            if not scheme:
+                raise BrowserURLPolicyError("Only public HTTP(S) WebSocket hosts are allowed.")
+            await asyncio.to_thread(
+                validate_browser_url,
+                parsed._replace(scheme=scheme).geturl(),
+            )
+        except BrowserURLPolicyError as exc:
+            self._blocked_requests.append((url, str(exc)))
+            await route.close(code=1008, reason="Blocked by browser network policy.")
+            return
+        await route.connect_to_server()
+
     async def _get_normal_page(self):
-        if self._page is None or self._page.is_closed():
-            if self._context is None:
-                self._context = await self._browser.new_context(
-                    viewport=None,
-                    user_agent=(
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/120.0.0.0 Safari/537.36"
-                    )
+        active_id = self._active_tabs[False]
+        if active_id and active_id in self._tabs:
+            active_page = self._tabs[active_id]["page"]
+            if not active_page.is_closed():
+                self._page = active_page
+                return active_page
+            self._forget_page(active_id)
+
+        if self._context is None:
+            self._context = await self._browser.new_context(
+                viewport=None,
+                service_workers="block",
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
                 )
-            self._page = await self._context.new_page()
+            )
+            await self._protect_context(self._context, False)
+        self._page = await self._context.new_page()
+        self._register_page(self._page, False)
         return self._page
 
     async def _get_incognito_page(self):
@@ -248,9 +328,13 @@ class _BrowserThread:
         Chromium → new_context(no_viewport, storage_state temiz)
         Firefox  → new_context(incognito)  [Playwright'ta firefox private]
         """
-        # Mevcut gizli sayfa varsa kapat, yenisini aç
-        if self._incog_page and not self._incog_page.is_closed():
-            return self._incog_page
+        active_id = self._active_tabs[True]
+        if active_id and active_id in self._tabs:
+            active_page = self._tabs[active_id]["page"]
+            if not active_page.is_closed():
+                self._incog_page = active_page
+                return active_page
+            self._forget_page(active_id)
 
         # Önceki gizli context'i kapat
         if self._incog_context:
@@ -265,6 +349,7 @@ class _BrowserThread:
             # Firefox: firefox_user_prefs ile private browsing
             self._incog_context = await self._browser.new_context(
                 viewport=None,
+                service_workers="block",
                 firefox_user_prefs={
                     "browser.privatebrowsing.autostart": True
                 }
@@ -295,6 +380,7 @@ class _BrowserThread:
             self._incog_browser = incog_browser
             self._incog_context = await incog_browser.new_context(
                 viewport=None,
+                service_workers="block",
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -302,23 +388,40 @@ class _BrowserThread:
                 )
             )
 
+        await self._protect_context(self._incog_context, True)
         self._incog_page = await self._incog_context.new_page()
+        self._register_page(self._incog_page, True)
         print("[Browser] ✅ Private/incognito page ready.")
         return self._incog_page
 
     # ── Eylemler ─────────────────────────────────────────────────────────────
 
     async def _go_to(self, url: str, incognito: bool = False) -> str:
-        if not url.startswith("http"):
-            url = "https://" + url
+        try:
+            url = validate_browser_url(url)
+        except BrowserURLPolicyError as exc:
+            return f"Blocked navigation: {exc}"
         page = await self._get_page(incognito=incognito)
+        self._blocked_requests.clear()
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=15000)
             mode = " [private]" if incognito else ""
-            return f"Opened{mode}: {page.url}"
+            title = await page.title()
+            blocked_count = len(self._blocked_requests)
+            blocked_note = (
+                f"; blocked {blocked_count} private/internal request(s)"
+                if blocked_count else ""
+            )
+            return f"Opened{mode}: {page.url} (title: {title or 'untitled'}){blocked_note}"
         except PlaywrightTimeout:
+            if self._blocked_requests:
+                blocked_url, reason = self._blocked_requests[-1]
+                return f"Navigation blocked: {reason} ({blocked_url})"
             return f"Timeout loading: {url}"
         except Exception as e:
+            if self._blocked_requests:
+                blocked_url, reason = self._blocked_requests[-1]
+                return f"Navigation blocked: {reason} ({blocked_url})"
             return f"Navigation error: {e}"
 
     async def _search(self, query: str, engine: str = "google", incognito: bool = False) -> str:
@@ -329,8 +432,147 @@ class _BrowserThread:
             "bing":       f"https://www.bing.com/search?q={q}",
             "duckduckgo": f"https://duckduckgo.com/?q={q}",
         }
+        page = await self._get_page(incognito=incognito)
+        if urlsplit(page.url).hostname in {"youtube.com", "www.youtube.com", "m.youtube.com"}:
+            search_box = page.locator("input#search, input[name='search_query']")
+            count = await search_box.count()
+            if count != 1:
+                return f"YouTube is open, but its search field is not unique (found {count})."
+            try:
+                await search_box.fill(query, timeout=8000)
+                await search_box.press("Enter", timeout=8000)
+                await page.wait_for_url("**/results?search_query=*", timeout=12000)
+                if "search_query=" not in page.url:
+                    return f"YouTube search did not complete; current URL: {page.url}"
+                return f"YouTube search completed in the existing tab: {page.url}"
+            except Exception as exc:
+                return f"YouTube search failed in the existing tab: {exc}"
         url = engines.get(engine.lower(), engines["google"])
         return await self._go_to(url, incognito=incognito)
+
+    async def _new_tab(self, url: str = "", incognito: bool = False) -> str:
+        current = await self._get_page(incognito=incognito)
+        page = await current.context.new_page()
+        self._register_page(page, incognito)
+        if url:
+            return await self._go_to(url, incognito=incognito)
+        return f"Opened {self._active_tabs[incognito]} (blank tab)."
+
+    async def _list_tabs(self) -> str:
+        tabs = []
+        for tab_id, entry in list(self._tabs.items()):
+            page = entry["page"]
+            if page.is_closed():
+                self._forget_page(tab_id)
+                continue
+            try:
+                title = await page.title()
+                url = page.url
+                ready_state = await page.evaluate("document.readyState")
+            except Exception as exc:
+                title, url, ready_state = "", page.url, f"unavailable: {exc}"
+            tabs.append({
+                "id": tab_id,
+                "active": self._active_tabs[entry["incognito"]] == tab_id,
+                "private": entry["incognito"],
+                "url": url,
+                "title": title,
+                "loading_state": ready_state,
+            })
+        return "[UNTRUSTED BROWSER TAB DATA]\n" + json.dumps(
+            tabs, ensure_ascii=False, indent=2
+        )
+
+    async def _switch_tab(self, tab_id: str) -> str:
+        entry = self._tabs.get(tab_id)
+        if entry is None or entry["page"].is_closed():
+            return f"Tab not found or closed: {tab_id}"
+        self._active_tabs[entry["incognito"]] = tab_id
+        page = entry["page"]
+        if entry["incognito"]:
+            self._incog_page = page
+        else:
+            self._page = page
+        return f"Active tab {tab_id}: {page.url} (title: {await page.title() or 'untitled'})"
+
+    async def _page_state(self, incognito: bool = False) -> str:
+        page = await self._get_page(incognito=incognito)
+        try:
+            state = await page.evaluate(
+                """() => ({
+                    url: location.href,
+                    title: document.title,
+                    loading_state: document.readyState,
+                    headings: [...document.querySelectorAll('h1,h2,h3')]
+                        .filter(element => element.getClientRects().length > 0)
+                        .slice(0, 20).map(element => element.innerText.trim())
+                        .filter(Boolean),
+                    human_verification_required: Boolean(
+                        document.querySelector(
+                            'iframe[src*="captcha" i], [class*="captcha" i], '
+                            + '[id*="captcha" i], [data-sitekey]'
+                        )
+                    ),
+                    one_time_code_field_present: Boolean(
+                        document.querySelector(
+                            'input[autocomplete="one-time-code"], '
+                            + 'input[name*="otp" i], input[name*="mfa" i]'
+                        )
+                    )
+                })"""
+            )
+            state["tab_id"] = self._active_tabs[incognito]
+            state["blocked_private_requests"] = len(self._blocked_requests)
+            return "[UNTRUSTED PAGE DATA]\n" + json.dumps(state, ensure_ascii=False, indent=2)
+        except Exception as exc:
+            return f"Could not read page state: {exc}"
+
+    async def _history(self, direction: str, incognito: bool = False) -> str:
+        page = await self._get_page(incognito=incognito)
+        try:
+            response = await (page.go_back() if direction == "back" else page.go_forward())
+            if response is None:
+                return f"No {direction} history entry is available."
+            await page.wait_for_load_state("domcontentloaded", timeout=10000)
+            return f"Navigated {direction}: {page.url} (title: {await page.title() or 'untitled'})"
+        except Exception as exc:
+            return f"Could not navigate {direction}: {exc}"
+
+    async def _wait_for_element(
+        self, selector: str, timeout_ms: int = 10000, incognito: bool = False
+    ) -> str:
+        if not selector:
+            return "A selector is required."
+        page = await self._get_page(incognito=incognito)
+        timeout_ms = max(1000, min(int(timeout_ms), 30000))
+        try:
+            await page.locator(selector).wait_for(state="visible", timeout=timeout_ms)
+            return f"Element became visible: {selector} (URL: {page.url})"
+        except PlaywrightTimeout:
+            return f"Timed out waiting for visible element: {selector}"
+        except Exception as exc:
+            return f"Could not wait for element: {exc}"
+
+    async def _screenshot(self, incognito: bool = False) -> str:
+        page = await self._get_page(incognito=incognito)
+        try:
+            destination = Path.home() / "Downloads" / (
+                f"NIANG_IA_browser_{int(time.time())}_{uuid.uuid4().hex[:8]}.png"
+            )
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            await page.screenshot(path=str(destination), full_page=True, timeout=15000)
+            return f"Screenshot saved: {destination}"
+        except Exception as exc:
+            return f"Could not capture page: {exc}"
+
+    async def _close_tab(self, tab_id: str = "", incognito: bool = False) -> str:
+        target_id = tab_id or self._active_tabs[incognito]
+        entry = self._tabs.get(target_id)
+        if entry is None:
+            return f"Tab not found: {target_id or '(none)'}"
+        await entry["page"].close()
+        self._forget_page(target_id)
+        return f"Closed tab {target_id}."
 
     async def _click(self, selector=None, text=None, incognito: bool = False) -> str:
         page = await self._get_page(incognito=incognito)
@@ -446,7 +688,8 @@ class _BrowserThread:
         page = await self._get_page(incognito=incognito)
         try:
             text = await page.inner_text("body")
-            return text[:4000] if len(text) > 4000 else text
+            text = text[:4000] if len(text) > 4000 else text
+            return "[UNTRUSTED WEBPAGE TEXT]\n" + text
         except Exception as e:
             return f"Could not get page text: {e}"
 
@@ -514,7 +757,8 @@ class _BrowserThread:
             )
             import json
             result = json.dumps(details, ensure_ascii=False, indent=2)
-            return result[:7000] if len(result) > 7000 else result
+            result = result[:7000] if len(result) > 7000 else result
+            return "[UNTRUSTED PAGE STRUCTURE]\n" + result
         except Exception as e:
             return f"Could not inspect page controls: {e}"
 
@@ -535,10 +779,32 @@ class _BrowserThread:
                 el = matches.first
                 await el.clear()
                 await el.type(str(value), delay=40)
+                actual = await el.evaluate(
+                    "element => 'value' in element ? element.value : element.innerText"
+                )
+                if str(actual) != str(value):
+                    results.append(f"✗ {selector}: verification did not match the requested value")
+                    continue
                 results.append(f"✓ {selector}")
             except Exception as e:
                 results.append(f"✗ {selector}: {e}")
         return "Form filled: " + ", ".join(results)
+
+    async def _select_option(self, selector: str, value: str, incognito: bool = False) -> str:
+        if not selector or not isinstance(value, str):
+            return "A selector and string option value are required."
+        page = await self._get_page(incognito=incognito)
+        try:
+            matches = page.locator(selector)
+            count = await matches.count()
+            if count != 1:
+                return f"Expected one option field matching '{selector}', found {count}."
+            selected = await matches.select_option(value, timeout=8000)
+            if value not in selected:
+                return f"Option was not selected for '{selector}'."
+            return f"Selected option '{value}' in {selector}."
+        except Exception as exc:
+            return f"Could not select option in {selector}: {exc}"
 
     async def _submit_form(self, selector=None, text=None, incognito: bool = False) -> str:
         page = await self._get_page(incognito=incognito)
@@ -675,10 +941,10 @@ class _BrowserThread:
             self._browser = None
             self._context = None
             self._page    = None
-
-        if self._playwright:
-            await self._playwright.stop()
-            self._playwright = None
+        self._tabs.clear()
+        self._active_tabs = {False: None, True: None}
+        self._incog_page = None
+        self._blocked_requests.clear()
 
         return "Browser closed."
 
@@ -710,8 +976,10 @@ def browser_control(
     Browser controller — auto-detects and uses system default browser.
 
     parameters:
-        action      : go_to | search | inspect | click | type | scroll | fill_form |
-                      submit_form | smart_click | smart_type | get_text | press | close
+        action      : go_to | search | new_tab | tabs | switch_tab | state | back |
+                      forward | inspect | click | type | scroll | fill_form |
+                      select_option | submit_form | smart_click | smart_type |
+                      get_text | wait_for_element | screenshot | close_tab | press | close
         url         : URL for go_to
         query       : search query
         engine      : google | bing | duckduckgo (default: google)
@@ -736,6 +1004,24 @@ def browser_control(
     try:
         if action == "go_to":
             result = _bt.run(_bt._go_to(parameters.get("url", ""), incognito=incognito))
+
+        elif action == "new_tab":
+            result = _bt.run(_bt._new_tab(
+                parameters.get("url", ""),
+                incognito=incognito,
+            ))
+
+        elif action == "tabs":
+            result = _bt.run(_bt._list_tabs())
+
+        elif action == "switch_tab":
+            result = _bt.run(_bt._switch_tab(str(parameters.get("tab_id", ""))))
+
+        elif action == "state":
+            result = _bt.run(_bt._page_state(incognito=incognito))
+
+        elif action in {"back", "forward"}:
+            result = _bt.run(_bt._history(action, incognito=incognito))
 
         elif action == "search":
             result = _bt.run(_bt._search(
@@ -772,6 +1058,13 @@ def browser_control(
                 incognito=incognito
             ))
 
+        elif action == "select_option":
+            result = _bt.run(_bt._select_option(
+                parameters.get("selector", ""),
+                parameters.get("value", ""),
+                incognito=incognito,
+            ))
+
         elif action == "submit_form":
             result = _bt.run(_bt._submit_form(
                 selector=parameters.get("selector"),
@@ -798,6 +1091,22 @@ def browser_control(
         elif action == "inspect":
             result = _bt.run(_bt._inspect(incognito=incognito))
 
+        elif action == "wait_for_element":
+            result = _bt.run(_bt._wait_for_element(
+                parameters.get("selector", ""),
+                parameters.get("timeout_ms", 10000),
+                incognito=incognito,
+            ))
+
+        elif action == "screenshot":
+            result = _bt.run(_bt._screenshot(incognito=incognito))
+
+        elif action == "close_tab":
+            result = _bt.run(_bt._close_tab(
+                str(parameters.get("tab_id", "")),
+                incognito=incognito,
+            ))
+
         elif action == "press":
             result = _bt.run(_bt._press(
                 parameters.get("key", "Enter"),
@@ -817,8 +1126,12 @@ def browser_control(
 
     failed = result.startswith((
         "Browser error:", "Browser action timed out.", "Navigation error:",
-        "Timeout loading:", "Click error:", "Type error:", "Form submission failed:",
-        "Could not ", "Unknown action:",
+        "Blocked navigation:", "Navigation blocked:", "Timeout loading:",
+        "Click error:", "Type error:", "Form submission failed:",
+        "Could not ", "Unknown action:", "YouTube search failed",
+        "YouTube is open, but", "Timed out waiting", "No back history",
+        "No forward history", "Tab not found", "Expected one",
+        "Multiple fields", "Form fields must",
     ))
     status = "failed" if failed else "completed"
     summary = f"[Browser] {action}: {status}"
