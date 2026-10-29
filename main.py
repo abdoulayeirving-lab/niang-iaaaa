@@ -1691,14 +1691,21 @@ class KaizumiLive:
         self._last_play_ts  = 0.0
         self._turn_complete = False
         self._ready         = False
+        self._startup_greeting_sent = False
         self._phase         = PHASE_IDLE
         self._phase_lock    = threading.Lock()
         self._rolling_parts = []
         self._rolling_len   = 0
         self._roll_turns    = 0
+        self._analysis_sources = []
+        self._analysis_lock = threading.Lock()
+        self._analysis_generation = 0
         self.loop_guard     = LoopGuard()
         self._tool_handlers = self._build_tool_handlers()
         self.ui.on_text_command = self._on_text_command
+        self.ui.on_files_selected = self._on_files_selected
+        self.ui.on_clear_documents = self._clear_analysis_sources
+        self.ui.on_voiceover_requested = self._on_voiceover_requested
         self.enable_bluetooth = enable_bluetooth
         self._schedules     = []
         self._sched_lock    = threading.Lock()
@@ -1829,7 +1836,198 @@ class KaizumiLive:
             print(f"[Tray] âš ï¸ Could not attach tray: {e}")
             import traceback; traceback.print_exc()
 
+    def _clear_analysis_sources(self):
+        with self._analysis_lock:
+            self._analysis_sources = []
+            self._analysis_generation += 1
+
+    @staticmethod
+    def _is_document_question(text: str) -> bool:
+        import re
+
+        terms = (
+            "document", "fichier", "texte import", "ces fichiers", "cette page",
+            "ce site", "from the document", "this file", "these files", "this page",
+            "compare", "résume", "resume", "explique", "traduis", "analyse",
+            "auteur", "montant", "tableau", "summarize", "explain", "amount",
+            "author",
+        )
+        lowered = text.casefold()
+        if any(term in lowered for term in terms):
+            return True
+        return bool(re.search(
+            r"\b(qui|quoi|quand|où|quel|quelle|quels|quelles|pourquoi|comment|"
+            r"combien|what|when|where|who|why|how|which)\b",
+            lowered,
+        ))
+
+    def _on_files_selected(self, paths):
+        from actions.intelligent_analysis import analyze_sources, extract_source
+
+        with self._analysis_lock:
+            self._analysis_generation += 1
+            generation = self._analysis_generation
+
+        def is_current():
+            with self._analysis_lock:
+                return generation == self._analysis_generation
+
+        def worker():
+            self.ui.set_state("PROCESSING")
+            sources = []
+            failures = []
+            for index, path in enumerate(paths, 1):
+                if not is_current():
+                    return
+                self.ui.set_file_status(
+                    f"Extraction {index}/{len(paths)} · contenu transmis à Gemini pour analyse…"
+                )
+                try:
+                    source = extract_source(
+                        path,
+                        progress=lambda message: self.ui.set_file_status(message),
+                    )
+                    sources.append(source)
+                except Exception as exc:
+                    failures.append(f"{Path(path).name} : {exc}")
+                    self.ui.write_log(f"ERR: Analyse impossible — {Path(path).name} : {exc}")
+
+            if sources:
+                with self._analysis_lock:
+                    if generation != self._analysis_generation:
+                        return
+                    self._analysis_sources = sources
+                self.ui.set_file_status("Analyse IA en cours — contenu envoyé à Google Gemini…")
+                try:
+                    answer = analyze_sources(sources)
+                    if not is_current():
+                        return
+                    report_sources = ", ".join(source["name"] for source in sources)
+                    self.ui.set_analysis_report(
+                        f"NIANG IA — Rapport d'analyse\nSources : {report_sources}\n\n{answer}"
+                    )
+                    self.ui.write_log("NIANG IA: " + answer)
+                    status = f"Analyse terminée · {len(sources)} source(s)"
+                    if failures:
+                        status += f" · {len(failures)} échec(s)"
+                    self.ui.set_file_status(
+                        status + " · Ctrl+Maj+V voix off · clic ici pour relancer."
+                    )
+                except Exception as exc:
+                    if not is_current():
+                        return
+                    self.ui.write_log(f"ERR: Analyse Gemini impossible : {exc}")
+                    self.ui.set_file_status(
+                        f"Échec Gemini : {exc} · cliquez ici pour réessayer.",
+                        error=True,
+                    )
+            elif failures and is_current():
+                self.ui.set_file_status(
+                    "Aucun fichier analysé · cliquez ici pour réessayer.", error=True,
+                )
+
+            if failures and is_current():
+                self.ui.write_log("ERR: " + " | ".join(failures))
+            if is_current():
+                self.ui.set_state(
+                    "MUTED" if self.ui.muted else
+                    ("LISTENING" if self.ui.connected else "ONLINE")
+                )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _answer_document_question(self, question: str, url=""):
+        from actions.intelligent_analysis import analyze_sources, extract_source
+
+        urls = [url] if isinstance(url, str) and url else list(url or [])
+        if len(urls) > 5:
+            self.ui.write_log("ERR: Limite de cinq pages par demande de comparaison.")
+            return
+
+        def worker():
+            self.ui.set_state("PROCESSING")
+            try:
+                if urls:
+                    self.ui.set_analysis_report("")
+                    sources = []
+                    for page_url in urls:
+                        self.ui.write_log(
+                            f"SYS: Récupération de {page_url} ; le texte accessible sera envoyé à Google Gemini."
+                        )
+                        sources.append(extract_source(page_url))
+                else:
+                    with self._analysis_lock:
+                        sources = list(self._analysis_sources)
+                if not sources:
+                    raise ValueError("Aucun document n'est chargé. Importez un fichier avec Ctrl+O.")
+                answer = analyze_sources(sources, question)
+                report_sources = ", ".join(source["name"] for source in sources)
+                self.ui.set_analysis_report(
+                    f"NIANG IA — Rapport d'analyse\nSources : {report_sources}\n\n{answer}"
+                )
+                self.ui.write_log("NIANG IA: " + answer)
+            except Exception as exc:
+                self.ui.write_log(f"ERR: Analyse de la source impossible : {exc}")
+            finally:
+                self.ui.set_state(
+                    "MUTED" if self.ui.muted else
+                    ("LISTENING" if self.ui.connected else "ONLINE")
+                )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_voiceover_requested(self, text, settings, progress, done):
+        from actions.intelligent_analysis import (
+            MAX_ANALYSIS_CHARS,
+            analyze_sources,
+            generate_voiceover,
+        )
+
+        def worker():
+            try:
+                narration = text.strip()
+                if not narration:
+                    with self._analysis_lock:
+                        sources = list(self._analysis_sources)
+                    if not sources:
+                        raise ValueError("Saisissez un texte ou importez un document.")
+                    progress("Préparation d'un script de narration à partir des documents…")
+                    script = analyze_sources(
+                        sources,
+                        "Rédige un script de voix off clair et naturel, fidèle aux documents, "
+                        "en gardant leurs informations principales. Ne lis pas de métadonnées.",
+                    )
+                    narration = script.split("\n\nLimite d'analyse:", 1)[0].strip()
+                    if sum(len(source["text"]) for source in sources) > MAX_ANALYSIS_CHARS:
+                        progress("Script basé sur les premiers 100 000 caractères analysés.")
+                path = generate_voiceover(
+                    narration,
+                    voice=settings["voice"],
+                    language=settings["language"],
+                    pace=settings["pace"],
+                    tone=settings["tone"],
+                    progress=progress,
+                )
+                done(str(path), None)
+            except Exception as exc:
+                done(None, str(exc))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _on_text_command(self, text: str):
+        import re
+
+        urls = re.findall(r"https?://[^\s]+", text, flags=re.IGNORECASE)
+        if urls:
+            self._answer_document_question(
+                text, [url.rstrip(".,;:!?)]}") for url in urls]
+            )
+            return
+        with self._analysis_lock:
+            has_sources = bool(self._analysis_sources)
+        if has_sources and self._is_document_question(text):
+            self._answer_document_question(text)
+            return
         if not self._loop or not self.session or not self._send_lock:
             return
         async def _send():
@@ -3165,6 +3363,23 @@ class KaizumiLive:
                 print("[NIANG IA] â± Speaking watchdog fired â€” force-cleared")
                 self.set_speaking(False)
 
+    async def _send_startup_greeting(self):
+        if self._startup_greeting_sent:
+            return
+        if self.ui.silent_mode:
+            self._startup_greeting_sent = True
+            return
+        await self.session.send_realtime_input(
+            text=(
+                "Greet the user aloud now with a brief, warm welcome. Introduce "
+                "yourself as NIANG IA, say you are ready to help, and use the "
+                "language and conversational style specified in your instructions. "
+                "Do not wait for the user to speak or type first."
+            )
+        )
+        self._startup_greeting_sent = True
+        self.ui.write_log("SYS: NIANG IA vous salue et est prête à vous aider.")
+
     async def _receive_audio(self):
         print("[NIANG IA] Recv started")
         out_buf, in_buf = [], []
@@ -3356,10 +3571,11 @@ class KaizumiLive:
                         self.ui.write_log("SYS: NIANG IA online.")
 
                         tg.create_task(self._send_realtime())
-                        tg.create_task(self._listen_audio())
                         tg.create_task(self._receive_audio())
                         tg.create_task(self._play_audio())
                         tg.create_task(self._watch_speaking())
+                        await self._send_startup_greeting()
+                        tg.create_task(self._listen_audio())
                         tg.create_task(self._scheduler_loop())
                         tg.create_task(self._monitor_loop())
                         tg.create_task(self._stream_live_camera())

@@ -1,5 +1,5 @@
 #define AppName "NIANG IA"
-#define AppVersion "1.0.11"
+#define AppVersion "1.0.13"
 #define SourceDir AddBackslash(SourcePath) + "dist\NIANG_IA_" + AppVersion
 
 [Setup]

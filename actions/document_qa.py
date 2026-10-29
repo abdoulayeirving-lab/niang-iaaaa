@@ -47,6 +47,7 @@ _SEARCH_EXTENSIONS = {
 _MAX_SEARCH_FILES = 300
 _MAX_SEARCH_FILE_BYTES = 20 * 1024 * 1024
 _MAX_SEARCH_RESULTS = 5
+_MAX_OFFICE_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
 
 
 def _search_roots(folder: str) -> list[Path]:
@@ -205,64 +206,137 @@ def _is_private_target(url: str) -> bool:
     (SSRF guard: never fetch internal networks or cloud metadata)."""
     try:
         from urllib.parse import urlparse
-        host = (urlparse(url).hostname or "").strip().strip("[]").lower()
-    except Exception:
-        return False
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").strip().strip("[]").lower()
+        if parsed.scheme.lower() not in ("http", "https") or parsed.username or parsed.password:
+            return True
+    except (TypeError, ValueError):
+        return True
     if not host:
         return True
+    if host in {"localhost", "metadata.google.internal"} or \
+            host.endswith((".localhost", ".local", ".internal")):
+        return True
+
+    import ipaddress
+    try:
+        return not ipaddress.ip_address(host).is_global
+    except ValueError:
+        pass
 
     import socket
     try:
-        ip = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)[0][4][0]
+        addresses = {
+            entry[4][0]
+            for entry in socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+        }
     except Exception:
         return True  # unresolvable — fail closed
-
-    if ip == "::1":
+    if not addresses:
         return True
     try:
-        import ipaddress
-        return ipaddress.ip_address(ip).is_private or \
-            ipaddress.ip_address(ip).is_loopback or \
-            ipaddress.ip_address(ip).is_link_local
+        return any(not ipaddress.ip_address(ip).is_global for ip in addresses)
     except Exception:
-        return ip.startswith("127.") or ip.startswith("169.254.")
+        return True
 
 
-def _extract_url(url: str) -> str:
+def _safe_get_url(url: str):
     if not _REQUESTS:
         raise RuntimeError("requests is not installed.")
-    if _is_private_target(url):
-        raise RuntimeError("I can't fetch internal or private network URLs, sir.")
-    if "169.254.169.254" in url or "metadata.google.internal" in url:
-        raise RuntimeError("That URL is off-limits, sir.")
     headers = {"User-Agent": "Mozilla/5.0 (Kaizumi/assistant)"}
-    resp = requests.get(url, headers=headers, timeout=20)
-    resp.raise_for_status()
-    # Guard redirect chains too (a public URL can redirect to internal hosts).
-    if resp.history:
-        for hop in resp.history + [resp]:
-            if _is_private_target(hop.url):
-                raise RuntimeError("That URL redirects to an internal network, sir.")
+    from urllib.parse import urljoin
+
+    current = url
+    for _ in range(6):
+        if _is_private_target(current):
+            raise RuntimeError("I can't fetch internal or private network URLs, sir.")
+        resp = requests.get(
+            current, headers=headers, timeout=20, allow_redirects=False, stream=True,
+        )
+        if resp.status_code in (301, 302, 303, 307, 308):
+            location = resp.headers.get("Location")
+            resp.close()
+            if not location:
+                raise RuntimeError("The page returned an invalid redirect.")
+            current = urljoin(current, location)
+            continue
+        resp.raise_for_status()
+        content_length = resp.headers.get("Content-Length")
+        if content_length and int(content_length) > 5 * 1024 * 1024:
+            resp.close()
+            raise RuntimeError("The web page exceeds the 5 MB download limit.")
+        content = bytearray()
+        for chunk in resp.iter_content(chunk_size=64 * 1024):
+            content.extend(chunk)
+            if len(content) > 5 * 1024 * 1024:
+                resp.close()
+                raise RuntimeError("The web page exceeds the 5 MB download limit.")
+        resp._content = bytes(content)
+        resp._content_consumed = True
+        return resp
+    raise RuntimeError("The page exceeded the redirect limit.")
+
+
+def _extract_url_document(url: str) -> tuple[str, str]:
+    resp = _safe_get_url(url)
+    content_type = resp.headers.get("Content-Type", "").lower()
+    if content_type and not any(
+        kind in content_type
+        for kind in (
+            "text/html", "application/xhtml+xml", "text/plain",
+            "application/json", "application/xml", "text/xml",
+        )
+    ):
+        raise RuntimeError("This URL does not return a readable HTML or text page.")
     if _BS4:
         soup = BeautifulSoup(resp.text, "html.parser")
+        title_tag = soup.find("title")
+        title = title_tag.get_text(" ", strip=True) if title_tag else ""
+        if title_tag:
+            title_tag.decompose()
         for tag in soup(["script", "style", "noscript"]):
             tag.decompose()
         text = soup.get_text("\n", strip=True)
     else:
-        text = re.sub(r"<[^>]+>", " ", resp.text)
-    return re.sub(r"\n{3,}", "\n\n", text)
+        title_match = re.search(r"<title[^>]*>(.*?)</title\s*>", resp.text, re.I | re.S)
+        title = re.sub(r"\s+", " ", title_match.group(1)).strip() if title_match else ""
+        raw = re.sub(
+            r"<(script|style|noscript|title)\b[^>]*>.*?</\1\s*>",
+            " ",
+            resp.text,
+            flags=re.I | re.S,
+        )
+        text = re.sub(r"<[^>]+>", " ", raw)
+    return title, re.sub(r"\n{3,}", "\n\n", text)
+
+
+def _extract_url(url: str) -> str:
+    return _extract_url_document(url)[1]
 
 
 def _extract_docx(path: Path) -> str:
+    _validate_office_archive(path)
     with zipfile.ZipFile(str(path)) as z:
         xml = z.read("word/document.xml").decode("utf-8", errors="replace")
+    xml = re.sub(r"</w:tc>", " | ", xml)
+    xml = re.sub(r"</w:tr>", "\n", xml)
     xml = re.sub(r"</w:p>", "\n", xml)
     text = re.sub(r"<[^>]+>", "", xml)
     import html
     return html.unescape(text)
 
 
+def _validate_office_archive(path: Path) -> None:
+    with zipfile.ZipFile(str(path)) as archive:
+        entries = archive.infolist()
+        if len(entries) > 10_000 or sum(item.file_size for item in entries) > _MAX_OFFICE_UNCOMPRESSED_BYTES:
+            raise ValueError(
+                "Le contenu décompressé de ce document Office dépasse la limite de sécurité."
+            )
+
+
 def _extract_pptx(path: Path) -> str:
+    _validate_office_archive(path)
     try:
         from pptx import Presentation
     except ImportError:
@@ -270,26 +344,38 @@ def _extract_pptx(path: Path) -> str:
     prs = Presentation(str(path))
     lines = []
     for slide in prs.slides:
+        slide_lines = []
         for shape in slide.shapes:
-            if hasattr(shape, "text") and shape.text:
-                lines.append(shape.text)
+            if getattr(shape, "has_table", False):
+                for row in shape.table.rows:
+                    cells = [cell.text.strip() for cell in row.cells]
+                    if any(cells):
+                        slide_lines.append(" | ".join(cells))
+            elif getattr(shape, "has_text_frame", False) and shape.text.strip():
+                slide_lines.append(shape.text)
+        if slide_lines:
+            lines.append("\n".join(slide_lines))
     return "\n".join(lines)
 
 
 def _extract_xlsx(path: Path) -> str:
+    _validate_office_archive(path)
     try:
         from openpyxl import load_workbook
     except ImportError:
         raise RuntimeError("openpyxl is not installed.")
     wb = load_workbook(str(path), read_only=True, data_only=True)
-    lines = []
-    for ws in wb.worksheets:
-        lines.append(f"[Sheet: {ws.title}]")
-        for row in ws.iter_rows(values_only=True):
-            cells = [str(c) for c in row if c is not None and str(c).strip()]
-            if cells:
-                lines.append(" | ".join(cells))
-    return "\n".join(lines)
+    try:
+        lines = []
+        for ws in wb.worksheets:
+            lines.append(f"[Sheet: {ws.title}]")
+            for row in ws.iter_rows(values_only=True):
+                cells = [str(c) for c in row if c is not None and str(c).strip()]
+                if cells:
+                    lines.append(" | ".join(cells))
+        return "\n".join(lines)
+    finally:
+        wb.close()
 
 
 def _extract_text(source: str) -> str:

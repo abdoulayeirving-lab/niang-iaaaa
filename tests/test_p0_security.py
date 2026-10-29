@@ -13,7 +13,8 @@ import os
 import sys
 import inspect
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+from types import SimpleNamespace
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -46,6 +47,35 @@ class DocumentQaSsrTest(unittest.TestCase):
         with patch("socket.getaddrinfo", return_value=public_result):
             self.assertFalse(self._is_private_target("http://example.com/x"))
             self.assertFalse(self._is_private_target("https://en.wikipedia.org/x"))
+
+    def test_blocks_host_with_any_private_dns_answer(self):
+        import socket
+        mixed_results = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.8", 0)),
+        ]
+        with patch("socket.getaddrinfo", return_value=mixed_results):
+            self.assertTrue(self._is_private_target("https://example.com"))
+
+    def test_private_redirect_is_blocked_before_following(self):
+        from actions import document_qa
+        import socket
+        response = type("Redirect", (), {
+            "status_code": 302,
+            "headers": {"Location": "http://127.0.0.1/admin"},
+            "close": lambda self: None,
+        })()
+        get = Mock(return_value=response)
+        fake_requests = SimpleNamespace(get=get)
+        with patch.object(document_qa, "_REQUESTS", True), \
+                patch.object(document_qa, "requests", fake_requests, create=True):
+            with patch("socket.getaddrinfo", return_value=[
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))
+            ]):
+                with self.assertRaisesRegex(RuntimeError, "internal or private"):
+                    document_qa._safe_get_url("https://example.com/start")
+        get.assert_called_once()
+        self.assertFalse(get.call_args.kwargs["allow_redirects"])
 
 
 class DesktopSandboxTest(unittest.TestCase):

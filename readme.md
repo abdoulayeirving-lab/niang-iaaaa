@@ -55,6 +55,7 @@ external APIs. It is **free to self-host** — you only need a Gemini API key
 | 🕐 **Guardian** | Watches battery, RAM, CPU, disk, and temperature; alerts on thresholds |
 | 🗓️ **Google integration** | Gmail, Calendar, Drive via OAuth (device flow) |
 | 🧩 **50+ tools** | Web search, reminders, PDF/Word/Excel/PowerPoint, YouTube, weather, translation, and more |
+| 📄 **Smart analysis** | Drag/drop files, ask questions about documents/pages, compare sources, and create real Gemini TTS WAV voice-overs |
 | 🎭 **Modes & moods** | 6 modes × 4 moods change Kaizumi's personality |
 | 🎨 **Themed UI** | 4 themes (cyber, ocean, aurora, sunset) + animated canvas |
 | 🔊 **30+ voices** | Pick from 30 Gemini voices (male/female, warm/clear/soft…) |
@@ -89,6 +90,13 @@ Gemini API key and accepts pasting it during installation. The name and language
 are imported into NIANG IA's memory on first launch; a pasted key is saved
 locally as a separate configuration file. Both pages can be skipped. You can
 also configure a Gemini API key later in `config/api_keys.json`.
+After Gemini connects, NIANG IA greets the user aloud in the configured language
+on each application launch; this greeting is skipped in Text-only mode.
+
+Download the latest Windows installer from the
+[GitHub Releases page](https://github.com/abdoulayeirving-lab/niang-iaaaa/releases/latest).
+Each `v*` version tag automatically builds and publishes the Windows installer
+and source archive there.
 
 For a manual install:
 
@@ -128,6 +136,51 @@ Secrets can also be provided as environment variables (docker/CI friendly):
 | `KAIZUMI_TELEGRAM_TOKEN` | `telegram_bot_token` |
 | `KAIZUMI_TELEGRAM_CHAT_ID` | `telegram_chat_id` |
 | `KAIZUMI_BRIDGE_TOKEN` | Bluetooth-app token (auto-generated in `config/bridge_token.txt`) |
+
+### Document analysis and voice-over
+
+The analysis workspace is integrated into the existing chat. Drag one or more
+files over the NIANG IA window; the holographic drop target appears only while
+dragging. `Ctrl+O` opens the Windows file picker, and `Ctrl`+click in the input
+also opens it. Up to five files of at most 20 MiB each can be selected. Click
+the × beside a file to remove it from the current analysis session.
+
+The app extracts PDF, DOCX, TXT, RTF, Markdown, CSV, XLSX, PPTX, common image,
+audio, video, and source-code/text files. Image analysis and audio/video
+transcription use Gemini 3.8 Flash via the Interactions API. Scanned PDFs use
+local Tesseract OCR and PyMuPDF;
+install Tesseract OCR separately and add its installation directory to `PATH`
+to enable OCR. Scanned-PDF OCR is limited to 30 pages per file. Unsupported,
+corrupt, oversized, or unextractable files are reported rather than treated as
+successfully analyzed. Imported programs are read as text and are never
+executed.
+
+Enter a URL in chat to fetch and analyze its accessible HTML/text page. The
+fetcher only permits public HTTP(S) pages, limits downloads to 5 MiB, checks
+DNS results and each redirect, and refuses private or local network addresses.
+Login-only and script-rendered content may not be available.
+
+Press `Ctrl+Shift+V` to open voice-over generation. Enter text or leave the
+field empty to narrate the currently selected documents, then choose a voice,
+language, pace, and tone. The Gemini TTS service creates a real WAV file with
+play, pause/resume, and save controls. The generated preview is temporary and
+is removed when its window or NIANG IA closes; saved WAV files are kept at the
+location you choose. Press `Ctrl+Shift+S` to export the latest successful
+document/page answer as a UTF-8 text report.
+
+**Privacy:** local office/PDF/text extraction happens on this computer. For AI
+analysis, extracted document text is sent to Google Gemini. Image bytes are
+sent to Gemini for visual analysis. Audio/video files are uploaded temporarily
+to Gemini for transcription and deleted after the request; voice-over text is
+sent to Gemini TTS. URL page text is also sent to Gemini after retrieval. Do not
+import confidential material unless you are comfortable with this processing.
+The current document context is held in memory for the running session and is
+cleared when files are removed or the app exits.
+
+The new drag/drop, media, and TTS features use `tkinterdnd2`, `PyMuPDF`, and
+`google-genai >= 2.25.0`. `python setup.py` installs them with the rest of the
+application. Gemini features use the existing `config/api_keys.json` key or
+`KAIZUMI_GEMINI_API_KEY`; no additional secret is required.
 
 ### Google account access
 
@@ -506,6 +559,28 @@ python -m unittest discover -s tests -v
 # or
 python -m pytest tests -q
 ```
+
+Run focused analysis and SSRF checks with:
+
+```powershell
+python -m unittest tests.test_intelligent_analysis tests.test_p0_security.DocumentQaSsrTest tests.test_document_search -v
+```
+
+These tests mock Gemini and exercise extraction, PDF OCR fallback, image
+validation/analysis handoff, audio/video upload cleanup, real WAV assembly, URL
+empty-page handling, and SSRF redirect/DNS checks. They do not require a Gemini
+key or contact Google.
+
+For an end-to-end Windows smoke test, run `python setup.py` and then
+`python main.py` with a Gemini key configured. Drag a supported file onto the
+window and verify the hover hologram disappears on leave; repeat with
+`Ctrl+O`. Import a text PDF, a scanned PDF (with Tesseract installed), and a
+PNG/JPG; each should return a Gemini result or a specific OCR/service error.
+Type a plain-text request and a public `https://` article URL in chat. Finally,
+press `Ctrl+Shift+V`, generate a voice-over, and verify WAV preview, pause/resume,
+and saving; use `Ctrl+Shift+S` to export a successful report. Live API,
+OCR-binary, playback, and drag/drop checks require the configured Windows
+machine and are not covered by the mocked unit suite.
 
 Covered: risk classification & confirmation gate (`safety.py`), memory
 CRUD/pruning/secret filtering (`memory/memory_manager.py`), log redaction

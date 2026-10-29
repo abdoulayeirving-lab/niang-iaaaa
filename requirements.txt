@@ -1,5 +1,5 @@
 ﻿sounddevice
-google-genai
+google-genai>=2.25.0
 google-generativeai
 pillow
 requests
@@ -22,6 +22,8 @@ pywinauto
 mediapipe
 ultralytics
 pytesseract
+PyMuPDF
+tkinterdnd2
 openwakeword
 winotify
 pystray

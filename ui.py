@@ -1,10 +1,16 @@
 import os, json, time, math, random, threading
 import tkinter as tk
+from tkinter import filedialog
 from collections import deque
 from PIL import Image, ImageTk, ImageDraw, ImageFont, ImageOps
 import sys
 from pathlib import Path
 from vision.arcade import VisionArcade
+try:
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+except ImportError:
+    DND_FILES = None
+    TkinterDnD = None
 
 
 def get_base_dir():
@@ -107,7 +113,7 @@ def _save_theme_name(name: str) -> None:
 
 class KaizumiUI:
     def __init__(self, face_path, size=None):
-        self.root = tk.Tk()
+        self.root = TkinterDnD.Tk() if TkinterDnD else tk.Tk()
         self.root.title("NIANG IA")
         self.root.resizable(True, True)
 
@@ -168,6 +174,19 @@ class KaizumiUI:
         self._batt_ts      = 0.0
 
         self.on_text_command = None
+        self.on_files_selected = None
+        self.on_clear_documents = None
+        self.on_voiceover_requested = None
+        self._selected_paths = []
+        self._file_row_widgets = []
+        self._drop_leave_after = None
+        self._drop_pulse_after = None
+        self._drop_pulse_index = 0
+        self._drop_hud_visible = False
+        self._voiceover_path = None
+        self._voiceover_alias_open = False
+        self._voiceover_window = None
+        self._analysis_report = ""
         self.on_whatsapp_call_control = None
         self.vision_mode = "STANDBY"
         self.vision_signal = "Awaiting camera input"
@@ -202,6 +221,7 @@ class KaizumiUI:
         # This is intentionally built from native Tk widgets so it remains
         # lightweight and works together with the existing animated canvas.
         self._build_command_deck()
+        self._build_file_drop_area()
 
         # ── Log area ─────────────────────────────────────────────────────────
         LW = max(320, W - 440) if W >= 900 else int(W * 0.72)
@@ -234,10 +254,29 @@ class KaizumiUI:
         self.root.bind("<F4>", lambda e: self._toggle_mute())
         self.root.bind("<F6>", lambda e: self._toggle_silent_mode())
         self.root.bind("<F5>", lambda e: self.cycle_theme())
+        self.root.bind("<Control-o>", self._open_file_dialog)
+        self.root.bind("<Control-Shift-v>", self._open_voiceover)
+        self.root.bind("<Control-Shift-s>", self._export_analysis_report)
+        self._input_text.bind("<Control-Button-1>", self._open_file_dialog)
+        if DND_FILES:
+            drop_targets = [self.root]
+            pending = list(self.root.winfo_children())
+            while pending:
+                target = pending.pop()
+                drop_targets.append(target)
+                pending.extend(target.winfo_children())
+            for target in drop_targets:
+                target.drop_target_register(DND_FILES)
+                target.dnd_bind("<<DropEnter>>", self._on_drop_enter)
+                target.dnd_bind("<<DropLeave>>", self._on_drop_leave)
+                target.dnd_bind("<<Drop>>", self._on_drop)
 
         # Re-layout widgets when the window is resized
         self.root.bind("<Configure>", self._on_configure)
         self._relayout()
+        self.write_log(
+            "SYS: Fichier : Ctrl+O · voix off : Ctrl+Maj+V · export rapport : Ctrl+Maj+S."
+        )
 
         # ── API key ───────────────────────────────────────────────────────────
         self._api_key_ready = self._api_keys_exist()
@@ -245,7 +284,7 @@ class KaizumiUI:
             self._show_setup_ui()
 
         self._animate()
-        self.root.protocol("WM_DELETE_WINDOW", lambda: os._exit(0))
+        self.root.protocol("WM_DELETE_WINDOW", self._close_application)
 
     # ── Theme ────────────────────────────────────────────────────────────────
 
@@ -272,6 +311,14 @@ class KaizumiUI:
         self.log_text.tag_config("ai", foreground=self.col["pri"])
         self.log_text.tag_config("sys", foreground=self.col["acc2"])
         self.log_text.tag_config("err", foreground=self.col["red"])
+        self._file_card.configure(bg=self.col["panel"], highlightbackground=self.col["mid"])
+        self._file_rows.configure(bg=self.col["panel"])
+        self._file_progress.configure(bg=self.col["panel"])
+        self._drop_overlay.configure(bg=self.col["panel"], highlightbackground=self.col["pri"])
+        self._drop_icon.configure(bg=self.col["panel"], fg=self.col["pri"])
+        self._drop_label.configure(bg=self.col["panel"], fg=self.col["pri"])
+        if self._selected_paths:
+            self._refresh_file_card()
         self._draw_mute_button()
         self._refresh_input_style()
         self._apply_deck_theme()
@@ -682,6 +729,537 @@ class KaizumiUI:
                           highlightbackground=self.col["dim"])
         self._refresh_deck_status()
 
+    def _build_file_drop_area(self):
+        self._file_card = tk.Frame(
+            self.root, bg=self.col["panel"], highlightthickness=1,
+            highlightbackground=self.col["mid"],
+        )
+        self._file_rows = tk.Frame(self._file_card, bg=self.col["panel"])
+        self._file_rows.pack(fill="x", padx=8, pady=(6, 0))
+        self._file_progress = tk.Label(
+            self._file_card, text="", anchor="w", bg=self.col["panel"],
+            fg=self.col["acc2"], font=("Consolas", 8), cursor="hand2",
+        )
+        self._file_progress.pack(fill="x", padx=8, pady=(2, 6))
+        self._file_progress.bind("<Button-1>", self._retry_file_analysis)
+        self._file_card.place_forget()
+
+        self._drop_overlay = tk.Frame(
+            self.root, bg=self.col["panel"], highlightthickness=2,
+            highlightbackground=self.col["pri"],
+        )
+        self._drop_icon = tk.Label(
+            self._drop_overlay, text="☁",
+            bg=self.col["panel"], fg=self.col["pri"],
+            font=("Segoe UI Symbol", 30),
+        )
+        self._drop_icon.pack(pady=(5, 0))
+        self._drop_label = tk.Label(
+            self._drop_overlay, text="Déposez vos fichiers n'importe où",
+            bg=self.col["panel"], fg=self.col["pri"],
+            font=("Segoe UI", 10),
+        )
+        self._drop_label.pack(pady=(0, 9))
+        self._drop_overlay.place_forget()
+
+    def _file_card_position(self):
+        width = min(420, self.W - 32)
+        height = max(60, 36 + len(self._selected_paths) * 22)
+        log_y = self.H - int(self.H * 0.11) - int(self.H * 0.13)
+        y = min(
+            max(self.FCY + self.FACE_SZ // 2 + 20, int(self.H * 0.40)),
+            max(100, log_y - height - 8),
+        )
+        return max(8, (self.W - width) // 2), y, width, height
+
+    def _show_drop_overlay(self):
+        self._drop_hud_visible = True
+        self._draw_drop_hud()
+        self._drop_overlay.place(
+            x=max(8, (self.W - min(390, self.W - 32)) // 2),
+            y=max(100, self.FCY + self.FACE_SZ // 2 + 54),
+            width=min(390, self.W - 32),
+            height=112,
+        )
+        self._drop_overlay.lift()
+        if self._drop_pulse_after is None:
+            self._pulse_drop_overlay()
+
+    def _draw_drop_hud(self):
+        self.bg.delete("drop-hud")
+        inset = 7
+        top = 76
+        bottom = max(top + 1, self.H - 42)
+        right = max(inset + 1, self.W - inset)
+        color = self.col["pri"]
+        self.bg.create_rectangle(
+            inset, top, right, bottom,
+            outline=color, width=1, dash=(3, 8),
+            tags=("drop-hud", "drop-hud-border"),
+        )
+        length = 34
+        corners = (
+            (inset, top, inset + length, top, inset, top, inset, top + length),
+            (right, top, right - length, top, right, top, right, top + length),
+            (inset, bottom, inset + length, bottom, inset, bottom, inset, bottom - length),
+            (right, bottom, right - length, bottom, right, bottom, right, bottom - length),
+        )
+        for x1, y1, x2, y2, x3, y3, x4, y4 in corners:
+            self.bg.create_line(
+                x1, y1, x2, y2, fill=color, width=3,
+                tags=("drop-hud", "drop-hud-corners"),
+            )
+            self.bg.create_line(
+                x3, y3, x4, y4, fill=color, width=3,
+                tags=("drop-hud", "drop-hud-corners"),
+            )
+
+    def _pulse_drop_overlay(self):
+        if not self._drop_hud_visible:
+            self._drop_pulse_after = None
+            return
+        colors = (self.col["pri"], self.col["mid"], self.col["dim"], self.col["mid"])
+        color = colors[self._drop_pulse_index % len(colors)]
+        self._drop_pulse_index += 1
+        self._drop_overlay.configure(highlightbackground=color)
+        self.bg.itemconfigure("drop-hud-border", outline=color)
+        self.bg.itemconfigure("drop-hud-corners", fill=color)
+        self._drop_pulse_after = self.root.after(220, self._pulse_drop_overlay)
+
+    def _on_drop_enter(self, event=None):
+        if self._drop_leave_after is not None:
+            self.root.after_cancel(self._drop_leave_after)
+            self._drop_leave_after = None
+        self._show_drop_overlay()
+        return event.action if event and getattr(event, "action", None) else "copy"
+
+    def _on_drop_leave(self, event=None):
+        if self._drop_leave_after is not None:
+            self.root.after_cancel(self._drop_leave_after)
+        self._drop_leave_after = self.root.after(180, self._hide_drop_overlay)
+
+    def _hide_drop_overlay(self):
+        self._drop_leave_after = None
+        self._drop_hud_visible = False
+        self._drop_overlay.place_forget()
+        self.bg.delete("drop-hud")
+        if self._drop_pulse_after is not None:
+            self.root.after_cancel(self._drop_pulse_after)
+            self._drop_pulse_after = None
+
+    def _on_drop(self, event):
+        self._hide_drop_overlay()
+        try:
+            paths = self.root.tk.splitlist(event.data)
+        except tk.TclError as exc:
+            self.write_log(f"ERR: Impossible de lire les fichiers déposés : {exc}")
+            return "break"
+        self._handle_selected_files(paths)
+        return "copy"
+
+    def _open_file_dialog(self, event=None):
+        from actions.intelligent_analysis import SUPPORTED_EXTENSIONS
+
+        extensions = sorted(SUPPORTED_EXTENSIONS)
+        paths = filedialog.askopenfilenames(
+            parent=self.root,
+            title="Choisir des fichiers à analyser",
+            filetypes=[
+                ("Formats pris en charge", " ".join(f"*{ext}" for ext in extensions)),
+                ("Tous les fichiers", "*.*"),
+            ],
+        )
+        if paths:
+            self._handle_selected_files(paths)
+        return "break"
+
+    def _handle_selected_files(self, paths):
+        from actions.intelligent_analysis import (
+            MAX_FILE_BYTES,
+            MAX_FILES,
+            SUPPORTED_EXTENSIONS,
+        )
+
+        accepted = []
+        seen = {str(Path(path).resolve()).lower() for path in self._selected_paths}
+        for raw_path in paths:
+            path = Path(raw_path).expanduser()
+            try:
+                resolved = str(path.resolve(strict=True))
+                if not path.is_file():
+                    raise ValueError("ce chemin n'est pas un fichier")
+                if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+                    raise ValueError(f"format non pris en charge ({path.suffix or 'sans extension'})")
+                if path.stat().st_size > MAX_FILE_BYTES:
+                    raise ValueError(f"fichier supérieur à {MAX_FILE_BYTES // (1024 * 1024)} Mo")
+                if resolved.lower() in seen:
+                    continue
+                if len(self._selected_paths) + len(accepted) >= MAX_FILES:
+                    raise ValueError(f"limite de {MAX_FILES} fichiers par session atteinte")
+                accepted.append(resolved)
+                seen.add(resolved.lower())
+            except (OSError, ValueError) as exc:
+                self.write_log(f"ERR: {path.name or raw_path} — {exc}")
+        if not accepted:
+            return
+
+        self._selected_paths.extend(accepted)
+        self.set_analysis_report("")
+        self._refresh_file_card()
+        self._set_file_status("Import local : validation des fichiers…")
+        if self.on_files_selected:
+            self.on_files_selected(list(self._selected_paths))
+        else:
+            self.write_log("ERR: Le service d'analyse des fichiers n'est pas disponible.")
+
+    def _refresh_file_card(self):
+        for widget in self._file_row_widgets:
+            widget.destroy()
+        self._file_row_widgets.clear()
+        for path_text in self._selected_paths:
+            path = Path(path_text)
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = 0
+            size_text = f"{size / (1024 * 1024):.1f} Mo" if size >= 1024 * 1024 else f"{size / 1024:.0f} Ko"
+            row = tk.Frame(self._file_rows, bg=self.col["panel"])
+            row.pack(fill="x")
+            label = tk.Label(
+                row, text=f"{path.name} · {path.suffix[1:].upper()} · {size_text}",
+                anchor="w", bg=self.col["panel"], fg=self.col["text"],
+                font=("Consolas", 8),
+            )
+            label.pack(side="left", fill="x", expand=True)
+            remove = tk.Button(
+                row, text="×", command=lambda item=path_text: self._remove_imported_file(item),
+                bg=self.col["panel"], fg=self.col["red"], activebackground=self.col["red"],
+                activeforeground=self.col["bg"], relief="flat", borderwidth=0,
+                font=("Segoe UI", 10, "bold"), cursor="hand2",
+            )
+            remove.pack(side="right")
+            self._file_row_widgets.append(row)
+        if self._selected_paths:
+            x, y, width, _ = self._file_card_position()
+            self._file_card.place(x=x, y=y, width=width)
+            self._file_card.lift()
+        else:
+            self._file_card.place_forget()
+
+    def _remove_imported_file(self, path):
+        self._selected_paths = [item for item in self._selected_paths if item != path]
+        self.set_analysis_report("")
+        self._refresh_file_card()
+        if self._selected_paths and self.on_files_selected:
+            self.on_files_selected(list(self._selected_paths))
+        else:
+            if self.on_clear_documents:
+                self.on_clear_documents()
+            self.set_state(
+                "MUTED" if self.muted else
+                ("LISTENING" if self.connected else "ONLINE")
+            )
+
+    def _retry_file_analysis(self, event=None):
+        if self._selected_paths and self.on_files_selected:
+            self.set_analysis_report("")
+            self.set_file_status("Nouvelle analyse en cours…")
+            self.on_files_selected(list(self._selected_paths))
+        return "break"
+
+    def set_file_status(self, message, error=False):
+        self._safe_ui(self._set_file_status, message, error)
+
+    def set_analysis_report(self, report):
+        self._safe_ui(self._set_analysis_report, report)
+
+    def _set_analysis_report(self, report):
+        self._analysis_report = str(report or "")
+
+    def _export_analysis_report(self, event=None):
+        if not self._analysis_report:
+            self.write_log("ERR: Aucun rapport d'analyse à exporter.")
+            return "break"
+        destination = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="Exporter le rapport NIANG IA",
+            defaultextension=".txt",
+            initialfile="niang-rapport.txt",
+            filetypes=[("Rapport texte", "*.txt"), ("Markdown", "*.md")],
+        )
+        if destination:
+            try:
+                Path(destination).write_text(self._analysis_report, encoding="utf-8")
+                self.write_log(f"SYS: Rapport exporté : {destination}")
+            except OSError as exc:
+                self.write_log(f"ERR: Export du rapport impossible : {exc}")
+        return "break"
+
+    def _set_file_status(self, message, error=False):
+        if not self._selected_paths:
+            return
+        try:
+            self._file_progress.configure(
+                text=str(message),
+                fg=self.col["red"] if error else self.col["acc2"],
+            )
+        except tk.TclError:
+            pass
+
+    def _open_voiceover(self, event=None):
+        if self.on_voiceover_requested is None:
+            self.write_log("ERR: Le service Gemini TTS n'est pas disponible.")
+            return "break"
+        if self._voiceover_window is not None and self._voiceover_window.winfo_exists():
+            self._voiceover_window.lift()
+            return "break"
+
+        window = tk.Toplevel(self.root)
+        self._voiceover_window = window
+        window.title("NIANG IA · VOIX OFF")
+        window.configure(bg=self.col["bg"])
+        window.geometry("620x610")
+        window.minsize(500, 500)
+
+        tk.Label(
+            window, text="GÉNÉRATION VOIX OFF · GEMINI TTS",
+            bg=self.col["bg"], fg=self.col["pri"], font=("Consolas", 12, "bold"),
+        ).pack(anchor="w", padx=16, pady=(14, 4))
+        tk.Label(
+            window,
+            text="Texte envoyé à Gemini TTS. Saisissez-le ici, ou laissez vide pour les documents sélectionnés.",
+            bg=self.col["bg"], fg=self.col["text"], font=("Segoe UI", 9),
+        ).pack(anchor="w", padx=16, pady=(0, 8))
+
+        source_text = self._get_input().strip()
+        text_box = tk.Text(
+            window, height=13, wrap="word", bg=self.col["input"],
+            fg=self.col["text"], insertbackground=self.col["text"],
+            highlightthickness=1, highlightbackground=self.col["mid"],
+            font=("Segoe UI", 10),
+        )
+        text_box.pack(fill="both", expand=True, padx=16, pady=4)
+        if source_text:
+            text_box.insert("1.0", source_text)
+
+        options = tk.Frame(window, bg=self.col["bg"])
+        options.pack(fill="x", padx=16, pady=6)
+
+        def add_option(label, values, default, width=14):
+            cell = tk.Frame(options, bg=self.col["bg"])
+            cell.pack(side="left", padx=(0, 12))
+            tk.Label(cell, text=label, bg=self.col["bg"], fg=self.col["text"],
+                     font=("Consolas", 8)).pack(anchor="w")
+            selected = tk.StringVar(window, value=default)
+            menu = tk.OptionMenu(cell, selected, *values)
+            menu.configure(
+                width=width, bg=self.col["input"], fg=self.col["text"],
+                activebackground=self.col["pri"], activeforeground=self.col["bg"],
+                highlightthickness=0, relief="flat", font=("Consolas", 8),
+            )
+            menu["menu"].configure(
+                bg=self.col["panel"], fg=self.col["text"],
+                activebackground=self.col["pri"], activeforeground=self.col["bg"],
+            )
+            menu.pack()
+            return selected
+
+        voice = add_option(
+            "VOIX", ["Kore", "Aoede", "Puck", "Charon", "Fenrir", "Leda", "Orus", "Zephyr"],
+            "Kore", 12,
+        )
+        language = add_option("LANGUE", ["français", "English", "español", "العربية"], "français", 12)
+        pace = add_option("RYTHME", ["lent", "normal", "rapide"], "normal", 10)
+        tone_cell = tk.Frame(options, bg=self.col["bg"])
+        tone_cell.pack(side="left")
+        tk.Label(tone_cell, text="TON", bg=self.col["bg"], fg=self.col["text"],
+                 font=("Consolas", 8)).pack(anchor="w")
+        tone = tk.Entry(
+            tone_cell, width=14, bg=self.col["input"], fg=self.col["text"],
+            insertbackground=self.col["text"], relief="flat",
+        )
+        tone.insert(0, "naturel")
+        tone.pack()
+
+        status = tk.Label(window, text="En attente", bg=self.col["bg"],
+                          fg=self.col["acc2"], anchor="w", font=("Consolas", 9))
+        status.pack(fill="x", padx=16, pady=4)
+        controls = tk.Frame(window, bg=self.col["bg"])
+        controls.pack(fill="x", padx=16, pady=(4, 14))
+        generate = tk.Button(
+            controls, text="GÉNÉRER", bg=self.col["panel"], fg=self.col["pri"],
+            activebackground=self.col["pri"], activeforeground=self.col["bg"],
+            relief="flat", highlightthickness=1, highlightbackground=self.col["mid"],
+            cursor="hand2",
+        )
+        generate.pack(side="left")
+        play = tk.Button(controls, text="▶ LIRE", command=self._play_voiceover,
+                         bg=self.col["panel"], fg=self.col["text"], state="disabled")
+        play.pack(side="left", padx=6)
+        pause = tk.Button(controls, text="Ⅱ PAUSE / REPRISE", command=self._pause_voiceover,
+                          bg=self.col["panel"], fg=self.col["text"], state="disabled")
+        pause.pack(side="left")
+        save = tk.Button(controls, text="TÉLÉCHARGER WAV", command=self._save_voiceover,
+                         bg=self.col["panel"], fg=self.col["text"], state="disabled")
+        save.pack(side="right")
+
+        def finish(path, error):
+            self._safe_ui(
+                self._finish_voiceover, window, status, generate, play, pause, save,
+                path, error,
+            )
+
+        def start_generation():
+            generate.configure(state="disabled")
+            for button in (play, pause, save):
+                button.configure(state="disabled")
+            if not self._stop_voiceover():
+                self._set_voiceover_status(status, "Impossible d'arrêter l'audio précédent.")
+                generate.configure(state="normal")
+                return
+            if self._voiceover_path:
+                try:
+                    Path(self._voiceover_path).unlink(missing_ok=True)
+                except OSError as exc:
+                    self._set_voiceover_status(status, f"Nettoyage audio impossible : {exc}")
+                    generate.configure(state="normal")
+                    return
+            self._voiceover_path = None
+            self._set_voiceover_status(status, "Envoi du texte et génération audio…")
+            text = text_box.get("1.0", "end-1c").strip()
+            settings = {
+                "voice": voice.get(),
+                "language": language.get(),
+                "pace": pace.get(),
+                "tone": tone.get().strip() or "naturel",
+            }
+            self.on_voiceover_requested(
+                text,
+                settings,
+                lambda message: self._safe_ui(self._set_voiceover_status, status, message),
+                finish,
+            )
+
+        generate.configure(command=start_generation)
+
+        def close_window():
+            self._stop_voiceover()
+            if self._voiceover_path:
+                try:
+                    Path(self._voiceover_path).unlink(missing_ok=True)
+                except OSError as exc:
+                    self.write_log(f"ERR: Nettoyage audio temporaire impossible : {exc}")
+                self._voiceover_path = None
+            self._voiceover_window = None
+            window.destroy()
+
+        window.protocol("WM_DELETE_WINDOW", close_window)
+        return "break"
+
+    @staticmethod
+    def _set_voiceover_status(label, message):
+        try:
+            label.configure(text=message)
+        except tk.TclError:
+            pass
+
+    def _finish_voiceover(self, window, status, generate, play, pause, save, path, error):
+        try:
+            if not window.winfo_exists():
+                if path:
+                    Path(path).unlink(missing_ok=True)
+                return
+            generate.configure(state="normal")
+            if error:
+                self._set_voiceover_status(status, f"Erreur : {error}")
+                self.write_log(f"ERR: Génération TTS — {error}")
+                return
+            self._voiceover_path = path
+            self._set_voiceover_status(status, f"Audio WAV prêt : {Path(path).name}")
+            for button in (play, pause, save):
+                button.configure(state="normal")
+        except tk.TclError:
+            if path:
+                Path(path).unlink(missing_ok=True)
+
+    def _mci(self, command):
+        if sys.platform != "win32":
+            raise RuntimeError("La lecture intégrée est disponible uniquement sous Windows.")
+        import ctypes
+
+        result = ctypes.windll.winmm.mciSendStringW(command, None, 0, 0)
+        if result:
+            message = ctypes.create_unicode_buffer(256)
+            ctypes.windll.winmm.mciGetErrorStringW(result, message, len(message))
+            raise RuntimeError(message.value or "Windows Media Control Interface error")
+
+    def _play_voiceover(self):
+        if not self._voiceover_path:
+            return
+        try:
+            if self._voiceover_alias_open:
+                self._mci("stop niangvoice")
+                self._mci("close niangvoice")
+            self._mci(f'open "{self._voiceover_path}" type waveaudio alias niangvoice')
+            self._mci("play niangvoice")
+            self._voiceover_alias_open = True
+        except (OSError, RuntimeError) as exc:
+            self.write_log(f"ERR: Lecture audio impossible : {exc}")
+
+    def _pause_voiceover(self):
+        try:
+            if self._voiceover_alias_open:
+                import ctypes
+                status = ctypes.create_unicode_buffer(32)
+                result = ctypes.windll.winmm.mciSendStringW(
+                    "status niangvoice mode", status, len(status), 0,
+                )
+                if result:
+                    raise RuntimeError("Impossible de lire l'état du lecteur audio.")
+                command = "resume niangvoice" if status.value == "paused" else "pause niangvoice"
+                self._mci(command)
+            elif self._voiceover_path:
+                self._play_voiceover()
+        except (OSError, RuntimeError) as exc:
+            self.write_log(f"ERR: Contrôle audio impossible : {exc}")
+
+    def _stop_voiceover(self):
+        if self._voiceover_alias_open:
+            try:
+                self._mci("stop niangvoice")
+                self._mci("close niangvoice")
+            except (OSError, RuntimeError) as exc:
+                self.write_log(f"ERR: Arrêt audio impossible : {exc}")
+                return False
+            self._voiceover_alias_open = False
+        return True
+
+    def _save_voiceover(self):
+        if not self._voiceover_path:
+            return
+        destination = filedialog.asksaveasfilename(
+            parent=self.root, title="Enregistrer la voix off",
+            defaultextension=".wav", initialfile="niang-voix-off.wav",
+            filetypes=[("Audio WAV", "*.wav")],
+        )
+        if not destination:
+            return
+        try:
+            import shutil
+            shutil.copy2(self._voiceover_path, destination)
+            self.write_log(f"SYS: Voix off enregistrée : {destination}")
+        except OSError as exc:
+            self.write_log(f"ERR: Enregistrement audio impossible : {exc}")
+
+    def _close_application(self):
+        self._stop_voiceover()
+        if self._voiceover_path:
+            try:
+                Path(self._voiceover_path).unlink(missing_ok=True)
+            except OSError as exc:
+                self.write_log(f"ERR: Nettoyage audio temporaire impossible : {exc}")
+        os._exit(0)
+
     # ── Persona / connection (called from main.py) ───────────────────────────
 
     def set_persona(self, mode: str, mood: str, voice: str):
@@ -854,6 +1432,10 @@ class KaizumiUI:
         else:
             self._left_deck.place_forget()
             self._right_deck.place_forget()
+        if self._selected_paths:
+            self._refresh_file_card()
+        if self._drop_overlay.winfo_ismapped():
+            self._show_drop_overlay()
 
     def _on_configure(self, event=None):
         if event is None or event.widget is not self.root:
