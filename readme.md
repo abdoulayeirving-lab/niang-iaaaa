@@ -47,7 +47,7 @@ external APIs. It is **free to self-host** — you only need a Gemini API key
 |------|-------------------|
 | 🎙️ **Real-time voice** | Natural, low-latency speech-to-speech conversation in any language |
 | 🎬 **Video Studio** | Local video inspection and subtitle-guided promo renders with transitions and audio mastering |
-| 👁️ **Visual awareness** | Screen analysis, screenshot understanding, opt-in live webcam input, click-on-command |
+| 👁️ **Visual awareness** | On-demand local screen OCR; only recognized text is sent to Gemini after confirmation, never the screenshot; opt-in live webcam input |
 | 🧠 **Persistent memory** | Remembers your name, preferences, projects, and plans across sessions |
 | 🖥️ **Guarded Computer Use** | Observe Windows UI Automation controls, operate mouse/keyboard, and verify visible results |
 | 📱 **Android app** | Standalone Gemini voice/chat assistant with optional Bluetooth control of the Windows PC |
@@ -74,6 +74,7 @@ external APIs. It is **free to self-host** — you only need a Gemini API key
 - A microphone and speakers
 - Bluetooth adapter (optional — for the Android app)
 - A free [Gemini API key](https://aistudio.google.com/apikey)
+- [Tesseract OCR](https://github.com/UB-Mannheim/tesseract/wiki) for the `READ SCREEN` action (standard install location or `PATH`)
 
 ---
 
@@ -99,6 +100,19 @@ the Windows installer to `Downloads`, verifies its size and SHA-256 digest
 against GitHub's release metadata, and asks before launching it. NIANG IA closes
 before installation so the installer can safely replace its files. The check
 only contacts the public GitHub release API and sends no application data.
+
+Use the `READ SCREEN` command or ask NIANG IA to read the current screen. NIANG IA
+captures the display temporarily and extracts text locally with Tesseract OCR.
+Before each screen reading, it asks for confirmation because the recognized text
+can contain private information; after approval, only up to 12,000 characters of
+OCR text are sent to Gemini. The screenshot is never uploaded or saved. OCR can
+miss text and cannot interpret icons, images, or other visual-only content.
+Tesseract is a separate native dependency and is not included in the Windows
+installer. Install it from the linked project, or run this in PowerShell:
+
+```powershell
+winget install --id UB-Mannheim.TesseractOCR --exact
+```
 
 Download the latest Windows installer from the
 [GitHub Releases page](https://github.com/abdoulayeirving-lab/niang-iaaaa/releases/latest).

@@ -140,11 +140,14 @@ class RiskClassificationTest(unittest.TestCase):
                     safety.Risk.LOW,
                 )
 
-    def test_screen_analysis_is_disabled_and_camera_or_text_input_requires_confirmation(self):
+    def test_screen_ocr_and_camera_require_confirmation(self):
         screen_args = {"angle": "screen", "text": "read the window"}
         self.assertEqual(safety.classify("screen_process", screen_args), safety.Risk.HIGH)
         self.assertTrue(safety.needs_confirmation("screen_process", screen_args))
-        self.assertIn("no screenshot", safety.describe("screen_process", screen_args))
+        screen_description = safety.describe("screen_process", screen_args)
+        self.assertIn("send only that text to Gemini", screen_description)
+        self.assertIn("never send the screenshot", screen_description)
+        self.assertIn("private information", screen_description)
         camera_args = {"angle": "camera", "text": "describe the camera"}
         self.assertTrue(safety.needs_confirmation("screen_process", camera_args))
         self.assertIn("send that image", safety.describe("screen_process", camera_args))

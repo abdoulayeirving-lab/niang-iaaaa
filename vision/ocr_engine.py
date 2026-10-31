@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import os
+import shutil
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from time import time
 from typing import Any
 
@@ -14,6 +18,34 @@ class OCRConfig:
     languages: str = "eng"
     min_confidence: float = 35.0
     scale: float = 1.5
+
+
+def _tesseract_candidates() -> tuple[Path, ...]:
+    project_root = Path(__file__).resolve().parents[1]
+    return (
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+        / "Tesseract-OCR"
+        / "tesseract.exe",
+        Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
+        / "Tesseract-OCR"
+        / "tesseract.exe",
+        project_root / "runtime" / "Tesseract-OCR" / "tesseract.exe",
+        Path(sys.executable).resolve().parent
+        / "runtime"
+        / "Tesseract-OCR"
+        / "tesseract.exe",
+    )
+
+
+def _configure_tesseract_path(pytesseract_module: Any) -> None:
+    configured_path = str(pytesseract_module.pytesseract.tesseract_cmd)
+    if Path(configured_path).is_file() or shutil.which(configured_path):
+        return
+
+    for candidate in _tesseract_candidates():
+        if candidate.is_file():
+            pytesseract_module.pytesseract.tesseract_cmd = str(candidate)
+            return
 
 
 class OCREngine:
@@ -39,6 +71,7 @@ class OCREngine:
         self._loaded = True
         try:
             import pytesseract
+            _configure_tesseract_path(pytesseract)
             self._pytesseract = pytesseract
             # This also checks that the native Tesseract executable is present.
             pytesseract.get_tesseract_version()
@@ -53,8 +86,6 @@ class OCREngine:
             return []
         try:
             import cv2
-            import numpy as np
-
             image = frame
             if self.config.scale != 1.0:
                 image = cv2.resize(image, None, fx=self.config.scale, fy=self.config.scale,

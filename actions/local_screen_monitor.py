@@ -92,7 +92,10 @@ class LocalScreenMonitor:
                 ),
                 "screen_width": self._width,
                 "screen_height": self._height,
-                "privacy": "local only; no screenshot or screen text is saved or sent to Gemini",
+                "privacy": (
+                    "pixel-change monitor stays local and sends no images or text; "
+                    "separate screen OCR requires confirmation and sends OCR text only"
+                ),
                 "error": self._error,
             }
 

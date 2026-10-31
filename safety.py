@@ -361,7 +361,11 @@ def describe(name: str, args: dict | None) -> str:
     if name == "screen_process":
         source = str(args.get("angle", "screen")).lower()
         if source != "camera":
-            return "read local screen-monitor change counts only; no screenshot is captured or sent to Gemini"
+            return (
+                "capture the screen locally, extract up to 12,000 characters with "
+                "OCR, and send only that text to Gemini for this request; never "
+                "send the screenshot. The text may contain private information."
+            )
         return (
             "capture the webcam only for this explicit request and send that image "
             "and question to Gemini for analysis"
