@@ -4,6 +4,7 @@
 # Fallback: DuckDuckGo (ddgs)
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -19,6 +20,70 @@ API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 def _get_api_key() -> str:
     from api_keys import next_key
     return next_key()
+
+
+def _serper_search(query: str, max_results: int = 6) -> str:
+    from api_keys import load_env_file
+    import requests
+
+    load_env_file()
+    api_key = os.environ.get("SERPER_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("SERPER_API_KEY is not configured in the local .env file.")
+
+    response = requests.post(
+        "https://google.serper.dev/search",
+        headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
+        json={"q": query, "num": max_results},
+        timeout=(10, 30),
+    )
+    try:
+        if response.status_code in {401, 403}:
+            raise RuntimeError(
+                "Serper rejected the API key. Check SERPER_API_KEY in .env."
+            )
+        if response.status_code == 429:
+            raise RuntimeError(
+                "Serper search quota or rate limit reached. Check the Serper account."
+            )
+        response.raise_for_status()
+        payload = response.json()
+    finally:
+        response.close()
+
+    if not isinstance(payload, dict):
+        raise RuntimeError("Serper returned an unexpected response.")
+
+    lines = [f"Search results for: {query}"]
+    answer_box = payload.get("answerBox")
+    if isinstance(answer_box, dict):
+        answer = answer_box.get("answer") or answer_box.get("snippet")
+        if answer:
+            lines.extend(["", str(answer)])
+        answer_link = answer_box.get("link")
+        if answer_link:
+            lines.append(f"Source: {answer_link}")
+
+    organic = payload.get("organic", [])
+    if isinstance(organic, list):
+        for index, item in enumerate(organic[:max_results], 1):
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title", "")).strip()
+            snippet = str(item.get("snippet", "")).strip()
+            link = str(item.get("link", "")).strip()
+            if title or snippet or link:
+                lines.append("")
+                if title:
+                    lines.append(f"{index}. {title}")
+                if snippet:
+                    lines.append(f"   {snippet}")
+                if link:
+                    lines.append(f"   {link}")
+
+    if len(lines) == 1:
+        return f"No results found for: {query}"
+    return "\n".join(lines)
 
 
 def _gemini_search(query: str) -> str:
@@ -118,6 +183,20 @@ def web_search(
             print("[WebSearch] ✅ Compare done.")
             return result
 
+        from api_keys import load_env_file
+        load_env_file()
+        if os.environ.get("SERPER_API_KEY", "").strip():
+            print("[WebSearch] 🌐 Serper search...")
+            try:
+                result = _serper_search(query)
+                print("[WebSearch] ✅ Serper OK.")
+                return result
+            except Exception as e:
+                print(f"[WebSearch] ⚠️ Serper failed ({e}), trying Gemini...")
+                serper_error = str(e)
+        else:
+            serper_error = ""
+
         print("[WebSearch] 🌐 Gemini search...")
         try:
             result = _gemini_search(query)
@@ -125,8 +204,19 @@ def web_search(
             return result
         except Exception as e:
             print(f"[WebSearch] ⚠️ Gemini failed ({e}), trying DDG...")
-            results = _ddg_search(query)
+            try:
+                results = _ddg_search(query)
+            except Exception as ddg_error:
+                errors = [f"Gemini: {e}", f"DuckDuckGo: {ddg_error}"]
+                if serper_error:
+                    errors.insert(0, f"Serper: {serper_error}")
+                raise RuntimeError("; ".join(errors)) from ddg_error
             result  = _format_ddg(query, results)
+            if not results and serper_error:
+                return (
+                    f"Search failed. Serper: {serper_error}; Gemini: {e}. "
+                    "DuckDuckGo returned no results."
+                )
             print(f"[WebSearch] ✅ DDG: {len(results)} results.")
             return result
 

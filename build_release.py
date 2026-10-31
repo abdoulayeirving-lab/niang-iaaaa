@@ -36,6 +36,7 @@ SOURCE_DIRS = (
     "vision",
 )
 ROOT_FILES = (
+    ".env.example",
     "LICENSE",
     "readme.md",
     "requirements.txt",

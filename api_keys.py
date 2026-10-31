@@ -25,6 +25,13 @@ def get_base_dir() -> Path:
 CONFIG_PATH = get_base_dir() / "config" / "api_keys.json"
 INSTALLER_KEY_PATH = get_base_dir() / "config" / "installer_gemini_key.txt"
 STATE_PATH  = get_base_dir() / "config" / "api_key_state.json"
+DOTENV_PATH = get_base_dir() / ".env"
+
+_ENV_FILE_KEYS = {
+    "SERPER_API_KEY",
+    "KAIZUMI_GEMINI_API_KEY",
+    "KAIZUMI_GEMINI_API_KEYS",
+}
 
 # Free-tier daily quota resets ~midnight; 8h cooldown is a safe approximation.
 RESET_COOLDOWN = 8 * 3600
@@ -36,6 +43,27 @@ _pos   = 0
 
 def _hash(key: str) -> str:
     return hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
+
+
+def load_env_file() -> None:
+    """Load supported local API settings without overriding process variables."""
+    try:
+        lines = DOTENV_PATH.read_text(encoding="utf-8-sig").splitlines()
+    except FileNotFoundError:
+        return
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        name, value = stripped.split("=", 1)
+        name = name.strip()
+        if name not in _ENV_FILE_KEYS:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ.setdefault(name, value)
 
 
 def _load_state() -> dict:
@@ -58,6 +86,7 @@ def _save_state() -> None:
 
 
 def get_all_keys() -> list:
+    load_env_file()
     keys = []
     # Environment variables first (dev / CI / docker friendly).
     env_key = os.environ.get("KAIZUMI_GEMINI_API_KEY", "").strip()

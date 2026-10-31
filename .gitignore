@@ -35,6 +35,9 @@ build/
 dist/
 
 # Secrets — never commit API keys
+.env
+.env.*
+!.env.example
 config/*.json
 !config/*.example.json
 config/telegram_offset.txt

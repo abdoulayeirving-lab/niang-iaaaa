@@ -93,6 +93,11 @@ locally as a separate configuration file. Both pages can be skipped. You can
 also configure a Gemini API key later in `config/api_keys.json`.
 On updates, the installer skips personalization and API-key pages when it finds
 existing profile or key data, and it does not overwrite that saved information.
+For Serper web search, copy `.env.example` to `.env` in the NIANG IA application
+folder (the folder containing `START_NIANG_IA.bat`) and set `SERPER_API_KEY`.
+Keep `.env` private; NIANG IA uses Serper first when that key is configured,
+then falls back to Gemini and DuckDuckGo. Serper account limits and any charges
+depend on the account's current plan.
 After Gemini connects, NIANG IA greets the user aloud using the saved preferred
 name and configured language on each application launch; if no name is saved,
 it greets without guessing one. This greeting is skipped in Text-only mode.
