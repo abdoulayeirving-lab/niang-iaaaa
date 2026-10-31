@@ -178,6 +178,15 @@ class RiskClassificationTest(unittest.TestCase):
             safety.Risk.HIGH,
         )
 
+    def test_local_screen_vision_is_read_only_and_never_prompts_for_remote_consent(self):
+        args = {"angle": "local_vision", "text": "Describe what is on screen."}
+
+        self.assertEqual(safety.classify("screen_process", args), safety.Risk.LOW)
+        self.assertFalse(safety.needs_confirmation("screen_process", args))
+        description = safety.describe("screen_process", args)
+        self.assertIn("local Ollama", description)
+        self.assertIn("not sent to Gemini", description)
+
     def test_unknown_tool_defaults_to_medium(self):
         self.assertEqual(safety.classify("totally_unknown_tool", {}), safety.Risk.MEDIUM)
 

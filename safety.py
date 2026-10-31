@@ -310,6 +310,8 @@ def classify(name: str, args: dict | None) -> Risk:
     args = args or {}
     action = str(args.get("action", "")).lower().strip()
     if name == "screen_process":
+        if str(args.get("angle", "screen")).lower().strip() == "local_vision":
+            return Risk.LOW
         return Risk.HIGH
     if name == "computer_settings":
         action = action.replace(" ", "_").replace("-", "_")
@@ -385,6 +387,12 @@ def describe(name: str, args: dict | None) -> str:
         return f"control or inspect the Windows interface ({action or 'unspecified action'})"
     if name == "screen_process":
         source = str(args.get("angle", "screen")).lower()
+        if source == "local_vision":
+            return (
+                "capture the screen and analyze it using the local Ollama model "
+                "on this computer only; the screenshot is not sent to Gemini or "
+                "any remote service"
+            )
         if source != "camera":
             return (
                 "capture the screen locally, extract up to 12,000 characters with "

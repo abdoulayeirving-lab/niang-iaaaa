@@ -39,7 +39,7 @@ class InstallerPersonalizationTests(unittest.TestCase):
     def test_updates_skip_saved_profile_and_api_key_pages_without_overwriting_data(self):
         source = (ROOT / "NIANG_IA.iss").read_text(encoding="utf-8")
 
-        self.assertIn('#define AppVersion "1.0.19"', source)
+        self.assertIn('#define AppVersion "1.0.20"', source)
         self.assertIn("memory\\long_term.json", source)
         self.assertIn("memory\\installer_profile.json", source)
         self.assertIn("config\\installer_gemini_key.txt", source)

@@ -10,6 +10,46 @@ from vision.vision_events import VisionEvent
 
 
 class ScreenPrivacyTests(unittest.TestCase):
+    def test_local_vision_uses_ollama_and_never_uses_ocr_or_gemini(self):
+        frame = object()
+        with (
+            patch.object(screen_processor, "_capture_screen_frame", return_value=frame),
+            patch.object(screen_processor, "_encode_local_vision_frame", return_value=b"local-image"),
+            patch.object(screen_processor, "_extract_screen_text") as extract_text,
+            patch.object(screen_processor, "_analyze_image_text") as analyze,
+            patch(
+                "vision.local_vlm.describe_image",
+                return_value="A browser window is open.",
+            ) as describe,
+        ):
+            result = screen_processor.screen_process({
+                "angle": "local_vision",
+                "text": "What is shown?",
+            })
+
+        self.assertIn("A browser window is open.", result)
+        self.assertIn("not sent to Gemini", result)
+        describe.assert_called_once_with(b"local-image", "What is shown?")
+        extract_text.assert_not_called()
+        analyze.assert_not_called()
+
+    def test_local_vision_reports_ollama_unavailable(self):
+        with (
+            patch.object(screen_processor, "_capture_screen_frame", return_value=object()),
+            patch.object(screen_processor, "_encode_local_vision_frame", return_value=b"local-image"),
+            patch(
+                "vision.local_vlm.describe_image",
+                side_effect=RuntimeError("Ollama is not running on this PC."),
+            ),
+        ):
+            result = screen_processor.screen_process({
+                "angle": "local_vision",
+                "text": "Describe this screen.",
+            })
+
+        self.assertIn("Local screen vision failed", result)
+        self.assertIn("Ollama is not running", result)
+
     def test_screen_describe_and_visual_search_cannot_call_gemini(self):
         with self.assertRaisesRegex(RuntimeError, "never sends screenshots to Gemini"):
             computer_control._describe_screen()

@@ -47,7 +47,7 @@ external APIs. It is **free to self-host** — you only need a Gemini API key
 |------|-------------------|
 | 🎙️ **Real-time voice** | Natural, low-latency speech-to-speech conversation in any language |
 | 🎬 **Video Studio** | Local video inspection and subtitle-guided promo renders with transitions and audio mastering |
-| 👁️ **Visual awareness** | On-demand local screen OCR; only recognized text is sent to Gemini after confirmation, never the screenshot; opt-in live webcam input |
+| 👁️ **Visual awareness** | On-demand screen descriptions with local Qwen3-VL via Ollama; screenshots never leave the PC; optional OCR sends only recognized text to Gemini after confirmation |
 | 🧠 **Persistent memory** | Remembers your name, preferences, projects, and plans across sessions |
 | 🖥️ **Guarded Computer Use** | Observe Windows UI Automation controls, operate mouse/keyboard, and verify visible results |
 | 📱 **Android app** | Standalone Gemini voice/chat assistant with optional Bluetooth control of the Windows PC |
@@ -74,7 +74,8 @@ external APIs. It is **free to self-host** — you only need a Gemini API key
 - A microphone and speakers
 - Bluetooth adapter (optional — for the Android app)
 - A free [Gemini API key](https://aistudio.google.com/apikey)
-- [Tesseract OCR](https://github.com/UB-Mannheim/tesseract/wiki) for the `READ SCREEN` action (standard install location or `PATH`)
+- [Ollama 0.12.7 or newer](https://ollama.com/download) and `qwen3-vl:2b` for local visual screen descriptions (downloaded separately; see below)
+- [Tesseract OCR](https://github.com/UB-Mannheim/tesseract/wiki) for optional screen-text recognition (standard install location or `PATH`)
 
 ---
 
@@ -109,12 +110,19 @@ before installation so the installer can safely replace its files. The check
 only contacts the public GitHub release API and sends no application data.
 
 Use the `READ SCREEN` command or ask NIANG IA to read the current screen. NIANG IA
-captures the display temporarily and extracts text locally with Tesseract OCR.
-The first screen reading in each application session asks for confirmation
-because the recognized text can contain private information; after approval,
-only up to 12,000 characters of OCR text are sent to Gemini for later readings
-in that session. The screenshot is never uploaded or saved. OCR can miss text
-and cannot interpret icons, images, or other visual-only content.
+uses local Ollama with Qwen3-VL to describe windows, controls, icons, and images;
+the screen image is sent only to `127.0.0.1` and never to Gemini or another remote
+service. Install Ollama 0.12.7 or newer, start it, and download the default model:
+
+```powershell
+ollama pull qwen3-vl:2b
+```
+
+The model is downloaded separately and is not included in the Windows installer.
+If you ask NIANG IA only to transcribe visible text, it uses local Tesseract OCR
+instead; the first OCR request in each application session asks for permission
+before sending recognized text (up to 12,000 characters) to Gemini. Neither mode
+saves the screenshot. Visual descriptions and OCR may be incomplete or mistaken.
 Tesseract is a separate native dependency and is not included in the Windows
 installer. Install it from the linked project, or run this in PowerShell:
 

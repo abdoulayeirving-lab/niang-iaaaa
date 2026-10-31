@@ -359,7 +359,10 @@ class KaizumiUI:
         for label, command in [
             ("DAILY BRIEFING", "give me my daily briefing"),
             ("SYSTEM STATUS", "show system status"),
-            ("READ SCREEN", "read my screen"),
+            (
+                "READ SCREEN",
+                "look at my screen and describe the windows, icons, buttons, images, and everything visible",
+            ),
             ("FOCUS MODE", "start focus mode"),
         ]:
             self._deck_button(self._left_deck, label, command)
