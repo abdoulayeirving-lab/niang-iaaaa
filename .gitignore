@@ -65,5 +65,3 @@ android/local.properties
 android/.idea/
 *.apk
 *.aab
-.vercel
-.env*
