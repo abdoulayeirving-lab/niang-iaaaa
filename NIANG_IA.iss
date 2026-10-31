@@ -1,5 +1,5 @@
 #define AppName "NIANG IA"
-#define AppVersion "1.0.20"
+#define AppVersion "1.0.21"
 #define SourceDir AddBackslash(SourcePath) + "dist\NIANG_IA_" + AppVersion
 
 [Setup]
@@ -29,6 +29,7 @@ Name: "{autodesktop}\NIANG IA"; Filename: "{app}\START_NIANG_IA.bat"; WorkingDir
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"
 
 [Run]
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\install_screen_vision.ps1"""; StatusMsg: "Installation d'Ollama et téléchargement du modèle de vision (environ 1,9 Go)..."; Flags: waituntilterminated
 Filename: "{app}\START_NIANG_IA.bat"; Description: "Launch NIANG IA"; WorkingDir: "{app}"; Flags: postinstall nowait skipifsilent
 
 [Code]

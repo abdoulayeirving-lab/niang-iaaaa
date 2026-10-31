@@ -39,7 +39,7 @@ class InstallerPersonalizationTests(unittest.TestCase):
     def test_updates_skip_saved_profile_and_api_key_pages_without_overwriting_data(self):
         source = (ROOT / "NIANG_IA.iss").read_text(encoding="utf-8")
 
-        self.assertIn('#define AppVersion "1.0.20"', source)
+        self.assertIn('#define AppVersion "1.0.21"', source)
         self.assertIn("memory\\long_term.json", source)
         self.assertIn("memory\\installer_profile.json", source)
         self.assertIn("config\\installer_gemini_key.txt", source)
@@ -49,6 +49,21 @@ class InstallerPersonalizationTests(unittest.TestCase):
         self.assertIn("(PageID = ApiKeyPage.ID) and ExistingApiConfig", source)
         self.assertIn("if not ExistingProfile then", source)
         self.assertIn("(not ExistingApiConfig) and (Trim(GeminiKeyEdit.Text) <> '')", source)
+
+    def test_installer_configures_local_screen_vision_before_launch(self):
+        installer = (ROOT / "NIANG_IA.iss").read_text(encoding="utf-8")
+        build = (ROOT / "build_release.py").read_text(encoding="utf-8")
+        setup_script = (ROOT / "install_screen_vision.ps1").read_text(encoding="utf-8")
+
+        run_section = installer.split("[Run]", 1)[1].split("[Code]", 1)[0]
+        self.assertIn(r'\install_screen_vision.ps1', run_section)
+        self.assertLess(run_section.index("install_screen_vision.ps1"), run_section.index("START_NIANG_IA.bat"))
+        self.assertIn("install_screen_vision.ps1", build)
+        self.assertIn("qwen3-vl:2b", setup_script)
+        self.assertIn('[version]"0.12.7"', setup_script)
+        self.assertIn("Get-FileHash", setup_script)
+        self.assertIn("127.0.0.1:11434", setup_script)
+        self.assertIn("MessageBox]::Show", setup_script)
 
     def test_windows_icon_fills_canvas_and_has_transparent_rounded_corners(self):
         with Image.open(ROOT / "assets" / "niang_ia.ico") as source:

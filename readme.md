@@ -74,7 +74,7 @@ external APIs. It is **free to self-host** — you only need a Gemini API key
 - A microphone and speakers
 - Bluetooth adapter (optional — for the Android app)
 - A free [Gemini API key](https://aistudio.google.com/apikey)
-- [Ollama 0.12.7 or newer](https://ollama.com/download) and `qwen3-vl:2b` for local visual screen descriptions (downloaded separately; see below)
+- Internet access and several GB of free disk space for the installer to set up Ollama and the `qwen3-vl:2b` model
 - [Tesseract OCR](https://github.com/UB-Mannheim/tesseract/wiki) for optional screen-text recognition (standard install location or `PATH`)
 
 ---
@@ -109,16 +109,19 @@ against GitHub's release metadata, and asks before launching it. NIANG IA closes
 before installation so the installer can safely replace its files. The check
 only contacts the public GitHub release API and sends no application data.
 
-Use the `READ SCREEN` command or ask NIANG IA to read the current screen. NIANG IA
-uses local Ollama with Qwen3-VL to describe windows, controls, icons, and images;
-the screen image is sent only to `127.0.0.1` and never to Gemini or another remote
-service. Install Ollama 0.12.7 or newer, start it, and download the default model:
+The Windows installer now installs Ollama for the current Windows user when it is
+not already installed, starts its local service, and downloads `qwen3-vl:2b`
+(about 1.9 GB) before launching NIANG IA. This step requires an Internet
+connection and several gigabytes of free disk space. The model weights are
+downloaded during setup rather than embedded in the installer. Existing Ollama
+installations and an already-installed model are reused. If setup cannot finish,
+the installer shows an error and `install_screen_vision.ps1` can be rerun from the
+NIANG IA application folder.
 
-```powershell
-ollama pull qwen3-vl:2b
-```
-
-The model is downloaded separately and is not included in the Windows installer.
+Use the `READ SCREEN` command or ask NIANG IA to describe the current screen.
+NIANG IA uses local Ollama with Qwen3-VL to describe windows, controls, icons, and
+images; the screen image is sent only to `127.0.0.1` and never to Gemini or another
+remote service.
 If you ask NIANG IA only to transcribe visible text, it uses local Tesseract OCR
 instead; the first OCR request in each application session asks for permission
 before sending recognized text (up to 12,000 characters) to Gemini. Neither mode

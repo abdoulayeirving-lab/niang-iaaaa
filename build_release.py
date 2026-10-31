@@ -42,6 +42,7 @@ ROOT_FILES = (
     "requirements.txt",
     "setup.py",
     "START_NIANG_IA.bat",
+    "install_screen_vision.ps1",
     "start_kaizumi.ps1",
     "start_remote.cmd",
     "api_keys.py",
