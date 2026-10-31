@@ -1,5 +1,5 @@
 #define AppName "NIANG IA"
-#define AppVersion "1.0.17"
+#define AppVersion "1.0.18"
 #define SourceDir AddBackslash(SourcePath) + "dist\NIANG_IA_" + AppVersion
 
 [Setup]
@@ -52,6 +52,8 @@ var
   ApiKeyDescription: TNewStaticText;
   ApiKeyLabel: TNewStaticText;
   ApiKeyInfo: TNewStaticText;
+  ExistingProfile: Boolean;
+  ExistingApiConfig: Boolean;
 
 function UnicodeEscape(Code: Integer): string;
 var
@@ -110,6 +112,13 @@ procedure InitializeWizard;
 var
   ContentWidth, ContentLeft: Integer;
 begin
+  ExistingProfile :=
+    FileExists(ExpandConstant('{app}\memory\long_term.json')) or
+    FileExists(ExpandConstant('{app}\memory\installer_profile.json'));
+  ExistingApiConfig :=
+    FileExists(ExpandConstant('{app}\config\installer_gemini_key.txt')) or
+    FileExists(ExpandConstant('{app}\config\api_keys.json'));
+
   PersonalizationPage :=
     CreateCustomPage(wpWelcome, '', '');
 
@@ -197,7 +206,7 @@ begin
   InfoLabel := TNewStaticText.Create(WizardForm);
   InfoLabel.Parent := PersonalizationPage.Surface;
   InfoLabel.Caption :=
-    'Ces deux informations sont facultatives et restent sur cet ordinateur.';
+    'Ces informations sont facultatives. Une mise à jour conserve ton profil existant.';
   InfoLabel.Font.Name := 'Segoe UI';
   InfoLabel.Font.Size := 8;
   InfoLabel.Font.Color := clGray;
@@ -286,6 +295,13 @@ begin
   ApiKeyInfo.Height := ScaleY(36);
 end;
 
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result :=
+    ((PageID = PersonalizationPage.ID) and ExistingProfile) or
+    ((PageID = ApiKeyPage.ID) and ExistingApiConfig);
+end;
+
 procedure OpenGeminiApiKeyPage(Sender: TObject);
 var
   ErrorCode: Integer;
@@ -305,22 +321,25 @@ begin
   if CurStep <> ssPostInstall then
     Exit;
 
-  IdentityFields := '';
-  HasIdentityField := False;
-  AddProfileField(IdentityFields, HasIdentityField, 'name',
-    UserNameEdit.Text);
-  AddProfileField(IdentityFields, HasIdentityField, 'language',
-    LanguageCombo.Text);
+  if not ExistingProfile then
+  begin
+    IdentityFields := '';
+    HasIdentityField := False;
+    AddProfileField(IdentityFields, HasIdentityField, 'name',
+      UserNameEdit.Text);
+    AddProfileField(IdentityFields, HasIdentityField, 'language',
+      LanguageCombo.Text);
 
-  Json := '{' + Chr(13) + Chr(10) + '  "identity": {' + IdentityFields +
-    Chr(13) + Chr(10) + '  }' + Chr(13) + Chr(10) + '}' + Chr(13) + Chr(10);
-  ProfilePath := ExpandConstant('{app}\memory\installer_profile.json');
-  if not ForceDirectories(ExtractFileDir(ProfilePath)) then
-    RaiseException('Impossible de créer le dossier du profil utilisateur.');
-  if not SaveStringToFile(ProfilePath, Json, False) then
-    RaiseException('Impossible d''enregistrer le profil utilisateur sur cet ordinateur.');
+    Json := '{' + Chr(13) + Chr(10) + '  "identity": {' + IdentityFields +
+      Chr(13) + Chr(10) + '  }' + Chr(13) + Chr(10) + '}' + Chr(13) + Chr(10);
+    ProfilePath := ExpandConstant('{app}\memory\installer_profile.json');
+    if not ForceDirectories(ExtractFileDir(ProfilePath)) then
+      RaiseException('Impossible de créer le dossier du profil utilisateur.');
+    if not SaveStringToFile(ProfilePath, Json, False) then
+      RaiseException('Impossible d''enregistrer le profil utilisateur sur cet ordinateur.');
+  end;
 
-  if Trim(GeminiKeyEdit.Text) <> '' then
+  if (not ExistingApiConfig) and (Trim(GeminiKeyEdit.Text) <> '') then
   begin
     KeyPath := ExpandConstant('{app}\config\installer_gemini_key.txt');
     if not ForceDirectories(ExtractFileDir(KeyPath)) then

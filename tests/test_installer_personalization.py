@@ -36,6 +36,20 @@ class InstallerPersonalizationTests(unittest.TestCase):
         self.assertIn("GeminiKeyEdit.PasswordChar := '*'", source)
         self.assertNotIn("Copy(KeyValue, 1, 4)", source)
 
+    def test_updates_skip_saved_profile_and_api_key_pages_without_overwriting_data(self):
+        source = (ROOT / "NIANG_IA.iss").read_text(encoding="utf-8")
+
+        self.assertIn('#define AppVersion "1.0.18"', source)
+        self.assertIn("memory\\long_term.json", source)
+        self.assertIn("memory\\installer_profile.json", source)
+        self.assertIn("config\\installer_gemini_key.txt", source)
+        self.assertIn("config\\api_keys.json", source)
+        self.assertIn("function ShouldSkipPage(PageID: Integer): Boolean;", source)
+        self.assertIn("(PageID = PersonalizationPage.ID) and ExistingProfile", source)
+        self.assertIn("(PageID = ApiKeyPage.ID) and ExistingApiConfig", source)
+        self.assertIn("if not ExistingProfile then", source)
+        self.assertIn("(not ExistingApiConfig) and (Trim(GeminiKeyEdit.Text) <> '')", source)
+
     def test_windows_icon_fills_canvas_and_has_transparent_rounded_corners(self):
         with Image.open(ROOT / "assets" / "niang_ia.ico") as source:
             sizes = source.info["sizes"]

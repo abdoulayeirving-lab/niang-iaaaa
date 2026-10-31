@@ -21,6 +21,8 @@ class VisionContinuityPromptTests(unittest.TestCase):
         self.assertIn("may not access the user's other browser windows or tabs", source)
         self.assertIn("30 ms target interval", source)
         self.assertIn("Screen descriptions and visual search", source)
+        self.assertIn('"screen_process",', source[source.index("for _decl in TOOL_DECLARATIONS:"):])
+        self.assertIn("screen OCR request in a NIANG IA session requires explicit approval", source)
 
     def test_fallback_prompt_preserves_vision_limits_and_context(self):
         source = (ROOT / "main.py").read_text(encoding="utf-8")

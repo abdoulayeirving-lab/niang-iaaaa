@@ -252,6 +252,20 @@ CONFIRM_MESSAGE = (
 _pending_tokens: dict[str, str] = {}
 _token_lock = threading.Lock()
 _TOKEN_TTL_SECONDS = 600
+_screen_ocr_consent_granted = False
+
+
+def reset_screen_ocr_consent() -> None:
+    """Clear the screen-text sharing approval for a new NIANG IA session."""
+    global _screen_ocr_consent_granted
+    with _token_lock:
+        _screen_ocr_consent_granted = False
+
+
+def _grant_screen_ocr_consent() -> None:
+    global _screen_ocr_consent_granted
+    with _token_lock:
+        _screen_ocr_consent_granted = True
 
 
 def _fingerprint(name: str, args: dict | None) -> str:
@@ -326,9 +340,20 @@ def needs_confirmation(name: str, args: dict | None, confirm: bool = False,
     for THIS exact call must be presented too (technical enforcement). This
     stops the model from fabricating a "user said yes" on its own.
     """
+    args = args or {}
     if classify(name, args) != Risk.HIGH:
         return False
+    screen_ocr = (
+        name == "screen_process"
+        and str(args.get("angle", "screen")).lower().strip() == "screen"
+    )
+    if screen_ocr:
+        with _token_lock:
+            if _screen_ocr_consent_granted:
+                return False
     if confirm and redeem_confirmation_token(name, args, confirm_token):
+        if screen_ocr:
+            _grant_screen_ocr_consent()
         return False
     return True
 
@@ -363,8 +388,10 @@ def describe(name: str, args: dict | None) -> str:
         if source != "camera":
             return (
                 "capture the screen locally, extract up to 12,000 characters with "
-                "OCR, and send only that text to Gemini for this request; never "
-                "send the screenshot. The text may contain private information."
+                "OCR, and send only that text to Gemini; never send the screenshot. "
+                "After one explicit approval, this remains allowed for screen OCR "
+                "during the current NIANG IA session. The text may contain private "
+                "information."
             )
         return (
             "capture the webcam only for this explicit request and send that image "

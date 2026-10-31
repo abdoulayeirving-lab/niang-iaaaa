@@ -140,7 +140,8 @@ class RiskClassificationTest(unittest.TestCase):
                     safety.Risk.LOW,
                 )
 
-    def test_screen_ocr_and_camera_require_confirmation(self):
+    def test_screen_ocr_requires_one_confirmation_per_session(self):
+        safety.reset_screen_ocr_consent()
         screen_args = {"angle": "screen", "text": "read the window"}
         self.assertEqual(safety.classify("screen_process", screen_args), safety.Risk.HIGH)
         self.assertTrue(safety.needs_confirmation("screen_process", screen_args))
@@ -148,9 +149,26 @@ class RiskClassificationTest(unittest.TestCase):
         self.assertIn("send only that text to Gemini", screen_description)
         self.assertIn("never send the screenshot", screen_description)
         self.assertIn("private information", screen_description)
+
+        token = safety.issue_confirmation_token("screen_process", screen_args)
+        self.assertFalse(safety.needs_confirmation(
+            "screen_process", screen_args, confirm=True, confirm_token=token
+        ))
+        self.assertFalse(safety.needs_confirmation("screen_process", screen_args))
+        safety.reset_screen_ocr_consent()
+        self.assertTrue(safety.needs_confirmation("screen_process", screen_args))
+
+    def test_screen_ocr_consent_does_not_authorize_camera(self):
+        safety.reset_screen_ocr_consent()
+        screen_args = {"angle": "screen", "text": "read the window"}
+        token = safety.issue_confirmation_token("screen_process", screen_args)
+        self.assertFalse(safety.needs_confirmation(
+            "screen_process", screen_args, confirm=True, confirm_token=token
+        ))
         camera_args = {"angle": "camera", "text": "describe the camera"}
         self.assertTrue(safety.needs_confirmation("screen_process", camera_args))
         self.assertIn("send that image", safety.describe("screen_process", camera_args))
+        safety.reset_screen_ocr_consent()
         self.assertEqual(
             safety.classify("computer_settings", {"action": "type_text", "value": "private text"}),
             safety.Risk.HIGH,

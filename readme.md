@@ -91,6 +91,8 @@ Gemini API key and accepts pasting it during installation. The name and language
 are imported into NIANG IA's memory on first launch; a pasted key is saved
 locally as a separate configuration file. Both pages can be skipped. You can
 also configure a Gemini API key later in `config/api_keys.json`.
+On updates, the installer skips personalization and API-key pages when it finds
+existing profile or key data, and it does not overwrite that saved information.
 After Gemini connects, NIANG IA greets the user aloud using the saved preferred
 name and configured language on each application launch; if no name is saved,
 it greets without guessing one. This greeting is skipped in Text-only mode.
@@ -103,10 +105,11 @@ only contacts the public GitHub release API and sends no application data.
 
 Use the `READ SCREEN` command or ask NIANG IA to read the current screen. NIANG IA
 captures the display temporarily and extracts text locally with Tesseract OCR.
-Before each screen reading, it asks for confirmation because the recognized text
-can contain private information; after approval, only up to 12,000 characters of
-OCR text are sent to Gemini. The screenshot is never uploaded or saved. OCR can
-miss text and cannot interpret icons, images, or other visual-only content.
+The first screen reading in each application session asks for confirmation
+because the recognized text can contain private information; after approval,
+only up to 12,000 characters of OCR text are sent to Gemini for later readings
+in that session. The screenshot is never uploaded or saved. OCR can miss text
+and cannot interpret icons, images, or other visual-only content.
 Tesseract is a separate native dependency and is not included in the Windows
 installer. Install it from the linked project, or run this in PowerShell:
 
