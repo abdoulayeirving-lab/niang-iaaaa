@@ -243,7 +243,62 @@ class ComputerControlTests(unittest.TestCase):
         ):
             elements = computer_control._find_ui_elements()
         self.assertEqual(elements[0]["name"], "Save")
-        self.assertEqual(elements[0]["role"], "Button")
+        self.assertEqual(elements[0]["role"], "Button"        )
+
+    def test_uia_type_targets_a_unique_edit_control_and_verifies_text(self):
+        class FakeControl:
+            window_text_value = "Text Editor"
+            element_info = types.SimpleNamespace(control_type="Edit")
+            value = ""
+
+            def window_text(self):
+                return self.window_text_value
+
+            def set_edit_text(self, text):
+                self.value = text
+
+            def get_value(self):
+                return self.value
+
+        control = FakeControl()
+        window = types.SimpleNamespace(descendants=lambda: [control])
+        desktop = types.SimpleNamespace(window=lambda **_kwargs: window)
+        pywinauto = types.ModuleType("pywinauto")
+        pywinauto.Desktop = lambda **_kwargs: desktop
+        with (
+            patch.object(computer_control.platform, "system", return_value="Windows"),
+            patch.object(computer_control, "_active_window", return_value={"handle": 42}),
+            patch.dict(sys.modules, {"pywinauto": pywinauto}),
+        ):
+            result = computer_control._uia_type("Text Editor", "safe test text")
+
+        self.assertTrue(result["verified"])
+        self.assertEqual(control.value, "safe test text")
+
+    def test_uia_click_invokes_the_unique_accessible_button(self):
+        class FakeControl:
+            element_info = types.SimpleNamespace(control_type="Button")
+
+            def window_text(self):
+                return "Save"
+
+            def click_input(self):
+                self.clicked = True
+
+        control = FakeControl()
+        window = types.SimpleNamespace(descendants=lambda: [control])
+        desktop = types.SimpleNamespace(window=lambda **_kwargs: window)
+        pywinauto = types.ModuleType("pywinauto")
+        pywinauto.Desktop = lambda **_kwargs: desktop
+        with (
+            patch.object(computer_control.platform, "system", return_value="Windows"),
+            patch.object(computer_control, "_active_window", return_value={"handle": 42}),
+            patch.dict(sys.modules, {"pywinauto": pywinauto}),
+        ):
+            result = computer_control._uia_click("Save")
+
+        self.assertTrue(result["dispatched"])
+        self.assertTrue(control.clicked)
 
     def test_missing_user_profile_values_are_not_replaced_with_random_data(self):
         with patch.object(computer_control, "_load_user_profile", return_value={}):

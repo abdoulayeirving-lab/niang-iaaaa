@@ -2,6 +2,7 @@ import asyncio
 import threading
 import concurrent.futures
 import platform
+import re
 import shutil
 import subprocess
 import asyncio
@@ -166,31 +167,98 @@ class _BrowserThread:
         self._active_tabs   = {False: None, True: None}
         self._tab_sequence  = 0
         self._blocked_requests = []
+        self._network_proxy = None
+        self._action_cancel_event = None
+        self._action_timeout = 30
 
     def start(self):
         if self._thread and self._thread.is_alive():
             return
+        self._ready.clear()
         self._thread = threading.Thread(
             target=self._run_loop, daemon=True, name="BrowserThread"
         )
         self._thread.start()
-        self._ready.wait(timeout=15)
+        if not self._ready.wait(timeout=15):
+            raise RuntimeError("BrowserThread initialization timed out.")
 
     def _run_loop(self):
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
-        self._loop.run_until_complete(self._init())
-        self._ready.set()
-        self._loop.run_forever()
+        try:
+            self._loop.run_until_complete(self._init())
+            self._ready.set()
+            self._loop.run_forever()
+        finally:
+            pending = asyncio.all_tasks(self._loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                self._loop.run_until_complete(
+                    asyncio.gather(*pending, return_exceptions=True)
+                )
+            self._loop.close()
 
     async def _init(self):
         self._playwright = await async_playwright().start()
 
-    def run(self, coro, timeout: int = 30):
+    def run(self, coro, timeout: int | None = None):
         if not self._loop:
             raise RuntimeError("BrowserThread not started.")
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return future.result(timeout=timeout)
+        deadline = time.monotonic() + (timeout or self._action_timeout)
+        while True:
+            cancel_event = self._action_cancel_event
+            if cancel_event is not None and cancel_event.is_set():
+                future.cancel()
+                close_future = asyncio.run_coroutine_threadsafe(
+                    self._close_browser(), self._loop
+                )
+                try:
+                    close_future.result(timeout=5)
+                except Exception as exc:
+                    print(f"[Browser] Cleanup after cancellation failed: {exc}")
+                raise concurrent.futures.CancelledError(
+                    "Browser action cancellation requested."
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                future.cancel()
+                close_future = asyncio.run_coroutine_threadsafe(
+                    self._close_browser(), self._loop
+                )
+                try:
+                    close_future.result(timeout=5)
+                except Exception as exc:
+                    print(f"[Browser] Cleanup after timeout failed: {exc}")
+                raise concurrent.futures.TimeoutError(
+                    f"Browser action exceeded {timeout or self._action_timeout}s."
+                )
+            try:
+                return future.result(timeout=min(0.1, remaining))
+            except concurrent.futures.TimeoutError:
+                continue
+
+    async def _shutdown(self):
+        try:
+            await self._close_browser()
+        finally:
+            if self._playwright is not None:
+                await self._playwright.stop()
+                self._playwright = None
+
+    def shutdown(self):
+        if not self._loop or not self._loop.is_running():
+            return
+        future = asyncio.run_coroutine_threadsafe(self._shutdown(), self._loop)
+        try:
+            future.result(timeout=10)
+        finally:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+            if self._thread:
+                self._thread.join(timeout=3)
+            self._loop = None
+            self._thread = None
 
     # ── Tarayıcı başlatma ────────────────────────────────────────────────────
 
@@ -206,6 +274,7 @@ class _BrowserThread:
         launch_kwargs = {"headless": False}
         if self._engine_name == "chromium":
             launch_kwargs["args"] = ["--start-maximized"]
+        launch_kwargs["proxy"] = self._get_network_proxy_settings()
         if self._exe_path:
             launch_kwargs["executable_path"] = self._exe_path
         elif self._channel:
@@ -222,8 +291,18 @@ class _BrowserThread:
             print(f"[Browser] ⚠️ Launch failed ({e}), falling back to built-in Chromium")
             self._browser = await self._playwright.chromium.launch(
                 headless=False,
-                args=["--start-maximized"]
+                args=["--start-maximized"],
+                proxy=self._get_network_proxy_settings(),
             )
+
+    def _get_network_proxy_settings(self) -> dict[str, str]:
+        if self._network_proxy is None:
+            from actions.browser_network_proxy import BrowserNetworkProxy
+            self._network_proxy = BrowserNetworkProxy()
+        return {
+            "server": self._network_proxy.endpoint,
+            "bypass": "<-loopback>",
+        }
 
     async def _get_page(self, incognito: bool = False):
         """
@@ -274,7 +353,11 @@ class _BrowserThread:
 
     async def _guard_request(self, route) -> None:
         try:
-            await asyncio.to_thread(validate_browser_url, route.request.url)
+            await asyncio.to_thread(
+                validate_browser_url,
+                route.request.url,
+                allow_project_preview=True,
+            )
         except BrowserURLPolicyError as exc:
             self._blocked_requests.append((route.request.url, str(exc)))
             await route.abort()
@@ -291,6 +374,7 @@ class _BrowserThread:
             await asyncio.to_thread(
                 validate_browser_url,
                 parsed._replace(scheme=scheme).geturl(),
+                allow_project_preview=True,
             )
         except BrowserURLPolicyError as exc:
             self._blocked_requests.append((url, str(exc)))
@@ -363,6 +447,7 @@ class _BrowserThread:
             launch_kwargs = {
                 "headless": False,
                 "args": ["--incognito", "--start-maximized"],
+                "proxy": self._get_network_proxy_settings(),
             }
             if self._exe_path:
                 launch_kwargs["executable_path"] = self._exe_path
@@ -374,7 +459,8 @@ class _BrowserThread:
             except Exception:
                 incog_browser = await self._playwright.chromium.launch(
                     headless=False,
-                    args=["--incognito", "--start-maximized"]
+                    args=["--incognito", "--start-maximized"],
+                    proxy=self._get_network_proxy_settings(),
                 )
 
             self._incog_browser = incog_browser
@@ -398,7 +484,7 @@ class _BrowserThread:
 
     async def _go_to(self, url: str, incognito: bool = False) -> str:
         try:
-            url = validate_browser_url(url)
+            url = validate_browser_url(url, allow_project_preview=True)
         except BrowserURLPolicyError as exc:
             return f"Blocked navigation: {exc}"
         page = await self._get_page(incognito=incognito)
@@ -945,6 +1031,9 @@ class _BrowserThread:
         self._active_tabs = {False: None, True: None}
         self._incog_page = None
         self._blocked_requests.clear()
+        if self._network_proxy is not None:
+            self._network_proxy.close()
+            self._network_proxy = None
 
         return "Browser closed."
 
@@ -954,23 +1043,65 @@ class _BrowserThread:
 _bt         = _BrowserThread()
 _bt_started = False
 _bt_lock    = threading.Lock()
+_mission_browsers: dict[str, _BrowserThread] = {}
+_mission_browser_keys: dict[str, str] = {}
+_mission_browsers_lock = threading.Lock()
 
 
-def _ensure_started():
+def _ensure_started(mission_id: str | None = None, parameters: dict | None = None):
     global _bt_started
-    with _bt_lock:
-        if not _bt_started:
-            _bt.start()
-            _bt_started = True
+    parameters = parameters or {}
+    if not mission_id:
+        with _bt_lock:
+            if not _bt_started:
+                _bt.start()
+                _bt_started = True
+        return _bt
+
+    persistent_id = str(parameters.get("persistent_session_id", "")).strip()
+    if persistent_id and not re.fullmatch(r"[A-Za-z0-9_-]{1,48}", persistent_id):
+        raise ValueError("Invalid persistent browser session name.")
+    key = f"persistent:{persistent_id}" if persistent_id else f"mission:{mission_id}"
+    with _mission_browsers_lock:
+        browser = _mission_browsers.get(key)
+        if browser is None:
+            browser = _BrowserThread()
+            _mission_browsers[key] = browser
+        _mission_browser_keys[mission_id] = key
+    browser.start()
+    return browser
+
+
+def close_browser_mission(mission_id: str) -> None:
+    with _mission_browsers_lock:
+        key = _mission_browser_keys.pop(mission_id, None)
+        browser = _mission_browsers.get(key) if key else None
+        if key and key.startswith("mission:"):
+            _mission_browsers.pop(key, None)
+    if browser is not None and key and key.startswith("mission:"):
+        browser.shutdown()
+    from actions.playwright_mcp import close_playwright_mcp_mission
+    close_playwright_mcp_mission(mission_id)
+
+
+def shutdown_browser_missions() -> None:
+    with _mission_browsers_lock:
+        browsers = list(_mission_browsers.values())
+        _mission_browsers.clear()
+        _mission_browser_keys.clear()
+    for browser in browsers:
+        browser.shutdown()
 
 
 # ── Public API ───────────────────────────────────────────────────────────────
 
-def browser_control(
+def _browser_control_playwright(
     parameters:     dict,
     response=None,
     player=None,
-    session_memory=None
+    session_memory=None,
+    mission_id: str | None = None,
+    cancel_flag: threading.Event | None = None,
 ) -> str:
     """
     Browser controller — auto-detects and uses system default browser.
@@ -995,7 +1126,13 @@ def browser_control(
         clear_first : bool, clear input before typing (default: True)
         incognito   : bool, open in private/incognito mode (default: False)
     """
-    _ensure_started()
+    _bt = _ensure_started(mission_id, parameters)
+    _bt._action_cancel_event = cancel_flag
+    try:
+        from agent.settings import action_timeout_seconds
+        _bt._action_timeout = action_timeout_seconds()
+    except ImportError:
+        _bt._action_timeout = 30
 
     action   = (parameters or {}).get("action", "").lower().strip()
     incognito = bool(parameters.get("incognito", False))
@@ -1140,3 +1277,66 @@ def browser_control(
         player.write_log(summary[:60])
 
     return result
+
+
+def browser_control(
+    parameters: dict,
+    response=None,
+    player=None,
+    session_memory=None,
+    mission_id: str | None = None,
+    cancel_flag: threading.Event | None = None,
+) -> str:
+    """Prefer Microsoft's MCP browser; retain Python Playwright as an explicit fallback."""
+    parameters = dict(parameters or {})
+    action = str(parameters.get("action", "")).lower().strip()
+    if action == "mcp_status":
+        from actions.playwright_mcp import playwright_mcp_control
+        return playwright_mcp_control(action, parameters)
+
+    if action in {"go_to", "new_tab"} and parameters.get("url"):
+        try:
+            parameters["url"] = validate_browser_url(
+                parameters["url"],
+                allow_project_preview=True,
+            )
+        except BrowserURLPolicyError as exc:
+            return f"Blocked navigation: {exc}"
+
+    from actions.playwright_mcp import (
+        PlaywrightMCPActionUnsupported,
+        PlaywrightMCPError,
+        PlaywrightMCPUnavailable,
+        playwright_mcp_control,
+    )
+    try:
+        from agent.settings import action_timeout_seconds
+        result = playwright_mcp_control(
+            action,
+            parameters,
+            mission_id=mission_id,
+            cancel_event=cancel_flag,
+            timeout_s=action_timeout_seconds(),
+        )
+        if player:
+            player.write_log(f"[Browser MCP] {action}: completed")
+        return result
+    except PlaywrightMCPActionUnsupported as exc:
+        print(f"[Browser MCP] {action} uses the Python Playwright fallback: {exc}")
+        return _browser_control_playwright(
+            parameters, response=response, player=player,
+            session_memory=session_memory,
+            mission_id=mission_id,
+            cancel_flag=cancel_flag,
+        )
+    except PlaywrightMCPUnavailable as exc:
+        print(f"[Browser MCP] unavailable; using Python Playwright fallback: {exc}")
+        fallback = _browser_control_playwright(
+            parameters, response=response, player=player,
+            session_memory=session_memory,
+            mission_id=mission_id,
+            cancel_flag=cancel_flag,
+        )
+        return f"[MCP fallback: {exc}]\n{fallback}"
+    except PlaywrightMCPError as exc:
+        return f"Browser MCP error: {exc}"

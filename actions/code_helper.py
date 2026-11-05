@@ -37,9 +37,8 @@ def _get_api_key() -> str:
 
 
 def _get_gemini(model: str = GEMINI_MODEL):
-    import google.generativeai as genai
-    genai.configure(api_key=_get_api_key())
-    return genai.GenerativeModel(model)
+    from api_keys import GeminiModel
+    return GeminiModel(model)
 
 
 def _clean_code(text: str) -> str:

@@ -55,6 +55,45 @@ class BrowserURLPolicyTests(unittest.TestCase):
         with patch.dict("os.environ", {"NIANG_IA_BROWSER_ALLOWED_LOCAL_HOSTS": "localhost"}):
             self.assertEqual(validate_browser_url("http://localhost:8000"), "http://localhost:8000")
 
+    def test_project_preview_allows_only_a_live_manager_registered_loopback_url(self):
+        with patch(
+            "agent.project_execution.is_authorized_local_preview_url",
+            side_effect=lambda url: url == "http://127.0.0.1:5187/",
+        ):
+            self.assertEqual(
+                validate_browser_url(
+                    "http://127.0.0.1:5187/",
+                    allow_project_preview=True,
+                ),
+                "http://127.0.0.1:5187/",
+            )
+            with self.assertRaises(BrowserURLPolicyError):
+                validate_browser_url(
+                    "http://127.0.0.1:5188/",
+                    allow_project_preview=True,
+                )
+
+    def test_domain_allowlist_and_blocklist_are_applied_to_subdomains(self):
+        environment = {
+            "NIANG_IA_BROWSER_ALLOWED_DOMAINS": "example.com",
+            "NIANG_IA_BROWSER_BLOCKED_DOMAINS": "blocked.example.com",
+        }
+        with patch.dict("os.environ", environment, clear=False):
+            self.assertEqual(
+                validate_browser_url(
+                    "https://docs.example.com",
+                    resolve_host=lambda _: ["93.184.216.34"],
+                ),
+                "https://docs.example.com",
+            )
+            for url in (
+                "https://not-example.com",
+                "https://blocked.example.com",
+                "https://child.blocked.example.com",
+            ):
+                with self.subTest(url=url), self.assertRaises(BrowserURLPolicyError):
+                    validate_browser_url(url, resolve_host=lambda _: ["93.184.216.34"])
+
 
 if __name__ == "__main__":
     unittest.main()

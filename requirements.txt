@@ -1,11 +1,11 @@
 ﻿sounddevice
 google-genai>=2.25.0
-google-generativeai
 pillow
 requests
 beautifulsoup4
 duckduckgo-search
 playwright          
+mcp>=1.13,<2
 pyautogui
 pyperclip
 pygetwindow       

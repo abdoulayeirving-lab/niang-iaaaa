@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from agent.task_queue import Task, TaskQueue, TaskStatus
-from agent.executor import AgentExecutor
+from agent.executor import AgentExecutor, MissionExecutionResult
 
 
 class TaskProgressTest(unittest.TestCase):
@@ -59,10 +59,38 @@ class TaskProgressTest(unittest.TestCase):
             result = AgentExecutor().execute("research", on_progress=events.append)
 
         self.assertEqual(result, "Completed.")
+        self.assertEqual(result.status, "partial")
         self.assertEqual(events[0]["phase"], "planned")
         self.assertEqual(events[1]["current_step"], "1: Find the answer")
-        self.assertEqual(events[-1]["phase"], "completed")
+        self.assertEqual(events[-1]["phase"], "partial")
         self.assertEqual(events[-1]["completed_steps"], 1)
+
+    def test_unverified_mission_is_not_recorded_as_completed(self):
+        class FakeExecutor:
+            def execute(self, **_kwargs):
+                return MissionExecutionResult(
+                    "Actions returned; final outcome unverified.",
+                    status="partial",
+                )
+
+        queue = TaskQueue()
+        queue._get_executor = lambda: FakeExecutor()
+        task = Task(
+            priority=2,
+            created_at=1.0,
+            task_id="partial1",
+            goal="inspect a result",
+            status=TaskStatus.RUNNING,
+        )
+        queue._tasks[task.task_id] = task
+        queue._active_count = 1
+
+        queue._run_task(task)
+
+        self.assertEqual(task.status, TaskStatus.PARTIAL)
+        self.assertEqual(task.outcome, "partial")
+        self.assertFalse(task.verified)
+        self.assertIn("unverified", task.result)
 
 
 if __name__ == "__main__":

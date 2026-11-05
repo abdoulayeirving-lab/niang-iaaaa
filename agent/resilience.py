@@ -43,6 +43,9 @@ class ToolResult:
     retries: int = 0
     error_kind: str = ""
     silent: bool = False
+    status: str = "returned"
+    verified: bool = False
+    tool_name: str = ""
 
 
 async def run_sync_tool(
@@ -70,11 +73,16 @@ async def run_sync_tool(
             value = await asyncio.wait_for(
                 loop.run_in_executor(None, fn), timeout=timeout
             )
+            result_ok = bool(getattr(value, "ok", True))
             return ToolResult(
-                ok=True,
+                ok=result_ok,
                 content=str(value or "Done."),
                 duration_s=round(time.monotonic() - start, 2),
                 retries=used,
+                error_kind=str(getattr(value, "error_kind", "")),
+                status=str(getattr(value, "status", "returned")),
+                verified=bool(getattr(value, "verified", False)),
+                tool_name=str(getattr(value, "tool_name", name)),
             )
         except asyncio.TimeoutError:
             return ToolResult(

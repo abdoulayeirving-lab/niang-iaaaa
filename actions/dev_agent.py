@@ -26,9 +26,8 @@ def _get_api_key() -> str:
 
 
 def _get_model(model_name: str):
-    import google.generativeai as genai
-    genai.configure(api_key=_get_api_key())
-    return genai.GenerativeModel(model_name)
+    from api_keys import GeminiModel
+    return GeminiModel(model_name)
 
 
 def _safe_project_path(project_dir: Path, rel_path: str) -> Path | None:

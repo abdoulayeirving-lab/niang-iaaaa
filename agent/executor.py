@@ -1,19 +1,58 @@
 ﻿import json
+import queue
 import re
 import sys
 import threading
 import subprocess
 import tempfile
 import os
+import time
 from pathlib import Path
 from typing import Callable
 
 from agent.planner       import create_plan, replan
 from agent.error_handler import analyze_error, generate_fix, ErrorDecision
+from agent.tool_registry import ToolExecutionContext, ToolRegistry
 
 
 class UnknownToolError(RuntimeError):
     """The planner named a tool the executor doesn't implement â€” not retryable."""
+
+
+class MissionCancelled(RuntimeError):
+    """The mission was cancelled before another tool action could be dispatched."""
+
+
+class ToolTimeoutError(TimeoutError):
+    """A tool call timed out; its result may remain unknown."""
+
+
+class ToolExecutionBusyError(RuntimeError):
+    """A previous synchronous tool call is still running."""
+
+
+class MissionDeadlineExceeded(RuntimeError):
+    """The mission deadline passed before an action was dispatched."""
+
+
+class MissionExecutionResult(str):
+    """String-compatible mission outcome with explicit verification metadata."""
+
+    def __new__(cls, content: str, *, status: str, verified: bool = False):
+        instance = super().__new__(cls, content)
+        instance.status = status
+        instance.verified = verified
+        return instance
+
+
+_TOOL_EXECUTION_LOCK = threading.Lock()
+_TOOL_EXECUTION_IDLE = threading.Event()
+_TOOL_EXECUTION_IDLE.set()
+
+
+def wait_for_tool_idle(timeout: float | None = None) -> bool:
+    """Wait until a synchronous action worker has actually returned."""
+    return _TOOL_EXECUTION_IDLE.wait(timeout)
 
 
 def get_base_dir() -> Path:
@@ -26,12 +65,8 @@ BASE_DIR        = get_base_dir()
 API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 
 
-def _get_api_key() -> str:
-    from api_keys import next_key
-    return next_key()
-
 def _run_generated_code(description: str, speak: Callable | None = None) -> str:
-    import google.generativeai as genai
+    from api_keys import GeminiModel
 
     if speak:
         speak("Writing custom code for this task, sir.")
@@ -50,8 +85,7 @@ def _run_generated_code(description: str, speak: Callable | None = None) -> str:
         except Exception:
             pass
 
-    genai.configure(api_key=_get_api_key())
-    model = genai.GenerativeModel(
+    model = GeminiModel(
         model_name="gemini-2.5-flash",
         system_instruction=(
             "You are an expert Python developer. "
@@ -132,9 +166,8 @@ def _inject_context(params: dict, tool: str, step_results: dict, goal: str = "")
 
     return params
 def _detect_language(text: str) -> str:
-    import google.generativeai as genai
-    genai.configure(api_key=_get_api_key())
-    model = genai.GenerativeModel("gemini-3.5-flash-lite")
+    from api_keys import GeminiModel
+    model = GeminiModel("gemini-3.5-flash-lite")
     try:
         response = model.generate_content(
             f"What language is this text written in? "
@@ -150,9 +183,8 @@ def _translate_to_goal_language(content: str, goal: str) -> str:
     if not goal:
         return content
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=_get_api_key())
-        model = genai.GenerativeModel("gemini-2.5-flash")
+        from api_keys import GeminiModel
+        model = GeminiModel("gemini-2.5-flash")
 
         target_lang = _detect_language(goal)
         print(f"[Executor] ðŸŒ Translating to: {target_lang}")
@@ -175,20 +207,71 @@ def _translate_to_goal_language(content: str, goal: str) -> str:
         print(f"[Executor] âš ï¸ Translation failed: {e}")
         return content
 
-def _call_tool(tool: str, parameters: dict, speak: Callable | None) -> str:
-    # Safety gate: the background agent runs without interactive confirmation,
-    # so HIGH-risk tools are refused here. (Main-session tools that need
-    # confirmation go through main.py's confirmation gate instead.)
+def _call_tool(
+    tool: str,
+    parameters: dict,
+    speak: Callable | None,
+    approval_callback: Callable[[str, dict, str], bool] | None = None,
+    cancel_flag: threading.Event | None = None,
+    mission_id: str | None = None,
+    tool_registry: ToolRegistry | None = None,
+) -> str:
+    if cancel_flag and cancel_flag.is_set():
+        raise MissionCancelled("Task cancelled before the action started.")
     try:
-        from safety import needs_confirmation
+        from safety import (
+            describe,
+            issue_confirmation_token,
+            needs_confirmation,
+        )
         if needs_confirmation(tool, parameters, confirm=False):
-            return (f"Blocked for safety: {tool} requires your explicit "
-                    f"confirmation, which can't be given in background mode, sir.")
+            if approval_callback is None:
+                return (
+                    f"Blocked for safety: {tool} requires explicit confirmation; "
+                    "no action was taken."
+                )
+            description = describe(tool, parameters)
+            if not approval_callback(tool, dict(parameters), description):
+                return f"Blocked for safety: approval was denied for {tool}; no action was taken."
+            if cancel_flag and cancel_flag.is_set():
+                raise MissionCancelled("Task cancelled while awaiting approval.")
+            token = issue_confirmation_token(tool, parameters)
+            if needs_confirmation(
+                tool,
+                parameters,
+                confirm=True,
+                confirm_token=token,
+            ):
+                return (
+                    f"Blocked for safety: confirmation could not be verified for {tool}; "
+                    "no action was taken."
+                )
+    except MissionCancelled:
+        raise
     except Exception:
         return (
             f"Blocked for safety: could not verify permissions for {tool}. "
             "The action was not executed."
         )
+
+    if cancel_flag and cancel_flag.is_set():
+        raise MissionCancelled("Task cancelled before the action started.")
+
+    if tool_registry is not None:
+        definition = tool_registry.get(tool)
+        if definition is None or not definition.agent_enabled:
+            raise UnknownToolError(f"Unknown or unavailable mission tool '{tool}'.")
+        result = tool_registry.invoke(
+            tool,
+            parameters,
+            ToolExecutionContext(
+                mission_id=mission_id,
+                cancel_flag=cancel_flag,
+                speak=speak,
+                agent_mode=True,
+            ),
+        )
+        return result
 
     if tool == "open_app":
         from actions.open_app import open_app
@@ -202,7 +285,12 @@ def _call_tool(tool: str, parameters: dict, speak: Callable | None) -> str:
         return game_updater(parameters=parameters, player=None, speak=speak) or "Done."
     elif tool == "browser_control":
         from actions.browser_control import browser_control
-        return browser_control(parameters=parameters, player=None) or "Done."
+        return browser_control(
+            parameters=parameters,
+            player=None,
+            mission_id=mission_id,
+            cancel_flag=cancel_flag,
+        ) or "Done."
 
     elif tool == "workspace_list_files":
         from agent.workspace_tools import list_files
@@ -273,6 +361,20 @@ def _call_tool(tool: str, parameters: dict, speak: Callable | None) -> str:
     elif tool == "computer_control":
         from actions.computer_control import computer_control
         return computer_control(parameters=parameters, player=None) or "Done."
+
+    elif tool == "windows_diagnostics":
+        from actions.windows_diagnostics import windows_diagnostics
+        return windows_diagnostics(
+            parameters=parameters,
+            cancel_flag=cancel_flag,
+        )
+
+    elif tool == "windows_repair":
+        from actions.windows_repair import windows_repair
+        return windows_repair(
+            parameters=parameters,
+            cancel_flag=cancel_flag,
+        )
 
     elif tool == "system_status":
         from actions.system_status import system_status
@@ -426,31 +528,117 @@ def _call_tool(tool: str, parameters: dict, speak: Callable | None) -> str:
         raise UnknownToolError(f"Unknown tool '{tool}'.")
 
 
-TOOL_TIMEOUT_S = 180  # hard cap per tool call; a hung tool must not starve the queue
-
-
 def _call_tool_with_timeout(tool: str, parameters: dict, speak: Callable | None,
-                            cancel_flag: threading.Event | None = None) -> str:
-    """Run _call_tool with a hard timeout so a hung tool can't block the queue."""
-    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+                            cancel_flag: threading.Event | None = None,
+                            approval_callback: Callable[[str, dict, str], bool] | None = None,
+                            mission_id: str | None = None,
+                            timeout_s: float | None = None,
+                            tool_registry: ToolRegistry | None = None) -> str:
+    """Run one tool without blocking the queue past timeout or cancellation."""
+    from agent.settings import action_timeout_seconds
 
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        fut = pool.submit(_call_tool, tool, parameters, speak)
+    configured_timeout = action_timeout_seconds()
+    if tool in {"windows_diagnostics", "windows_repair"}:
+        from agent.settings import windows_action_timeout_seconds
+        configured_timeout = windows_action_timeout_seconds()
+    if cancel_flag and cancel_flag.is_set():
+        raise MissionCancelled("Task cancelled before the action started.")
+    if timeout_s is not None and timeout_s <= 0:
+        raise MissionDeadlineExceeded(
+            "The mission deadline expired before this action started; no action was dispatched."
+        )
+    if not _TOOL_EXECUTION_LOCK.acquire(blocking=False):
+        raise ToolExecutionBusyError(
+            "A previous tool action is still running; no new action was dispatched."
+        )
+    _TOOL_EXECUTION_IDLE.clear()
+
+    outcome: queue.Queue = queue.Queue(maxsize=1)
+    abandon = threading.Event()
+    action_cancel = threading.Event()
+
+    def run_tool() -> None:
         try:
-            return fut.result(timeout=TOOL_TIMEOUT_S)
-        except FutureTimeout:
-            fut.cancel()
-            raise TimeoutError(
-                f"Tool '{tool}' timed out after {TOOL_TIMEOUT_S}s; its result is unknown."
+            if abandon.is_set() or (cancel_flag and cancel_flag.is_set()):
+                raise MissionCancelled("Task cancelled before the action started.")
+            result = _call_tool(
+                tool,
+                parameters,
+                speak,
+                approval_callback,
+                action_cancel,
+                mission_id,
+                tool_registry,
             )
-        except Exception as e:
-            raise
+            completed = (True, result)
+        except Exception as exc:
+            completed = (False, exc)
+        finally:
+            _TOOL_EXECUTION_LOCK.release()
+            _TOOL_EXECUTION_IDLE.set()
+        outcome.put(completed)
+
+    worker = threading.Thread(
+        target=run_tool,
+        daemon=True,
+        name="AgentToolAction",
+    )
+    try:
+        worker.start()
+    except Exception:
+        _TOOL_EXECUTION_LOCK.release()
+        _TOOL_EXECUTION_IDLE.set()
+        raise
+
+    timeout_s = min(
+        configured_timeout,
+        timeout_s if timeout_s is not None else configured_timeout,
+    )
+    deadline = time.monotonic() + timeout_s
+    while True:
+        if cancel_flag and cancel_flag.is_set():
+            abandon.set()
+            action_cancel.set()
+            if tool == "browser_control" and mission_id:
+                try:
+                    from actions.playwright_mcp import cancel_playwright_mcp_action
+                    cancel_playwright_mcp_action(mission_id)
+                except Exception as exc:
+                    print(f"[Executor] Browser cancellation request failed: {exc}")
+            raise MissionCancelled(
+                "Stop requested. The current action may still be running; "
+                "no further action will be dispatched."
+            )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            abandon.set()
+            action_cancel.set()
+            if tool == "browser_control" and mission_id:
+                try:
+                    from actions.playwright_mcp import cancel_playwright_mcp_action
+                    cancel_playwright_mcp_action(mission_id)
+                except Exception as exc:
+                    print(f"[Executor] Browser timeout cancellation failed: {exc}")
+            raise ToolTimeoutError(
+                f"Tool '{tool}' exceeded its {timeout_s}s timeout. Its result is unknown; "
+                "no further action will be dispatched."
+            )
+        try:
+            succeeded, result = outcome.get(timeout=min(0.1, remaining))
+        except queue.Empty:
+            continue
+        if succeeded:
+            return result
+        raise result
 
 
 def _is_browser_failure(result: str) -> bool:
     lowered = result.strip().lower()
+    if re.search(r"\bhttp status:\s*[45]\d\d\b", lowered):
+        return True
     return lowered.startswith((
         "blocked navigation:", "navigation blocked:", "navigation error:",
+        "browser mcp error:", "playwright mcp action", "navigation error:",
         "browser error:", "browser action timed out.", "timeout loading:",
         "click error:", "type error:", "form submission failed:", "could not ",
         "unknown action:", "youtube search failed", "youtube is open, but",
@@ -460,9 +648,46 @@ def _is_browser_failure(result: str) -> bool:
     ))
 
 
+def _is_computer_failure(result: str) -> bool:
+    try:
+        outcome = json.loads(result)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(outcome, dict)
+        and (outcome.get("executed") is False or bool(outcome.get("error")))
+    )
+
+
+def _is_process_tool_failure(tool: str, parameters: dict, result: str) -> bool:
+    if tool not in {"terminal_control", "project_execution"}:
+        return False
+    try:
+        details = json.loads(result)
+    except (TypeError, json.JSONDecodeError):
+        return True
+    if not isinstance(details, dict):
+        return True
+    action = str(parameters.get("action", "")).casefold()
+    if tool == "terminal_control":
+        if action == "run":
+            return details.get("status") != "completed" or details.get("exit_code") != 0
+        if action == "start":
+            return details.get("status") != "started"
+        if action == "stop":
+            return details.get("state") != "stopped"
+        return False
+    if action == "start":
+        return details.get("verified") is not True
+    if action == "stop":
+        return details.get("state") != "stopped"
+    return False
+
+
 class AgentExecutor:
 
     MAX_REPLAN_ATTEMPTS = 2
+    MAX_ACTIONS_PER_MISSION = 20
 
     @staticmethod
     def _report_progress(callback, phase, current_step, completed, total):
@@ -484,21 +709,85 @@ class AgentExecutor:
         speak:       Callable | None        = None,
         cancel_flag: threading.Event | None = None,
         on_progress: Callable[[dict], None] | None = None,
-    ) -> str:
-        print(f"\n[Executor] ðŸŽ¯ Goal: {goal}")
+        on_action: Callable[[dict], None] | None = None,
+        approval_callback: Callable[[str, dict, str], bool] | None = None,
+        mission_id: str | None = None,
+        resume_context: str = "",
+        tool_registry: ToolRegistry | None = None,
+    ) -> MissionExecutionResult:
+        from agent.settings import (
+            max_actions_per_mission,
+            max_attempts_per_step,
+            max_replans_per_mission,
+            mission_timeout_seconds,
+            sensitive_mission_policy,
+        )
+        from agent.secrets import detect_sensitive_data
+
+        print("\n[Executor] Starting autonomous mission.")
 
         replan_attempts = 0
         completed_steps = []
         step_results    = {} 
-        plan            = create_plan(goal)
+        last_action_result = None
+        action_count = 0
+        mission_deadline = time.monotonic() + mission_timeout_seconds()
+        detected_secrets = detect_sensitive_data(goal)
+        if detected_secrets:
+            if sensitive_mission_policy() == "block":
+                self._report_progress(
+                    on_progress, "blocked_sensitive_input", "", 0, 0,
+                )
+                return MissionExecutionResult(
+                    "Mission blocked before Gemini transmission because the request "
+                    "appears to contain sensitive data. Remove it or set the policy "
+                    "to 'confirm' to require explicit approval.",
+                    status="blocked",
+                )
+            if not approval_callback or not approval_callback(
+                "gemini_transmission",
+                {"detected_categories": list(detected_secrets)},
+                "The mission may contain sensitive information. Approve sending the "
+                "mission text to Gemini? Detected values are not shown in this prompt.",
+            ):
+                return MissionExecutionResult(
+                    "Mission blocked; sensitive mission text was not sent to Gemini.",
+                    status="blocked",
+                )
+            if cancel_flag and cancel_flag.is_set():
+                raise MissionCancelled("Mission cancelled before Gemini transmission.")
+        if cancel_flag and cancel_flag.is_set():
+            raise MissionCancelled("Mission cancelled before Gemini planning.")
+        remaining_s = mission_deadline - time.monotonic()
+        if remaining_s <= 0:
+            raise MissionDeadlineExceeded(
+                "Mission duration limit expired before Gemini planning; no action was dispatched."
+            )
+        plan = create_plan(
+            goal,
+            context=resume_context,
+            timeout_s=min(1800, max(1, int(remaining_s))),
+            registry=tool_registry,
+        )
+        if cancel_flag and cancel_flag.is_set():
+            raise MissionCancelled("Mission cancelled during Gemini planning.")
 
         while True:
             steps = plan.get("steps", [])
+            if time.monotonic() >= mission_deadline:
+                self._report_progress(
+                    on_progress, "duration_limit", "", len(completed_steps),
+                    len(completed_steps) + len(steps),
+                )
+                return MissionExecutionResult(
+                    "Mission stopped at its configured duration limit.",
+                    status="partial",
+                )
 
             if not steps:
                 msg = "I couldn't create a valid plan for this task, sir."
                 if speak: speak(msg)
-                return msg
+                return MissionExecutionResult(msg, status="failed")
             self._report_progress(
                 on_progress, "planned", "", len(completed_steps),
                 len(completed_steps) + len(steps),
@@ -511,7 +800,7 @@ class AgentExecutor:
             for step in steps:
                 if cancel_flag and cancel_flag.is_set():
                     if speak: speak("Task cancelled, sir.")
-                    return "Task cancelled."
+                    return MissionExecutionResult("Task cancelled.", status="cancelled")
 
                 step_num = step.get("step", "?")
                 tool     = step.get("tool", "generated_code")
@@ -520,7 +809,7 @@ class AgentExecutor:
 
                 params = _inject_context(params, tool, step_results, goal=goal)
 
-                print(f"\n[Executor] â–¶ï¸ Step {step_num}: [{tool}] {desc}")
+                print(f"\n[Executor] Step {step_num}: [{tool}]")
                 self._report_progress(
                     on_progress, "running", f"{step_num}: {desc}",
                     len(completed_steps), len(completed_steps) + len(steps),
@@ -529,28 +818,119 @@ class AgentExecutor:
                 attempt = 1
                 step_ok = False
 
-                while attempt <= 3:
+                while attempt <= max_attempts_per_step():
                     if cancel_flag and cancel_flag.is_set():
                         break
+                    if time.monotonic() >= mission_deadline:
+                        self._report_progress(
+                            on_progress, "duration_limit", f"{step_num}: {desc}",
+                            len(completed_steps), len(completed_steps) + len(steps),
+                        )
+                        return MissionExecutionResult(
+                            "Mission stopped at its configured duration limit.",
+                            status="partial",
+                        )
                     try:
-                        result = _call_tool_with_timeout(tool, params, speak, cancel_flag)
+                        action_limit = max_actions_per_mission()
+                        if action_count >= action_limit:
+                            msg = (
+                                "Task stopped because it reached the "
+                                f"{action_limit}-action mission limit."
+                            )
+                            self._report_progress(
+                                on_progress, "action_limit", f"{step_num}: {desc}",
+                                len(completed_steps), len(completed_steps) + len(steps),
+                            )
+                            return MissionExecutionResult(msg, status="partial")
+                        action_count += 1
+                        result = _call_tool_with_timeout(
+                            tool,
+                            params,
+                            speak,
+                            cancel_flag,
+                            approval_callback,
+                            mission_id,
+                            mission_deadline - time.monotonic(),
+                            tool_registry,
+                        )
+                        if getattr(result, "ok", True) is False:
+                            self._report_action(
+                                on_action,
+                                action_count,
+                                tool,
+                                desc,
+                                params,
+                                result,
+                                "unknown",
+                            )
+                            raise ToolTimeoutError(str(result))
                         if result.strip().lower().startswith("blocked for safety:"):
-                            return f"Task stopped; no action was taken. {result}"
+                            self._report_action(
+                                on_action, action_count, tool, desc, params, result, "blocked"
+                            )
+                            return MissionExecutionResult(
+                                f"Task stopped; no action was taken. {result}",
+                                status="blocked",
+                            )
                         if tool == "browser_control" and _is_browser_failure(result):
+                            if "timed out" in result.casefold() or "timeout" in result.casefold():
+                                raise ToolTimeoutError(
+                                    "Browser action timed out; its result is unknown."
+                                )
                             raise RuntimeError(result)
                         if tool == "workspace_run_check" and " failed with exit code " in result:
                             raise RuntimeError(result)
+                        if tool == "computer_control" and _is_computer_failure(result):
+                            raise RuntimeError(result)
+                        if _is_process_tool_failure(tool, params, result):
+                            raise RuntimeError(
+                                f"The {tool} action did not complete successfully; "
+                                "inspect its structured result before retrying."
+                            )
+                        self._report_action(
+                            on_action, action_count, tool, desc, params, result, "completed"
+                        )
                         step_results[step_num] = result 
+                        last_action_result = result
                         completed_steps.append(step)
                         self._report_progress(
                             on_progress, "running", f"{step_num}: {desc}",
                             len(completed_steps), len(completed_steps) + len(steps),
                         )
-                        print(f"[Executor] âœ… Step {step_num} done: {str(result)[:100]}")
+                        print(f"[Executor] Step {step_num} completed.")
                         step_ok = True
                         break
 
+                    except MissionCancelled as e:
+                        self._report_action(
+                            on_action, action_count, tool, desc, params, str(e), "unknown"
+                        )
+                        self._report_progress(
+                            on_progress, "stop_requested", f"{step_num}: {desc}",
+                            len(completed_steps), len(completed_steps) + len(steps),
+                        )
+                        return MissionExecutionResult(str(e), status="cancelled")
+
+                    except (
+                        ToolTimeoutError,
+                        ToolExecutionBusyError,
+                        MissionDeadlineExceeded,
+                    ) as e:
+                        self._report_action(
+                            on_action, action_count, tool, desc, params, str(e), "unknown"
+                        )
+                        self._report_progress(
+                            on_progress, "stopped", f"{step_num}: {desc}",
+                            len(completed_steps), len(completed_steps) + len(steps),
+                        )
+                        if isinstance(e, (ToolTimeoutError, MissionDeadlineExceeded)):
+                            raise
+                        return str(e)
+
                     except UnknownToolError as e:
+                        self._report_action(
+                            on_action, action_count, tool, desc, params, str(e), "failed"
+                        )
                         msg = f"Task stopped because the planned tool is unavailable: {e}"
                         if speak:
                             speak(msg)
@@ -558,11 +938,17 @@ class AgentExecutor:
                             on_progress, "failed", f"{step_num}: {desc}",
                             len(completed_steps), len(completed_steps) + len(steps),
                         )
-                        return msg
+                        return MissionExecutionResult(msg, status="failed")
 
                     except Exception as e:
                         error_msg = str(e)
-                        print(f"[Executor] âŒ Step {step_num} attempt {attempt} failed: {error_msg}")
+                        self._report_action(
+                            on_action, action_count, tool, desc, params, error_msg, "failed"
+                        )
+                        print(
+                            f"[Executor] Step {step_num} attempt {attempt} failed; "
+                            "evaluating recovery."
+                        )
 
                         recovery = analyze_error(step, error_msg, attempt=attempt)
                         decision = recovery["decision"]
@@ -573,7 +959,10 @@ class AgentExecutor:
 
                         if decision == ErrorDecision.RETRY:
                             attempt += 1
-                            import time; time.sleep(2)
+                            if cancel_flag:
+                                cancel_flag.wait(2)
+                            else:
+                                time.sleep(2)
                             continue
 
                         elif decision == ErrorDecision.SKIP:
@@ -589,21 +978,56 @@ class AgentExecutor:
                         elif decision == ErrorDecision.ABORT:
                             msg = f"Task aborted, sir. {recovery.get('reason', '')}"
                             if speak: speak(msg)
-                            return msg
+                            return MissionExecutionResult(msg, status="failed")
 
                         else: 
                             fix_suggestion = recovery.get("fix_suggestion", "")
                             if fix_suggestion and tool != "generated_code":
                                 try:
+                                    action_limit = max_actions_per_mission()
+                                    if action_count >= action_limit:
+                                        return (
+                                            "Task stopped because it reached the "
+                                            f"{action_limit}-action mission limit."
+                                        )
                                     fixed_step = generate_fix(step, error_msg, fix_suggestion)
                                     if speak: speak("Trying an alternative approach, sir.")
+                                    action_count += 1
                                     res = _call_tool_with_timeout(
                                         fixed_step["tool"],
                                         fixed_step["parameters"],
                                         speak,
                                         cancel_flag,
+                                        approval_callback,
+                                        mission_id,
+                                        mission_deadline - time.monotonic(),
+                                        tool_registry,
+                                    )
+                                    if res.strip().lower().startswith("blocked for safety:"):
+                                        self._report_action(
+                                            on_action,
+                                            action_count,
+                                            fixed_step["tool"],
+                                            fixed_step.get("description", desc),
+                                            fixed_step["parameters"],
+                                            res,
+                                            "blocked",
+                                        )
+                                        return MissionExecutionResult(
+                                            f"Task stopped; no action was taken. {res}",
+                                            status="blocked",
+                                        )
+                                    self._report_action(
+                                        on_action,
+                                        action_count,
+                                        fixed_step["tool"],
+                                        fixed_step.get("description", desc),
+                                        fixed_step["parameters"],
+                                        res,
+                                        "completed",
                                     )
                                     step_results[step_num] = res
+                                    last_action_result = res
                                     completed_steps.append(step)
                                     self._report_progress(
                                         on_progress, "running", f"{step_num}: {desc}",
@@ -612,7 +1036,7 @@ class AgentExecutor:
                                     step_ok = True
                                     break
                                 except Exception as fix_err:
-                                    print(f"[Executor] âš ï¸ Fix failed: {fix_err}")
+                                    print("[Executor] Recovery action failed; details omitted.")
 
                             failed_step  = step
                             failed_error = error_msg
@@ -628,40 +1052,145 @@ class AgentExecutor:
                     break
 
             if success:
-                result = self._summarize(goal, completed_steps, speak)
+                if cancel_flag and cancel_flag.is_set():
+                    raise MissionCancelled("Mission cancelled before final reporting.")
+                remaining_s = mission_deadline - time.monotonic()
+                if remaining_s <= 0:
+                    return MissionExecutionResult(
+                        "Actions were executed, but reporting exceeded the mission time limit.",
+                        status="partial",
+                    )
+                verified = bool(getattr(last_action_result, "verified", False))
+                result = self._summarize(
+                    goal,
+                    completed_steps,
+                    speak,
+                    timeout_s=min(1800, max(1, int(remaining_s))),
+                    verified=verified,
+                )
                 self._report_progress(
-                    on_progress, "completed", "", len(completed_steps),
+                    on_progress, "completed" if verified else "partial", "", len(completed_steps),
                     len(completed_steps),
                 )
-                return result
+                return MissionExecutionResult(
+                    result,
+                    status="completed" if verified else "partial",
+                    verified=verified,
+                )
 
-            if replan_attempts >= self.MAX_REPLAN_ATTEMPTS:
+            if time.monotonic() >= mission_deadline:
+                return MissionExecutionResult(
+                    "Mission stopped at its configured duration limit.",
+                    status="partial",
+                )
+            if replan_attempts >= max_replans_per_mission():
                 msg = f"Task failed after {replan_attempts} replan attempts, sir."
                 if speak: speak(msg)
-                return msg
+                return MissionExecutionResult(msg, status="failed")
 
             if speak: speak("Adjusting my approach, sir.")
 
             replan_attempts += 1
-            plan = replan(goal, completed_steps, failed_step, failed_error)
+            if cancel_flag and cancel_flag.is_set():
+                raise MissionCancelled("Mission cancelled before replanning.")
+            remaining_s = mission_deadline - time.monotonic()
+            plan = replan(
+                goal,
+                completed_steps,
+                failed_step,
+                failed_error,
+                context=resume_context,
+                timeout_s=min(1800, max(1, int(remaining_s))),
+                registry=tool_registry,
+            )
 
-    def _summarize(self, goal: str, completed_steps: list, speak: Callable | None) -> str:
-        fallback = f"All done, sir. Completed {len(completed_steps)} steps for: {goal[:60]}."
+    @staticmethod
+    def _report_action(callback, number, tool, description, parameters, result, status):
         try:
-            import google.generativeai as genai
-            genai.configure(api_key=_get_api_key())
-            model     = genai.GenerativeModel(model_name="gemini-3.5-flash-lite")
+            from logger import log
+            log(
+                f"AGENT_ACTION number={number} tool={tool} status={status}",
+                level="INFO",
+            )
+        except Exception as exc:
+            print(f"[Executor] Could not write action audit log: {exc}")
+        if callback is None:
+            return
+        try:
+            from safety import sanitize
+            safe_parameters = sanitize(tool, parameters)
+        except Exception as exc:
+            print(f"[Executor] Could not sanitize action history: {exc}")
+            safe_parameters = {"redacted": True}
+        safe_result = str(result)[:800]
+        safe_description = str(description)[:200]
+        try:
+            from agent.secrets import detect_sensitive_data
+            from logger import is_private_tool_data
+            if is_private_tool_data(tool):
+                safe_result = "[private result omitted]"
+            elif detect_sensitive_data(safe_result):
+                safe_result = "[result omitted because it may contain sensitive data]"
+            if detect_sensitive_data(safe_description):
+                safe_description = "[sensitive action description omitted]"
+        except Exception as exc:
+            print(f"[Executor] Could not classify action data for history: {exc}")
+            safe_result = "[result omitted]"
+            safe_description = "[action description omitted]"
+        safe_result = re.sub(
+            r"(?i)\b(password|passcode|secret|api[_ -]?key|access[_ -]?token|"
+            r"cookie|authorization)\b([\"']?\s*[:=]\s*[\"']?)[^\r\n,}\"']+",
+            r"\1\2[REDACTED]",
+            safe_result,
+        )
+        try:
+            callback({
+                "number": number,
+                "tool": tool,
+                "description": safe_description,
+                "parameters": safe_parameters,
+                "result": safe_result,
+                "status": status,
+            })
+        except Exception as exc:
+            print(f"[Executor] Action-history callback failed: {exc}")
+
+    def _summarize(
+        self,
+        goal: str,
+        completed_steps: list,
+        speak: Callable | None,
+        timeout_s: int | None = None,
+        verified: bool = False,
+    ) -> str:
+        verification_note = (
+            "The final tool returned explicit verification evidence."
+            if verified else
+            "The final outcome was not independently verified."
+        )
+        fallback = (
+            f"Executed {len(completed_steps)} planned step(s) for: {goal[:60]}. "
+            f"{verification_note}"
+        )
+        try:
+            from api_keys import GeminiModel
+            model     = GeminiModel(
+                model_name="gemini-3.5-flash-lite",
+                timeout_s=timeout_s,
+            )
             steps_str = "\n".join(f"- {s.get('description', '')}" for s in completed_steps)
             prompt    = (
                 f'User goal: "{goal}"\n'
                 f"Completed steps:\n{steps_str}\n\n"
-                "Write a single natural sentence summarizing what was accomplished. "
-                "Address the user as 'sir'. Be direct and positive."
+                "Write a single natural sentence summarizing only the actions listed. "
+                "Do not infer success beyond the listed steps. "
+                f"{verification_note} Address the user as 'sir'."
             )
             response = model.generate_content(prompt)
             summary  = response.text.strip()
             if speak: speak(summary)
             return summary
-        except Exception:
+        except Exception as exc:
+            print(f"[Executor] Final summary unavailable: {type(exc).__name__}.")
             if speak: speak(fallback)
             return fallback

@@ -24,6 +24,10 @@ def get_base_dir() -> Path:
 
 CONFIG_PATH = get_base_dir() / "config" / "api_keys.json"
 INSTALLER_KEY_PATH = get_base_dir() / "config" / "installer_gemini_key.txt"
+_LOCAL_DATA_DIR = Path(
+    os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))
+)
+SECURE_KEYS_PATH = _LOCAL_DATA_DIR / "NIANG IA" / "api_keys.dpapi"
 STATE_PATH  = get_base_dir() / "config" / "api_key_state.json"
 DOTENV_PATH = get_base_dir() / ".env"
 
@@ -85,6 +89,53 @@ def _save_state() -> None:
         pass
 
 
+def _read_secure_keys() -> list[str]:
+    try:
+        encrypted = SECURE_KEYS_PATH.read_bytes()
+    except FileNotFoundError:
+        return []
+    if sys.platform != "win32":
+        raise RuntimeError("Protected API key storage requires Windows DPAPI.")
+    import win32crypt
+
+    decrypted = win32crypt.CryptUnprotectData(
+        encrypted, None, None, None, 0
+    )[1]
+    if isinstance(decrypted, bytes):
+        decrypted = decrypted.decode("utf-8")
+    values = json.loads(decrypted)
+    if not isinstance(values, list) or not all(
+        isinstance(value, str) for value in values
+    ):
+        raise ValueError("Protected API key storage has an invalid format.")
+    return [value.strip() for value in values if value.strip()]
+
+
+def _write_secure_keys(keys: list[str]) -> None:
+    if sys.platform != "win32":
+        raise RuntimeError("Protected API key storage requires Windows DPAPI.")
+    import win32crypt
+
+    encrypted = win32crypt.CryptProtectData(
+        json.dumps(keys, ensure_ascii=False).encode("utf-8"),
+        "NIANG IA API keys",
+        None,
+        None,
+        None,
+        0,
+    )
+    SECURE_KEYS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = SECURE_KEYS_PATH.with_suffix(".tmp")
+    try:
+        temporary_path.write_bytes(encrypted)
+        os.replace(temporary_path, SECURE_KEYS_PATH)
+    finally:
+        try:
+            temporary_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def get_all_keys() -> list:
     load_env_file()
     keys = []
@@ -111,6 +162,7 @@ def get_all_keys() -> list:
     lst = cfg.get("gemini_api_keys")
     if isinstance(lst, list):
         keys.extend(k.strip() for k in lst if isinstance(k, str) and k.strip())
+    keys.extend(_read_secure_keys())
     seen, out = set(), []
     for k in keys:
         if k not in seen:
@@ -163,20 +215,11 @@ def add_key(key: str) -> int:
     if not key:
         raise ValueError("Empty API key.")
     with _lock:
-        cfg = {}
-        if CONFIG_PATH.exists():
-            cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-        keys = cfg.get("gemini_api_keys")
-        if not isinstance(keys, list):
-            keys = []
-        if key not in keys:
-            keys.append(key)
-        cfg["gemini_api_keys"] = keys
-        if not cfg.get("gemini_api_key"):
-            cfg["gemini_api_key"] = key
-        CONFIG_PATH.write_text(
-            json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
-    return len(keys)
+        secure_keys = _read_secure_keys()
+        if key not in secure_keys:
+            secure_keys.append(key)
+            _write_secure_keys(secure_keys)
+        return len(get_all_keys())
 
 
 async def aio_generate(model, contents, config=None, api_version=None):
@@ -205,22 +248,45 @@ async def aio_generate(model, contents, config=None, api_version=None):
     raise last_err
 
 
-def generate_with_retry(model, contents, config=None, api_version=None):
+def generate_with_retry(
+    model,
+    contents,
+    config=None,
+    api_version=None,
+    timeout_ms=None,
+):
     """Sync version of aio_generate (for transcribe_voice and legacy modules)."""
     from google import genai
 
     keys = get_all_keys()
     last_err = None
+    deadline = (
+        time.monotonic() + timeout_ms / 1000
+        if timeout_ms is not None
+        else None
+    )
     for k in keys:
         try:
             kwargs = {}
+            http_options = {}
             if api_version:
-                kwargs["http_options"] = {"api_version": api_version}
+                http_options["api_version"] = api_version
+            if deadline is not None:
+                remaining_ms = int((deadline - time.monotonic()) * 1000)
+                if remaining_ms <= 0:
+                    raise TimeoutError("Gemini request exceeded its configured timeout.")
+                http_options["timeout"] = remaining_ms
+            if http_options:
+                kwargs["http_options"] = http_options
             client = genai.Client(api_key=k, **kwargs)
             resp = client.models.generate_content(
                 model=model, contents=contents, config=config)
             return resp
         except Exception as e:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError(
+                    "Gemini request exceeded its configured timeout."
+                ) from e
             if _is_quota_error(e):
                 mark_exhausted(k)
                 last_err = e
@@ -229,3 +295,46 @@ def generate_with_retry(model, contents, config=None, api_version=None):
     if last_err is None:
         raise KeyError("No Gemini API keys configured — add one in config/api_keys.json")
     raise last_err
+
+
+class GeminiModel:
+    """Small synchronous adapter for the currently supported google-genai SDK."""
+
+    def __init__(
+        self,
+        model_name: str | None = None,
+        *,
+        system_instruction: str | None = None,
+        generation_config: dict | None = None,
+        timeout_s: int | None = None,
+    ):
+        if not model_name:
+            raise ValueError("A Gemini model name is required.")
+        self.model_name = model_name
+        self.system_instruction = system_instruction
+        self.generation_config = generation_config or {}
+        if timeout_s is None:
+            from agent.settings import gemini_timeout_seconds
+            timeout_s = gemini_timeout_seconds()
+        if not 1 <= timeout_s <= 1800:
+            raise ValueError("Gemini timeout must be between 1 and 1800 seconds.")
+        self.timeout_ms = timeout_s * 1000
+
+    def generate_content(self, contents, **kwargs):
+        from google.genai import types
+
+        config_values = dict(self.generation_config)
+        config_values.update(kwargs)
+        if self.system_instruction is not None:
+            config_values["system_instruction"] = self.system_instruction
+        config = (
+            types.GenerateContentConfig(**config_values)
+            if config_values
+            else None
+        )
+        return generate_with_retry(
+            self.model_name,
+            contents,
+            config=config,
+            timeout_ms=self.timeout_ms,
+        )

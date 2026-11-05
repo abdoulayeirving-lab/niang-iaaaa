@@ -1,8 +1,9 @@
 import json
 import unittest
-from unittest.mock import AsyncMock, Mock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
-from actions.browser_control import _BrowserThread
+from actions.browser_control import _BrowserThread, browser_control
 from playwright.async_api import async_playwright
 
 
@@ -25,6 +26,57 @@ class FakePage:
 
 
 class BrowserControlTests(unittest.IsolatedAsyncioTestCase):
+    def test_mcp_navigation_obeys_private_network_policy(self):
+        for action in ("go_to", "new_tab"):
+            with (
+                self.subTest(action=action),
+                patch.dict("os.environ", {"NIANG_IA_BROWSER_ALLOWED_LOCAL_HOSTS": ""}),
+                patch("actions.playwright_mcp.playwright_mcp_control") as mcp_control,
+            ):
+                result = browser_control({
+                    "action": action,
+                    "url": "http://127.0.0.1:8080",
+                })
+
+                self.assertIn("Blocked navigation", result)
+                mcp_control.assert_not_called()
+
+    def test_explicit_local_host_allowlist_is_respected_by_mcp(self):
+        with (
+            patch.dict("os.environ", {"NIANG_IA_BROWSER_ALLOWED_LOCAL_HOSTS": "127.0.0.1"}),
+            patch(
+                "actions.playwright_mcp.playwright_mcp_control",
+                return_value="Opened local server.",
+            ) as mcp_control,
+        ):
+            result = browser_control({
+                "action": "go_to",
+                "url": "http://127.0.0.1:8080",
+            })
+
+        self.assertEqual(result, "Opened local server.")
+        mcp_control.assert_called_once()
+
+    def test_only_a_managed_project_preview_can_be_navigated_without_global_allowlist(self):
+        with (
+            patch.dict("os.environ", {"NIANG_IA_BROWSER_ALLOWED_LOCAL_HOSTS": ""}),
+            patch(
+                "agent.project_execution.is_authorized_local_preview_url",
+                return_value=True,
+            ),
+            patch(
+                "actions.playwright_mcp.playwright_mcp_control",
+                return_value="Opened managed preview.",
+            ) as mcp_control,
+        ):
+            result = browser_control({
+                "action": "go_to",
+                "url": "http://127.0.0.1:5187/",
+            })
+
+        self.assertEqual(result, "Opened managed preview.")
+        mcp_control.assert_called_once()
+
     async def test_private_navigation_is_rejected_before_browser_launch(self):
         browser = _BrowserThread()
 
@@ -32,6 +84,30 @@ class BrowserControlTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("Blocked navigation", result)
         self.assertIsNone(browser._browser)
+
+    async def test_fallback_browser_launches_through_the_validating_proxy(self):
+        browser = _BrowserThread()
+        fake_browser = SimpleNamespace(
+            is_connected=Mock(return_value=True),
+            close=AsyncMock(),
+        )
+        engine = SimpleNamespace(launch=AsyncMock(return_value=fake_browser))
+        browser._playwright = SimpleNamespace(chromium=engine)
+        proxy = SimpleNamespace(endpoint="http://127.0.0.1:45678", close=Mock())
+        with (
+            patch("actions.browser_control._get_default_browser_id", return_value=""),
+            patch("actions.browser_control._find_browser_executable",
+                  return_value=("chromium", None, None)),
+            patch("actions.browser_network_proxy.BrowserNetworkProxy", return_value=proxy),
+        ):
+            await browser._launch_browser_if_needed()
+
+        self.assertEqual(
+            engine.launch.call_args.kwargs["proxy"],
+            {"server": proxy.endpoint, "bypass": "<-loopback>"},
+        )
+        await browser._close_browser()
+        proxy.close.assert_called_once()
 
     async def test_managed_tab_listing_and_switching_use_live_page_state(self):
         browser = _BrowserThread()

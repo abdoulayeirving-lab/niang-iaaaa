@@ -1,4 +1,5 @@
 ﻿import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import threading
 import json
 import sys
@@ -7,7 +8,7 @@ import time
 import traceback
 from pathlib import Path
 
-from logger import setup_logger, log, log_tool
+from logger import setup_logger, log, log_tool, is_private_tool_data
 
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -20,6 +21,11 @@ try:
     import sounddevice as sd
 except ModuleNotFoundError:
     sd = None
+
+try:
+    import psutil as _diagnostic_psutil
+except ModuleNotFoundError:
+    _diagnostic_psutil = None
 
 try:
     from google import genai
@@ -35,6 +41,7 @@ from memory.memory_manager import (
 )
 from agent.resilience import ToolResult, run_sync_tool
 from agent.loop_guard import LoopGuard
+from agent.tool_registry import ToolExecutionContext, build_tool_registry
 
 from actions.flight_finder     import flight_finder
 from actions.open_app          import open_app
@@ -179,6 +186,7 @@ CHANNELS            = 1
 SEND_SAMPLE_RATE    = 16000
 RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE          = 1024
+MIC_QUEUE_MAX_CHUNKS = 16
 
 PHASE_IDLE, PHASE_LISTENING, PHASE_THINKING, PHASE_SPEAKING = (
     "idle", "listening", "thinking", "speaking"
@@ -192,6 +200,8 @@ def _ensure_core_deps():
         missing.append("sounddevice")
     if genai is None or types is None:
         missing.append("google-genai")
+    if _diagnostic_psutil is None:
+        missing.append("psutil")
 
     if not missing:
         return
@@ -204,6 +214,19 @@ def _ensure_core_deps():
         "Tip: On Windows, make sure you install into the SAME Python you run.\n"
     )
     raise SystemExit(msg)
+
+
+def _default_audio_device_index(kind):
+    if sd is None:
+        return None
+    try:
+        device_info = sd.query_devices(kind=kind)
+    except Exception:
+        return None
+    if not isinstance(device_info, dict):
+        return None
+    index = device_info.get("index")
+    return index if isinstance(index, int) and index >= 0 else None
 
 
 def _normalize_mode(text) -> str:
@@ -561,15 +584,17 @@ TOOL_DECLARATIONS = [
     {
         "name": "browser_control",
         "description": (
-            "Controls NIANG IA's managed Playwright browser: open/reuse pages, list and "
-            "switch managed tabs, inspect page state and visible controls, navigate back "
+            "Controls an isolated browser through Microsoft's Playwright MCP when available, "
+            "using structured accessibility snapshots and element references. Open/reuse pages, "
+            "list and switch managed tabs, inspect page state and visible controls, navigate back "
             "or forward, wait for elements, fill fields, select options, and capture "
             "screenshots to Downloads. It may not access the user's other browser windows or tabs. "
             "Inspect actual page state before interacting, reuse the active site tab for "
             "searches when appropriate, and verify the resulting URL/title/state. "
             "Only public HTTP(S) hosts are allowed by default. Local/private addresses "
-            "are blocked unless the user explicitly configures "
-            "NIANG_IA_BROWSER_ALLOWED_LOCAL_HOSTS with exact hostnames. "
+            "are blocked unless explicitly configured. NIANG_IA_BROWSER_ALLOWED_DOMAINS "
+            "and NIANG_IA_BROWSER_BLOCKED_DOMAINS configure public-domain policy; "
+            "NIANG_IA_BROWSER_ALLOWED_LOCAL_HOSTS is the separate explicit local-host exception. "
             "Use submit_form only after describing the exact form submission and "
             "receiving explicit user approval; do not use click or Enter to bypass "
             "that confirmation. Never invent page content or claim a change was saved "
@@ -578,7 +603,7 @@ TOOL_DECLARATIONS = [
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action":      {"type": "STRING", "description": "go_to | search | new_tab | tabs | switch_tab | state | back | forward | inspect | click | type | scroll | fill_form | select_option | submit_form | smart_click | smart_type | get_text | wait_for_element | screenshot | close_tab | press | close"},
+                "action":      {"type": "STRING", "description": "go_to | search | new_tab | tabs | switch_tab | state | back | forward | inspect | click | type | scroll | fill_form | select_option | submit_form | smart_click | smart_type | get_text | wait_for_element | screenshot | close_tab | press | handle_dialog | download | mcp_status | close"},
                 "url":         {"type": "STRING", "description": "URL for go_to action"},
                 "query":       {"type": "STRING", "description": "Search query for search action"},
                 "selector":    {"type": "STRING", "description": "CSS selector for click/type or submit_form"},
@@ -587,6 +612,7 @@ TOOL_DECLARATIONS = [
                 "tab_id":      {"type": "STRING", "description": "Managed tab ID for switch_tab or close_tab"},
                 "timeout_ms":  {"type": "INTEGER", "description": "Wait timeout in milliseconds (1000-30000)"},
                 "description": {"type": "STRING", "description": "Element description for smart_click/smart_type"},
+                "ref":         {"type": "STRING", "description": "Element reference from the latest Playwright MCP accessibility snapshot"},
                 "fields":      {
                     "type": "ARRAY",
                     "description": "For fill_form: fields to fill; this does not submit the form",
@@ -601,10 +627,60 @@ TOOL_DECLARATIONS = [
                 },
                 "direction":   {"type": "STRING", "description": "up or down for scroll"},
                 "key":         {"type": "STRING", "description": "Key name for press action"},
+                "accept":      {"type": "BOOLEAN", "description": "Whether to accept a browser dialog"},
+                "prompt_text": {"type": "STRING", "description": "Text for a JavaScript prompt dialog"},
                 "incognito":   {"type": "BOOLEAN", "description": "Open in private/incognito mode"},
             },
             "required": ["action"]
         }
+    },
+    {
+        "name": "terminal_control",
+        "description": (
+            "Execute PowerShell on Windows or Bash where installed, or manage a "
+            "specific NIANG-started process. The working directory must be inside "
+            "NIANG_IA_WORKSPACE_ROOT, but commands still have the current user's "
+            "filesystem/network permissions; this is not an OS sandbox. run/start "
+            "commands always require explicit confirmation. Destructive, "
+            "system-changing, dependency-install and external-network commands are "
+            "high risk. Use status/logs/stop only with a process_id returned by this tool. "
+            "Command text and sensitive-looking output are redacted."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "run | start | status | logs | stop"},
+                "shell": {"type": "STRING", "description": "powershell or bash"},
+                "command": {"type": "STRING", "description": "Command to execute; requires explicit user confirmation"},
+                "cwd": {"type": "STRING", "description": "Relative working directory inside the authorized workspace"},
+                "timeout_seconds": {"type": "INTEGER", "description": "Foreground command timeout (1-1800 seconds)"},
+                "process_id": {"type": "STRING", "description": "NIANG-managed process ID for status/logs/stop"},
+            },
+            "required": ["action"],
+        },
+    },
+    {
+        "name": "project_execution",
+        "description": (
+            "Inspect a project without running its code, or start/monitor/read logs/"
+            "stop a supported project process with its working directory inside "
+            "NIANG_IA_WORKSPACE_ROOT. Project scripts execute as the current user "
+            "and start requires explicit "
+            "confirmation. Does not install dependencies. Web startup returns a local "
+            "URL only after a health probe; unknown occupied ports block duplicate startup. "
+            "Desktop projects are reported as desktop applications, not web servers."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "inspect | start | status | logs | stop"},
+                "path": {"type": "STRING", "description": "Relative project folder inside the authorized workspace"},
+                "shell": {"type": "STRING", "description": "Optional powershell or bash override"},
+                "process_id": {"type": "STRING", "description": "NIANG-managed process ID for status/logs/stop"},
+                "health_timeout_seconds": {"type": "INTEGER", "description": "Local server health deadline (1-120 seconds)"},
+            },
+            "required": ["action"],
+        },
     },
     {
         "name": "workspace_list_files",
@@ -835,36 +911,46 @@ TOOL_DECLARATIONS = [
     {
         "name": "computer_control",
         "description": (
-            "Guarded local Windows UI control: sample screen changes locally with "
-            "a 30 ms target interval (actual rate depends on Windows capture speed), "
-            "without saving or sending screenshots; inspect accessible "
-            "controls, move/click/drag/type, wait for visual changes, and verify "
-            "visible outcomes. Screen descriptions and visual search that require "
-            "uploading a screenshot to Gemini are disabled; use screen_process "
-            "with angle='local_vision' to describe the screen using local Ollama, "
-            "or angle='screen' for OCR text. Monitoring start requires explicit "
-            "confirmation; stop and status are available at any time."
+            "Guarded local Windows desktop control, separate from browser_control "
+            "(Playwright) and terminal_control. Enumerate windows with owner PID, "
+            "visibility, minimized state, bounds, and process; inspect UIA and Win32 "
+            "controls first; use local Tesseract OCR and PyAutoGUI only as a Tkinter "
+            "fallback. Activate, capture, click, type, scroll, and verify a chosen "
+            "window. Local screen monitoring samples changes at a 30 ms target interval "
+            "(actual rate depends on capture speed); screenshots remain "
+            "local and are never uploaded. Screen descriptions and visual search "
+            "through this tool are disabled; use screen_process angle='local_vision' "
+            "for local visual descriptions."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action":      {"type": "STRING", "description": "type | smart_type | click | double_click | right_click | hotkey | press | scroll | move | drag | mouse_down | mouse_up | copy | paste | screenshot | capture_screen | screen_info | screen_monitor_start | screen_monitor_status | screen_monitor_stop | active_window | find_ui_elements | wait_for_visual_change | verify_action | stop | enable_emergency_stop | disable_emergency_stop | wait | clear_field | focus_window | screen_describe (disabled) | screen_find (disabled) | screen_click (disabled) | random_data | user_data"},
-                "text":        {"type": "STRING", "description": "Text to type or paste"},
-                "x":           {"type": "INTEGER", "description": "X coordinate"},
-                "y":           {"type": "INTEGER", "description": "Y coordinate"},
+                "action":      {"type": "STRING", "description": "window_list | window_observe | window_activate | window_minimize | window_close | window_screenshot | window_click | window_type | window_press | window_scroll | window_verify | existing computer-control actions"},
+                "hwnd":        {"type": "STRING", "description": "Target window handle returned by window_list"},
+                "pid":         {"type": "INTEGER", "description": "Target application process ID"},
+                "include_hidden": {"type": "BOOLEAN", "description": "Include hidden and minimized windows (default true)"},
+                "include_untitled": {"type": "BOOLEAN", "description": "Include untitled windows"},
+                "use_ocr":     {"type": "BOOLEAN", "description": "Run local OCR against the selected visible window (default true)"},
+                "name":        {"type": "STRING", "description": "Exact accessible control name"},
+                "automation_id": {"type": "STRING", "description": "Exact UI Automation AutomationId"},
+                "text":        {"type": "STRING", "description": "Text to enter, or exact visible text for an OCR-based click"},
+                "keys":        {"type": "STRING", "description": "Keyboard shortcut such as ctrl+a"},
+                "expected":    {"type": "STRING", "description": "Text to verify in the selected window"},
+                "amount":      {"type": "INTEGER", "description": "Scroll amount from -100 to 100"},
+                "x":           {"type": "INTEGER", "description": "Fallback screen X coordinate within the selected window"},
+                "y":           {"type": "INTEGER", "description": "Fallback screen Y coordinate within the selected window"},
+                "title":       {"type": "STRING", "description": "Unique exact or partial window title"},
+                "path":        {"type": "STRING", "description": "Optional screenshot path under the current user's home directory"},
                 "keys":        {"type": "STRING", "description": "Key combination e.g. 'ctrl+c'"},
                 "key":         {"type": "STRING", "description": "Single key e.g. 'enter'"},
                 "direction":   {"type": "STRING", "description": "up | down | left | right"},
-                "amount":      {"type": "INTEGER", "description": "Scroll amount (default: 3)"},
                 "seconds":     {"type": "NUMBER",  "description": "Seconds to wait"},
-                "title":       {"type": "STRING",  "description": "Window title for focus_window"},
-                "description": {"type": "STRING",  "description": "Element to find on a fresh screenshot; visual clicks require confidence >= 0.8"},
-                "type":        {"type": "STRING",  "description": "Data type for random_data"},
-                "field":       {"type": "STRING",  "description": "Field for user_data: name|email|city"},
+                "description": {"type": "STRING", "description": "Element to find on a fresh screenshot; visual clicks require confidence >= 0.8"},
+                "type":        {"type": "STRING", "description": "Data type for random_data"},
+                "field":       {"type": "STRING", "description": "Field for user_data: name|email|city"},
                 "clear_first": {"type": "BOOLEAN", "description": "Clear field before typing (default: true)"},
-                "path":        {"type": "STRING",  "description": "Save path for screenshot"},
-                "image":       {"type": "STRING",  "description": "Local image template for locating a visible UI element"},
-                "button":      {"type": "STRING",  "description": "Mouse button: left | right | middle"},
+                "image":       {"type": "STRING", "description": "Local image template for locating a visible UI element"},
+                "button":      {"type": "STRING", "description": "Mouse button: left | right | middle"},
                 "x1":          {"type": "INTEGER", "description": "Drag start X"},
                 "y1":          {"type": "INTEGER", "description": "Drag start Y"},
                 "x2":          {"type": "INTEGER", "description": "Drag end X"},
@@ -872,7 +958,6 @@ TOOL_DECLARATIONS = [
                 "duration":    {"type": "NUMBER",  "description": "Movement duration in seconds"},
                 "timeout":     {"type": "NUMBER",  "description": "Maximum wait duration in seconds"},
                 "threshold":   {"type": "NUMBER",  "description": "Minimum mean pixel difference for screen-change detection"},
-                "expected":    {"type": "STRING",  "description": "Visible accessible label or text to verify"},
             },
             "required": ["action"]
         }
@@ -934,6 +1019,44 @@ TOOL_DECLARATIONS = [
                 }
             },
             "required": []
+        }
+    },
+    {
+        "name": "windows_diagnostics",
+        "description": (
+            "Run a read-only, privacy-limited Windows diagnostic. Actions: overview, "
+            "performance, drivers, windows, services, network, errors, system_files. "
+            "No fixes are applied. The user must approve sharing the report with Gemini. "
+            "System-file checks use DISM /CheckHealth and SFC /verifyonly only."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {
+                    "type": "STRING",
+                    "description": "overview | performance | drivers | windows | services | network | errors | system_files; default overview"
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "windows_repair",
+        "description": (
+            "Run one fixed Windows repair only after explicit human approval. "
+            "Actions: flush_dns | sfc_scannow | dism_restore_health. System repairs "
+            "require an already elevated NIANG IA process and a verified restore point. "
+            "Never provide commands or request/bypass UAC."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {
+                    "type": "STRING",
+                    "description": "flush_dns | sfc_scannow | dism_restore_health (required)"
+                }
+            },
+            "required": ["action"]
         }
     },
     {
@@ -1793,7 +1916,10 @@ for _decl in TOOL_DECLARATIONS:
         "whatsapp_call", "workspace_write_file", "workspace_edit_file",
         "workspace_apply_patch",
         "workspace_run_check",
+        "terminal_control", "project_execution",
         "screen_process",
+        "windows_diagnostics",
+        "windows_repair",
     }:
         _decl.setdefault("parameters", {}).setdefault("properties", {})[
             "confirm"
@@ -1839,7 +1965,13 @@ class KaizumiLive:
         self._analysis_generation = 0
         self.loop_guard     = LoopGuard()
         self._tool_handlers = self._build_tool_handlers()
+        self._tool_registry = self._build_tool_registry()
+        from agent.task_queue import get_queue
+        get_queue().set_tool_registry(self._tool_registry)
         self.ui.on_text_command = self._on_text_command
+        self.ui.on_agent_start = self._start_agent_task
+        self.ui.on_agent_cancel = self._cancel_agent_task
+        self.ui.on_application_close = self._shutdown_agent_services
         self.ui.on_files_selected = self._on_files_selected
         self.ui.on_clear_documents = self._clear_analysis_sources
         self.ui.on_voiceover_requested = self._on_voiceover_requested
@@ -2172,6 +2304,31 @@ class KaizumiLive:
                 await self.session.send_realtime_input(text=text)
         asyncio.run_coroutine_threadsafe(_send(), self._loop)
 
+    def _start_agent_task(self, goal: str) -> str:
+        from agent.task_queue import get_queue
+        return get_queue().submit(
+            goal=goal,
+            speak=self.speak,
+            approval_callback=self.ui.request_agent_approval,
+            tool_registry=self._tool_registry,
+        )
+
+    def _cancel_agent_task(self, task_id: str) -> bool:
+        from agent.task_queue import get_queue
+        return get_queue().cancel(task_id)
+
+    def _shutdown_agent_services(self) -> None:
+        try:
+            from agent.task_queue import shutdown_queue_if_started
+            shutdown_queue_if_started()
+        finally:
+            try:
+                from actions.browser_control import shutdown_browser_missions
+                shutdown_browser_missions()
+            finally:
+                from actions.playwright_mcp import shutdown_playwright_mcp
+                shutdown_playwright_mcp()
+
     def set_speaking(self, value: bool):
         with self._speaking_lock:
             self._is_speaking = value
@@ -2311,12 +2468,20 @@ class KaizumiLive:
         """name -> (handler(args)->str, timeout_seconds)."""
         ui    = self.ui
         speak = self.speak
+        from agent.settings import windows_action_timeout_seconds
+        windows_timeout = max(4200, windows_action_timeout_seconds())
 
         def _agent_task(args):
             from agent.task_queue import get_queue, TaskPriority
             priority_map = {"low": TaskPriority.LOW, "normal": TaskPriority.NORMAL, "high": TaskPriority.HIGH}
             priority = priority_map.get(str(args.get("priority", "normal")).lower(), TaskPriority.NORMAL)
-            task_id  = get_queue().submit(goal=args.get("goal", ""), priority=priority, speak=speak)
+            task_id  = get_queue().submit(
+                goal=args.get("goal", ""),
+                priority=priority,
+                speak=speak,
+                approval_callback=ui.request_agent_approval,
+                tool_registry=self._tool_registry,
+            )
             return f"Task started (ID: {task_id})."
 
         def _recall(args):
@@ -2330,6 +2495,14 @@ class KaizumiLive:
         def _clear_mem(args):
             from memory.memory_manager import clear_memory
             return clear_memory(args.get("category", ""))
+
+        def _windows_diagnostics(args):
+            from actions.windows_diagnostics import windows_diagnostics
+            return windows_diagnostics(parameters=args)
+
+        def _windows_repair(args):
+            from actions.windows_repair import windows_repair
+            return windows_repair(parameters=args)
 
         def _wake(args):
             from actions.wake_word import wake_word as wake_word_action
@@ -2532,33 +2705,27 @@ class KaizumiLive:
             )
 
         def _browser_control(args):
-            args = dict(args)
-            fields = args.get("fields")
-            if isinstance(fields, list):
-                mapped_fields = {}
-                for field in fields:
-                    if (
-                        not isinstance(field, dict)
-                        or not isinstance(field.get("selector"), str)
-                        or not isinstance(field.get("value"), str)
-                    ):
-                        raise ValueError("Browser form fields must include selector and value strings.")
-                    selector = field["selector"]
-                    if selector in mapped_fields:
-                        raise ValueError(f"Duplicate browser form field selector: {selector}")
-                    mapped_fields[selector] = field["value"]
-                args["fields"] = mapped_fields
-            return browser_control(parameters=args, player=ui)
+            return self._execute_browser_control(args, ToolExecutionContext())
 
         def _workspace_tool(function_name, args):
             from agent import workspace_tools
             function = getattr(workspace_tools, function_name)
             return function(**args)
 
+        def _terminal_control(args):
+            from agent.terminal_agent import terminal_control
+            return terminal_control(args)
+
+        def _project_execution(args):
+            from agent.project_execution import project_execution
+            return project_execution(args)
+
         return {
             "open_app":          (lambda a: open_app(parameters=a, response=None, player=ui), 60),
             "weather_report":    (lambda a: weather_action(parameters=a, player=ui), 60),
             "browser_control":   (_browser_control, 120),
+            "terminal_control": (_terminal_control, 1860),
+            "project_execution": (_project_execution, 150),
             "workspace_list_files": (
                 lambda a: _workspace_tool(
                     "list_files",
@@ -2631,6 +2798,8 @@ class KaizumiLive:
             "web_search":        (lambda a: web_search_action(parameters=a, player=ui), 90),
             "computer_control":  (lambda a: computer_control(parameters=a, player=ui), 120),
             "system_status":     (lambda a: system_status(parameters=a, player=ui), 45),
+            "windows_diagnostics": (_windows_diagnostics, windows_timeout),
+            "windows_repair":     (_windows_repair, windows_timeout),
             "task_manager":      (lambda a: task_manager(parameters=a, player=ui), 60),
             "clipboard":         (lambda a: clipboard_action(parameters=a, player=ui), 45),
             "vision_gesture":    (_vision_gesture, 120),
@@ -2678,6 +2847,62 @@ class KaizumiLive:
             "smart_home_control":  (_smart_home, 30),
         }
 
+    def _execute_browser_control(self, parameters, context: ToolExecutionContext):
+        args = dict(parameters)
+        fields = args.get("fields")
+        if isinstance(fields, list):
+            mapped_fields = {}
+            for field in fields:
+                if (
+                    not isinstance(field, dict)
+                    or not isinstance(field.get("selector"), str)
+                    or not isinstance(field.get("value"), str)
+                ):
+                    raise ValueError("Browser form fields must include selector and value strings.")
+                selector = field["selector"]
+                if selector in mapped_fields:
+                    raise ValueError(f"Duplicate browser form field selector: {selector}")
+                mapped_fields[selector] = field["value"]
+            args["fields"] = mapped_fields
+        from actions.browser_control import browser_control
+        return browser_control(
+            parameters=args,
+            player=self.ui,
+            mission_id=context.mission_id,
+            cancel_flag=context.cancel_flag,
+        )
+
+    def _build_tool_registry(self):
+        from actions.windows_diagnostics import windows_diagnostics
+        from actions.windows_repair import windows_repair
+        from agent.tool_registry import build_tool_registry
+
+        def _terminal_control_with_context(args, context):
+            from agent.terminal_agent import terminal_control
+            return terminal_control(args, cancel_event=context.cancel_flag)
+
+        def _project_execution_with_context(args, context):
+            from agent.project_execution import project_execution
+            return project_execution(args, cancel_event=context.cancel_flag)
+
+        context_handlers = {
+            "browser_control": self._execute_browser_control,
+            "terminal_control": _terminal_control_with_context,
+            "project_execution": _project_execution_with_context,
+            "windows_diagnostics": lambda args, context: windows_diagnostics(
+                parameters=args, cancel_flag=context.cancel_flag,
+            ),
+            "windows_repair": lambda args, context: windows_repair(
+                parameters=args, cancel_flag=context.cancel_flag,
+            ),
+        }
+        registry = build_tool_registry(
+            TOOL_DECLARATIONS,
+            self._tool_handlers,
+            context_handlers=context_handlers,
+        )
+        return registry
+
     async def _dispatch_tool(self, name: str, args: dict) -> ToolResult:
         from safety import sanitize as _sanitize
         blocked = self.loop_guard.check(name, args)
@@ -2717,16 +2942,19 @@ class KaizumiLive:
                     error_kind="identity",
                 )
 
-        entry = self._tool_handlers.get(name)
-        if entry is None:
+        tool = self._tool_registry.get(name)
+        if tool is None or tool.handler is None:
             return ToolResult(ok=False, content=f"Unknown tool: {name}", error_kind="fatal")
 
         if name == "browser_control":
             print("[Telegram] browser_control [details omitted]")
         else:
             print(f"[Telegram] ðŸ”§ {name} {_sanitize(name, args)}")
-        fn, timeout = entry
-        result = await run_sync_tool(lambda: fn(args), name, timeout=timeout)
+        result = await run_sync_tool(
+            lambda: self._tool_registry.invoke(name, args),
+            name,
+            timeout=tool.timeout_seconds,
+        )
         if result.ok:
             _record_proactive_usage(name)
         return result
@@ -2797,7 +3025,7 @@ class KaizumiLive:
             output_audio_transcription={},
             input_audio_transcription={},
             system_instruction="\n".join(parts),
-            tools=[{"function_declarations": TOOL_DECLARATIONS}],
+            tools=[{"function_declarations": self._tool_registry.function_declarations()}],
             realtime_input_config=types.RealtimeInputConfig(
             activity_handling=types.ActivityHandling.START_OF_ACTIVITY_INTERRUPTS,
         ),
@@ -2936,11 +3164,14 @@ class KaizumiLive:
             # Uniform dispatch through the shared handler table so every
             # declared tool gets a timeout and works in both voice and
             # Telegram paths.
-            entry = self._tool_handlers.get(name)
-            if entry is not None:
-                handler, timeout = entry
+            tool = self._tool_registry.get(name)
+            if tool is not None and tool.handler is not None:
                 from agent.resilience import run_sync_tool
-                r = await run_sync_tool(lambda: handler(args), name, timeout=timeout)
+                r = await run_sync_tool(
+                    lambda: self._tool_registry.invoke(name, args),
+                    name,
+                    timeout=tool.timeout_seconds,
+                )
                 result = r.content or f"{name} done."
                 if r.ok:
                     _record_proactive_usage(name)
@@ -2952,7 +3183,8 @@ class KaizumiLive:
             private_ui_tool = name in {
                 "computer_control", "computer_settings", "screen_process",
             }
-            if private_ui_tool:
+            private_tool_details = is_private_tool_data(name)
+            if private_ui_tool or private_tool_details:
                 print("[NIANG IA] Computer-use action raised an error [details redacted]")
             else:
                 traceback.print_exc()
@@ -2966,10 +3198,12 @@ class KaizumiLive:
                 self.ui.write_log("ERR: WhatsApp call audio action failed.")
             elif private_ui_tool:
                 self.ui.write_log("ERR: Computer-use action failed.")
+            elif private_tool_details:
+                self.ui.write_log("ERR: Private-data tool failed [details redacted].")
             else:
                 self.ui.write_log(f"ERR: {name} â€” {str(e)[:120]}")
             try:
-                if private_ui_tool:
+                if private_ui_tool or private_tool_details:
                     self.speak("The computer-use action failed.")
                 else:
                     self.speak(f"Sir, {name} hit an error. {str(e)[:80]}")
@@ -2983,7 +3217,7 @@ class KaizumiLive:
                     "WhatsApp call audio action failed."
                     if name == "whatsapp_call"
                     else "Computer-use action failed."
-                    if private_ui_tool
+                    if private_ui_tool or private_tool_details
                     else str(e)[:120]
                 ),
             })
@@ -3022,6 +3256,8 @@ class KaizumiLive:
         elif name == "whatsapp_call":
             print("[NIANG IA] WhatsApp call audio action completed [details redacted]")
         elif name in {"computer_control", "computer_settings", "screen_process"}:
+            print(f"[NIANG IA] {name} completed [details redacted]")
+        elif is_private_tool_data(name):
             print(f"[NIANG IA] {name} completed [details redacted]")
         else:
             print(f"[NIANG IA] ðŸ“¤ {name} â†’ {str(result)[:80]}")
@@ -3228,7 +3464,7 @@ class KaizumiLive:
         from google.genai import types as gtypes
         config = gtypes.GenerateContentConfig(
             system_instruction=self._telegram_context(),
-            tools=[{"function_declarations": TOOL_DECLARATIONS}],
+            tools=[{"function_declarations": self._tool_registry.function_declarations()}],
             temperature=0.4,
         )
         contents = [gtypes.Content(parts=[gtypes.Part(text=str(text))])]
@@ -3528,37 +3764,71 @@ class KaizumiLive:
 
     async def _listen_audio(self):
         print("[NIANG IA] ðŸŽ¤ Mic started")
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
+        retry_delay = 1
+        microphone_error_logged = False
 
         def callback(indata, frames, time_info, status):
-            with self._speaking_lock:
-                assistant_speaking = self._is_speaking
             if not self.ui.muted:
                 data = indata.tobytes()
                 loop.call_soon_threadsafe(self._safe_put_mic, data)
 
-        try:
-            with sd.InputStream(
-                samplerate=SEND_SAMPLE_RATE,
-                channels=CHANNELS,
-                dtype="int16",
-                blocksize=CHUNK_SIZE,
-                callback=callback,
-            ):
-                print("[NIANG IA] ðŸŽ¤ Mic stream open")
-                while True:
-                    await asyncio.sleep(0.1)
-        except Exception as e:
-            print(f"[NIANG IA] âŒ Mic: {e}")
-            self.ui.write_log(
-                "ERR: Microphone indisponible — NIANG IA reste utilisable par texte."
-            )
+        while True:
+            stream = None
+            try:
+                with sd.InputStream(
+                    device=_default_audio_device_index("input"),
+                    samplerate=SEND_SAMPLE_RATE,
+                    channels=CHANNELS,
+                    dtype="int16",
+                    blocksize=CHUNK_SIZE,
+                    callback=callback,
+                ) as stream:
+                    device = stream.device
+                    print("[NIANG IA] ðŸŽ¤ Mic stream open")
+                    if microphone_error_logged:
+                        self.ui.write_log("SYS: Microphone reconnecté.")
+                        microphone_error_logged = False
+                    retry_delay = 1
+
+                    while True:
+                        await asyncio.sleep(0.5)
+                        if not stream.active:
+                            raise RuntimeError("microphone stream is no longer active")
+
+                        default_input = _default_audio_device_index("input")
+                        if (
+                            device is not None
+                            and default_input is not None
+                            and default_input != device
+                        ):
+                            print("[NIANG IA] Microphone changed; reopening input stream.")
+                            break
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                print(f"[NIANG IA] âŒ Mic: {e}")
+                if not microphone_error_logged:
+                    self.ui.write_log(
+                        "ERR: Microphone indisponible — nouvelle tentative automatique; "
+                        "NIANG IA reste utilisable par texte."
+                    )
+                    microphone_error_logged = True
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 10)
 
     def _safe_put_mic(self, data):
         try:
             self.out_queue.put_nowait({"data": data, "mime_type": "audio/pcm"})
         except asyncio.QueueFull:
-            pass
+            try:
+                self.out_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            try:
+                self.out_queue.put_nowait({"data": data, "mime_type": "audio/pcm"})
+            except asyncio.QueueFull:
+                pass
 
     async def _watch_speaking(self):
         while True:
@@ -3692,64 +3962,123 @@ class KaizumiLive:
     async def _play_audio(self):
         print("[NIANG IA] ðŸ”Š Play started")
         stream = None
-        try:
-            if sd is None:
-                raise RuntimeError("sounddevice is not installed")
-            stream = sd.RawOutputStream(
+        stream_device = None
+        retry_output_at = 0.0
+        output_error_logged = False
+        audio_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="niang-audio-output",
+        )
+
+        def open_output_stream():
+            output_device = _default_audio_device_index("output")
+            output = sd.RawOutputStream(
+                device=output_device,
                 samplerate=RECEIVE_SAMPLE_RATE,
                 channels=CHANNELS,
                 dtype="int16",
-                blocksize=CHUNK_SIZE,
+                blocksize=0,
             )
-            stream.start()
+            output.start()
+            return output
+
+        def close_output_stream():
+            nonlocal stream, stream_device
+            if stream is None:
+                return
+            try:
+                stream.stop()
+            except Exception as close_error:
+                print(f"[NIANG IA] Audio stream stop failed: {close_error}")
+            try:
+                stream.close()
+            except Exception as close_error:
+                print(f"[NIANG IA] Audio stream cleanup failed: {close_error}")
+            stream = None
+            stream_device = None
+
+        try:
+            if sd is None:
+                raise RuntimeError("sounddevice is not installed")
+            stream = open_output_stream()
+            stream_device = stream.device
         except Exception as e:
             print(f"[NIANG IA] Audio output unavailable: {e}")
             self.ui.write_log(
                 "ERR: Sortie audio indisponible — les réponses restent accessibles dans la conversation."
             )
-            if stream is not None:
-                try:
-                    stream.close()
-                except Exception as close_error:
-                    print(f"[NIANG IA] Audio stream cleanup failed: {close_error}")
-            stream = None
+            close_output_stream()
+            output_error_logged = True
+            retry_output_at = time.monotonic() + 1
 
         try:
-            while True:
-                chunk = await self.audio_in_queue.get()
-                if getattr(self.ui, "silent_mode", False):
-                    # Drain already-buffered audio as well, so switching to
-                    # Text-only takes effect immediately instead of allowing
-                    # the tail of the previous reply to play.
-                    self.set_speaking(False)
-                    continue
-                if not self._is_speaking:
-                    self.set_speaking(True)
-                self._last_play_ts = time.monotonic()
-                if stream is not None:
-                    try:
-                        await asyncio.to_thread(stream.write, chunk)
-                    except Exception as e:
-                        print(f"[NIANG IA] Audio playback stopped: {e}")
-                        self.ui.write_log(
-                            "ERR: Sortie audio interrompue — NIANG IA continue en mode texte."
-                        )
+            try:
+                while True:
+                    chunk = await self.audio_in_queue.get()
+                    if getattr(self.ui, "silent_mode", False):
+                        # Drain already-buffered audio as well, so switching to
+                        # Text-only takes effect immediately instead of allowing
+                        # the tail of the previous reply to play.
+                        self.set_speaking(False)
+                        continue
+                    if not self._is_speaking:
+                        self.set_speaking(True)
+                    self._last_play_ts = time.monotonic()
+
+                    if stream is not None:
+                        default_output = _default_audio_device_index("output")
+                        if (
+                            stream_device is not None
+                            and default_output is not None
+                            and default_output != stream_device
+                        ) or (
+                            stream is not None
+                            and not stream.active
+                        ):
+                            close_output_stream()
+                            retry_output_at = time.monotonic()
+
+                    if stream is None and time.monotonic() >= retry_output_at:
                         try:
-                            stream.stop()
-                            stream.close()
-                        except Exception as close_error:
-                            print(f"[NIANG IA] Audio stream cleanup failed: {close_error}")
-                        stream = None
-                if self.audio_in_queue.empty() and self._turn_complete:
-                    self._turn_complete = False
-                    self.set_speaking(False)
+                            stream = open_output_stream()
+                            stream_device = stream.device
+                            if output_error_logged:
+                                self.ui.write_log("SYS: Sortie audio reconnectée.")
+                                output_error_logged = False
+                        except Exception as e:
+                            print(f"[NIANG IA] Audio output unavailable: {e}")
+                            if not output_error_logged:
+                                self.ui.write_log(
+                                    "ERR: Sortie audio indisponible — les réponses restent "
+                                    "accessibles dans la conversation; nouvelle tentative automatique."
+                                )
+                                output_error_logged = True
+                            retry_output_at = time.monotonic() + 1
+
+                    if stream is not None:
+                        try:
+                            loop = asyncio.get_running_loop()
+                            await loop.run_in_executor(
+                                audio_executor, stream.write, chunk
+                            )
+                        except Exception as e:
+                            print(f"[NIANG IA] Audio playback stopped: {e}")
+                            if not output_error_logged:
+                                self.ui.write_log(
+                                    "ERR: Sortie audio interrompue — nouvelle tentative "
+                                    "automatique; les réponses restent accessibles dans la conversation."
+                                )
+                                output_error_logged = True
+                            close_output_stream()
+                            retry_output_at = time.monotonic() + 1
+                    if self.audio_in_queue.empty() and self._turn_complete:
+                        self._turn_complete = False
+                        self.set_speaking(False)
+            finally:
+                self.set_speaking(False)
+                close_output_stream()
         finally:
-            self.set_speaking(False)
-            if stream is not None:
-                try:
-                    stream.stop()
-                finally:
-                    stream.close()
+            audio_executor.shutdown(wait=True, cancel_futures=True)
 
     async def run(self):
         self._loop = asyncio.get_event_loop()
@@ -3810,7 +4139,7 @@ class KaizumiLive:
                         self._loop          = asyncio.get_event_loop()
                         self._send_lock     = asyncio.Lock()
                         self.audio_in_queue = asyncio.Queue()
-                        self.out_queue      = asyncio.Queue(maxsize=64)
+                        self.out_queue      = asyncio.Queue(maxsize=MIC_QUEUE_MAX_CHUNKS)
                         self._ready         = True
 
                         log("Gemini session CONNECTED")
@@ -3880,7 +4209,32 @@ def _tk_exception_handler(exc_type, exc_value, tb):
     traceback.print_exception(exc_type, exc_value, tb)
 
 
+_NIANG_INSTANCE_MUTEX = None
+
+
+def _acquire_single_instance_mutex() -> bool:
+    """Keep a second NIANG IA process from creating a duplicate UI."""
+    global _NIANG_INSTANCE_MUTEX
+    if sys.platform != "win32":
+        return True
+    try:
+        import ctypes
+        mutex = ctypes.windll.kernel32.CreateMutexW(
+            None, True, "Local\\NIANG_IA_SINGLE_INSTANCE_MUTEX"
+        )
+        last_error = ctypes.windll.kernel32.GetLastError()
+        if not mutex or last_error == 183:
+            return False
+        _NIANG_INSTANCE_MUTEX = mutex
+        return True
+    except Exception:
+        return True
+
+
 def main():
+    if not _acquire_single_instance_mutex():
+        print("[NIANG IA] Another NIANG IA instance is already running.")
+        return
     _ensure_core_deps()
     log_file = setup_logger(BASE_DIR)
     log(f"Base dir: {BASE_DIR}\nLog file: {log_file}")

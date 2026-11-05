@@ -15,8 +15,10 @@ checks across the codebase.
 
 import json
 import hashlib
+import re
 import secrets
 import threading
+import time
 from enum import IntEnum
 from typing import Any
 
@@ -80,8 +82,12 @@ TOOL_RISK = {
     "workspace_edit_file": Risk.HIGH,
     "workspace_apply_patch": Risk.HIGH,
     "workspace_run_check": Risk.HIGH,
+    "terminal_control": Risk.HIGH,
+    "project_execution": Risk.HIGH,
     "computer_settings": Risk.MEDIUM,
     "computer_control":  Risk.MEDIUM,
+    "windows_diagnostics": Risk.HIGH,
+    "windows_repair": Risk.HIGH,
     "vision_gesture":    Risk.MEDIUM,
     "live_camera":       Risk.MEDIUM,
     "vision_click":      Risk.MEDIUM,
@@ -91,7 +97,7 @@ TOOL_RISK = {
     "google_auth":       Risk.MEDIUM,
 
     # Communicate externally
-    "send_message":      Risk.MEDIUM,
+    "send_message":      Risk.HIGH,
     "gmail":             Risk.MEDIUM,
 
     # Arbitrary / destructive
@@ -113,6 +119,22 @@ TOOL_RISK = {
 # (tool_name, action) -> Risk. High-impact / irreversible actions are HIGH.
 # `None` as the action key means "any other action" for that tool.
 _ACTION_RISK = {
+    "terminal_control": {
+        "status": Risk.LOW,
+        "logs": Risk.LOW,
+        "stop": Risk.MEDIUM,
+        "run": Risk.HIGH,
+        "start": Risk.HIGH,
+        None: Risk.HIGH,
+    },
+    "project_execution": {
+        "inspect": Risk.LOW,
+        "status": Risk.LOW,
+        "logs": Risk.LOW,
+        "stop": Risk.MEDIUM,
+        "start": Risk.HIGH,
+        None: Risk.HIGH,
+    },
     "video_studio": {
         "status": Risk.LOW,
         "analyze": Risk.MEDIUM,
@@ -142,15 +164,22 @@ _ACTION_RISK = {
         "delete": Risk.HIGH,
         "move": Risk.HIGH,
         "rename": Risk.MEDIUM,
+        "create_file": Risk.HIGH,
         "organize": Risk.HIGH,
         "organize_desktop": Risk.HIGH,
         "undo_organize": Risk.MEDIUM,
-        "write": Risk.MEDIUM,
+        "write": Risk.HIGH,
         "unzip": Risk.HIGH,
         "zip": Risk.MEDIUM,
         None: Risk.MEDIUM,
     },
     "cmd_control": {
+        None: Risk.HIGH,
+    },
+    "windows_diagnostics": {
+        None: Risk.HIGH,
+    },
+    "windows_repair": {
         None: Risk.HIGH,
     },
     "desktop_control": {
@@ -185,6 +214,12 @@ _ACTION_RISK = {
     "computer_settings": {
         "wifi_off": Risk.MEDIUM,
         "wifi_on": Risk.MEDIUM,
+        "type_text": Risk.HIGH,
+        "write_on_screen": Risk.HIGH,
+        "type": Risk.HIGH,
+        "write": Risk.HIGH,
+        "paste": Risk.HIGH,
+        "press_key": Risk.HIGH,
         "shutdown": Risk.HIGH,
         "restart": Risk.HIGH,
         "sleep": Risk.HIGH,
@@ -210,6 +245,9 @@ _ACTION_RISK = {
     },
     "browser_control": {
         "submit_form": Risk.HIGH,
+        "download": Risk.HIGH,
+        "handle_dialog": Risk.HIGH,
+        "mcp_status": Risk.LOW,
         None: Risk.MEDIUM,
     },
     "smart_home_control": {
@@ -224,6 +262,40 @@ _ACTION_RISK = {
         None: Risk.LOW,
     },
 }
+
+_SENSITIVE_FILE_NAMES = {
+    ".env", ".netrc", ".npmrc", "api_keys.json", "credentials.json",
+    "token.json", "client_secret.json", "service_account.json",
+    "id_rsa", "id_ed25519",
+}
+_FILE_ACCESS_TOOLS = {
+    "file_controller", "read_pdf", "pdf_qa", "read_document",
+    "document_qa", "search_documents", "analyze_data",
+}
+
+
+def _contains_sensitive_file_path(name: str, args: dict) -> bool:
+    if name not in _FILE_ACCESS_TOOLS:
+        return False
+    path_values = [
+        args.get(key)
+        for key in ("path", "file_path", "filename", "name", "source", "destination")
+    ]
+    for value in path_values:
+        if not isinstance(value, str):
+            continue
+        parts = [part.casefold() for part in value.replace("\\", "/").split("/") if part]
+        for part in parts:
+            if (
+                part in _SENSITIVE_FILE_NAMES
+                or part.startswith(".env.")
+                or part in {"secrets", "secret"}
+                or part.startswith(("secret.", "secrets."))
+                or part.endswith((".pem", ".p12", ".pfx"))
+            ):
+                return True
+    return False
+
 
 # Params that may carry the user's explicit "yes" — the model must set this to
 # True after the user verbally approves a high-risk action.
@@ -249,7 +321,7 @@ CONFIRM_MESSAGE = (
 # cannot fabricate tokens (they are secrets), and each token is single-use and
 # bound to the exact (tool, sanitized args) fingerprint of the blocked call.
 
-_pending_tokens: dict[str, str] = {}
+_pending_tokens: dict[str, tuple[str, float]] = {}
 _token_lock = threading.Lock()
 _TOKEN_TTL_SECONDS = 600
 _screen_ocr_consent_granted = False
@@ -271,14 +343,23 @@ def _grant_screen_ocr_consent() -> None:
 def _fingerprint(name: str, args: dict | None) -> str:
     """Canonical fingerprint of a blocked call, so a token can't be replayed
     against a different tool or different arguments."""
-    safe = sanitize(name, args or {})
+    exact_args = {
+        key: value
+        for key, value in (args or {}).items()
+        if key not in {CONFIRM_PARAM, CONFIRM_TOKEN_PARAM}
+    }
     if name == "whatsapp_call":
         for key in ("contact_name", "owner_name"):
             if args and key in args:
-                safe[f"{key}_fingerprint"] = hashlib.sha256(
+                exact_args[f"{key}_fingerprint"] = hashlib.sha256(
                     str(args[key]).encode("utf-8")
                 ).hexdigest()
-    return json.dumps({"name": name, "args": safe}, sort_keys=True, default=str)
+    return json.dumps(
+        {"name": name, "args": exact_args},
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
 
 
 def issue_confirmation_token(name: str, args: dict | None) -> str:
@@ -286,7 +367,7 @@ def issue_confirmation_token(name: str, args: dict | None) -> str:
     approves. Called only when the gate blocks a HIGH-risk tool."""
     token = secrets.token_urlsafe(24)
     with _token_lock:
-        _pending_tokens[token] = _fingerprint(name, args)
+        _pending_tokens[token] = (_fingerprint(name, args), time.monotonic())
     return token
 
 
@@ -297,8 +378,11 @@ def redeem_confirmation_token(name: str, args: dict | None, token: str) -> bool:
     if not token:
         return False
     with _token_lock:
-        expected = _pending_tokens.pop(token, None)
-    if expected is None:
+        entry = _pending_tokens.pop(token, None)
+    if entry is None:
+        return False
+    expected, issued_at = entry
+    if time.monotonic() - issued_at >= _TOKEN_TTL_SECONDS:
         return False
     if expected != _fingerprint(name, args):
         return False
@@ -309,6 +393,8 @@ def classify(name: str, args: dict | None) -> Risk:
     """Return the risk level for a concrete tool call (name + args)."""
     args = args or {}
     action = str(args.get("action", "")).lower().strip()
+    if _contains_sensitive_file_path(name, args):
+        return Risk.HIGH
     if name == "screen_process":
         if str(args.get("angle", "screen")).lower().strip() == "local_vision":
             return Risk.LOW
@@ -317,6 +403,52 @@ def classify(name: str, args: dict | None) -> Risk:
         action = action.replace(" ", "_").replace("-", "_")
         if not action and args.get("description"):
             return Risk.HIGH
+    if name == "browser_control":
+        if str(args.get("persistent_session_id", "")).strip():
+            return Risk.HIGH
+        target = " ".join(
+            str(args.get(key, ""))
+            for key in ("text", "description", "selector")
+        ).casefold()
+        sensitive_action = re.compile(
+            r"\b(pay|payment|purchase|buy|checkout|order|send|submit|publish|"
+            r"download|télécharger|"
+            r"delete|remove|confirm|subscribe|unsubscribe|transfer|payer|"
+            r"acheter|payer|commande|envoyer|soumettre|publier|supprimer|"
+            r"confirmer|abonner|transférer)\b",
+            re.IGNORECASE,
+        )
+        if action in {"click", "type", "press", "fill_form"} and sensitive_action.search(target):
+            return Risk.HIGH
+        if action == "click" and re.search(
+            r"\b[\w.-]+\.(?:exe|msi|zip|7z|rar|pdf|docx?|xlsx?|pptx?|"
+            r"png|jpe?g|txt|csv|dmg|apk)\b",
+            target,
+            re.IGNORECASE,
+        ):
+            return Risk.HIGH
+        if action == "press" and str(args.get("key", "")).casefold() in {
+            "enter", "numpadenter",
+        }:
+            return Risk.HIGH
+        if action == "fill_form":
+            fields = args.get("fields", [])
+            labels = []
+            if isinstance(fields, dict):
+                labels = [str(key) for key in fields]
+            elif isinstance(fields, list):
+                labels = [
+                    str(field.get("selector", field.get("name", "")))
+                    for field in fields
+                    if isinstance(field, dict)
+                ]
+            if re.search(
+                r"password|passcode|secret|api[\s_-]*key|token|credit[\s_-]*card|"
+                r"card[\s_-]*number|bank|security[\s_-]*code",
+                " ".join(labels),
+                re.IGNORECASE,
+            ):
+                return Risk.HIGH
         if action in {
             "type_text", "write_on_screen", "type", "write", "press_key",
             "screenshot", "take_screenshot", "capture_screen",
@@ -365,6 +497,34 @@ def describe(name: str, args: dict | None) -> str:
     args = args or {}
     action = str(args.get("action", "")).lower().strip()
 
+    if name == "terminal_control":
+        if action in {"run", "start"}:
+            from agent.terminal_agent import command_risk
+            category = command_risk(str(args.get("command", "")))
+            from agent.secrets import detect_sensitive_data
+            command = str(args.get("command", "")).strip()
+            display_command = (
+                "[contains sensitive-looking values; inspect it locally]"
+                if detect_sensitive_data(command)
+                else command[:300]
+            )
+            return (
+                f"execute a {category} command in the authorized project workspace "
+                f"as the current user: {display_command}"
+            )
+        if action == "stop":
+            return "stop the specifically identified NIANG-managed process"
+        return f"inspect terminal process {action or 'state'}"
+    if name == "project_execution":
+        if action == "start":
+            return (
+                f"start the detected project in the authorized workspace "
+                f"({args.get('path', '.')}) and verify its health"
+            )
+        if action == "stop":
+            return "stop the specifically identified NIANG-managed project process"
+        return f"{action or 'inspect'} the project in the authorized workspace"
+
     if name == "whatsapp_call" and action in {"connect", "join"}:
         contact = str(args.get("contact_name", "")).strip() or "the manually selected contact"
         return (
@@ -385,6 +545,18 @@ def describe(name: str, args: dict | None) -> str:
         if action in {"screenshot", "copy", "user_data"}:
             return f"read potentially private computer data ({action})"
         return f"control or inspect the Windows interface ({action or 'unspecified action'})"
+    if name == "windows_diagnostics":
+        category = action or str(args.get("category") or "overview")
+        return (
+            f"collect the '{category}' Windows diagnostic report locally and share its "
+            "privacy-limited metrics with Gemini; no commands are downloaded or installed"
+        )
+    if name == "windows_repair":
+        from actions.windows_repair import repair_description
+        try:
+            return repair_description(action)
+        except ValueError:
+            return "attempt an unsupported Windows repair; execution will be refused"
     if name == "screen_process":
         source = str(args.get("angle", "screen")).lower()
         if source == "local_vision":
@@ -418,6 +590,11 @@ def describe(name: str, args: dict | None) -> str:
 
     if name == "file_controller":
         target = args.get("name") or args.get("path") or "item"
+        if _contains_sensitive_file_path(name, args):
+            return (
+                "read or modify a file that appears to contain credentials or "
+                "private keys; its contents may be sent to the AI model"
+            )
         verbs = {
             "delete": f"delete {target}",
             "move": f"move {target}",
@@ -461,6 +638,17 @@ def describe(name: str, args: dict | None) -> str:
     if name == "browser_control" and action == "submit_form":
         target = args.get("text") or args.get("selector") or "the current form"
         return f"submit the form using {target}; this may save or change website data"
+    if name == "browser_control" and str(args.get("persistent_session_id", "")).strip():
+        return "reuse a named browser session, sharing its cookies and site storage across missions"
+    if name == "send_message":
+        recipient = args.get("receiver", args.get("recipient", args.get("to", "recipient")))
+        message = args.get("message_text", args.get("message", args.get("text", "")))
+        return f"send a message to {recipient}: {str(message)[:240]}"
+    if name == "browser_control" and action in {"download", "handle_dialog"}:
+        return "download a file or accept a browser dialog"
+    if name == "browser_control" and action in {"click", "type", "press", "fill_form"}:
+        target = args.get("text") or args.get("description") or "the requested page control"
+        return f"perform a sensitive browser action on {str(target)[:100]}"
 
     if name == "workspace_write_file":
         return f"create or replace {args.get('path', 'a file')} inside the configured workspace"
@@ -472,6 +660,16 @@ def describe(name: str, args: dict | None) -> str:
         return (
             f"run the approved {args.get('check', 'project')} check in the configured "
             "workspace as the current Windows user"
+        )
+    if name == "terminal_control":
+        return (
+            f"{action} a command/process in the authorized workspace; command text "
+            "is omitted from logs"
+        )
+    if name == "project_execution":
+        return (
+            f"{action} a detected project in the authorized workspace; "
+            "process IDs refer only to NIANG-managed child processes"
         )
 
     if name == "smart_home_control":
@@ -497,14 +695,19 @@ def sanitize(name: str, args: dict | None) -> dict:
     safe = {}
     for k, v in args.items():
         lk = str(k).lower()
-        if (
+        action = str(args.get("action", "")).lower()
+        if name == "browser_control" and action in {"type", "fill_form"} and lk in {
+            "text", "value", "fields",
+        }:
+            safe[k] = "[browser input omitted]"
+        elif (
             name in {
                 "workspace_write_file", "workspace_edit_file",
-                "workspace_apply_patch",
+                "workspace_apply_patch", "terminal_control",
             }
-            and lk in {"content", "find", "replace", "patch"}
+            and lk in {"content", "find", "replace", "patch", "command"}
         ):
-            safe[k] = "[source content redacted]"
+            safe[k] = "[command omitted]" if lk == "command" else "[source content redacted]"
         elif (
             name in {"computer_control", "computer_settings", "screen_process"}
             and lk in {"text", "value", "description", "expected", "path", "image", "title"}

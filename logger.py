@@ -107,6 +107,16 @@ def log_tool(name, args, result=None, error=None):
         log(line, level="INFO")
         return
 
+    if is_private_tool_data(name):
+        action = (args or {}).get("action", "operation")
+        line = f"ACTION  tool={name}  action={action}  details=[omitted]"
+        if error is not None:
+            line += "  => ERROR: details omitted"
+        elif result is not None:
+            line += "  => [private result omitted]"
+        log(line, level="INFO")
+        return
+
     safe = _redact(args)
     summary = " ".join(str(v) for v in safe.values())[:200]
     line = f"ACTION  tool={name}  args={summary}"
@@ -115,6 +125,22 @@ def log_tool(name, args, result=None, error=None):
     elif result is not None:
         line += f"  => {str(result)[:200]}"
     log(line, level="INFO")
+
+
+_PRIVATE_TOOL_DATA = frozenset({
+    "file_controller", "workspace_read_file", "workspace_search",
+    "workspace_list_files", "workspace_write_file", "workspace_edit_file",
+    "workspace_apply_patch", "workspace_run_check",
+    "read_pdf", "pdf_qa", "read_document", "document_qa",
+    "search_documents", "analyze_data", "clipboard", "send_message", "gmail",
+    "drive", "calendar", "recall_memory", "computer_control",
+    "computer_settings", "screen_process", "whatsapp_call",
+    "windows_diagnostics", "windows_repair", "system_status", "pc_health",
+})
+
+
+def is_private_tool_data(name: str) -> bool:
+    return name.startswith("workspace_") or name in _PRIVATE_TOOL_DATA
 
 
 # Keys whose values are masked in logs (defense-in-depth: even callers that

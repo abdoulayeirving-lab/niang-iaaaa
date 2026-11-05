@@ -121,9 +121,12 @@ class KaizumiUI:
         sh = self.root.winfo_screenheight()
         W  = min(sw, 1000)
         H  = min(sh, 840)
+        if sw < 1100 or sh < 760:
+            W = min(max(sw - 40, 720), 980)
+            H = min(max(sh - 60, 560), 820)
         self.root.geometry(f"{W}x{H}+{(sw-W)//2}+{(sh-H)//2}")
         self.root.configure(bg="#000000")
-        self.root.minsize(640, 480)
+        self.root.minsize(520, 420)
 
         self.W = W
         self.H = H
@@ -174,6 +177,24 @@ class KaizumiUI:
         self._batt_ts      = 0.0
 
         self.on_text_command = None
+        self.on_agent_start = None
+        self.on_agent_cancel = None
+        self.on_application_close = None
+        self._agent_window = None
+        self._agent_task_id = None
+        self._agent_history_task_id = None
+        self._agent_history_count = 0
+        self._agent_screenshot_path = None
+        self._agent_screenshot_image = None
+        self._agent_refresh_after = None
+        self._diagnostics_window = None
+        self._diagnostics_output = None
+        self._diagnostics_status = None
+        self._diagnostics_busy = False
+        self._diagnostics_cancel_event = None
+        self._diagnostics_last_report = None
+        self._diagnostics_buttons = []
+        self._diagnostics_stop_button = None
         self.on_files_selected = None
         self.on_clear_documents = None
         self.on_voiceover_requested = None
@@ -355,6 +376,8 @@ class KaizumiUI:
         self._deck_title(self._right_deck, "VISION DECK", self.col["acc2"])
 
         self._deck_label(self._left_deck, "QUICK ACTIONS")
+        self._deck_button(self._left_deck, "AUTONOMOUS AGENT", "__open_agent__")
+        self._deck_button(self._left_deck, "DIAGNOSTIC PC", "__open_pc_diagnostics__")
         self._deck_button(self._left_deck, "VISION ARCADE", "__open_arcade__")
         for label, command in [
             ("DAILY BRIEFING", "give me my daily briefing"),
@@ -481,6 +504,12 @@ class KaizumiUI:
             ).start()
 
     def _deck_command(self, command, mode=None):
+        if command == "__open_agent__":
+            self.open_agent_panel()
+            return
+        if command == "__open_pc_diagnostics__":
+            self.open_pc_diagnostics_panel()
+            return
         if command == "__open_preview__":
             self.open_vision_preview()
             return
@@ -498,6 +527,746 @@ class KaizumiUI:
         self.write_log("SYS: Command deck → " + command)
         if self.on_text_command:
             threading.Thread(target=self.on_text_command, args=(command,), daemon=True).start()
+
+    def open_agent_panel(self):
+        if self._agent_window is not None and self._agent_window.winfo_exists():
+            self._agent_window.deiconify()
+            self._agent_window.lift()
+            self._refresh_agent_panel()
+            return
+
+        window = tk.Toplevel(self.root)
+        window.title("NIANG IA - Agent autonome")
+        window.geometry("760x700")
+        window.minsize(620, 560)
+        window.configure(bg=self.col["bg"])
+        self._agent_window = window
+
+        tk.Label(
+            window,
+            text="MISSION",
+            anchor="w",
+            bg=self.col["bg"],
+            fg=self.col["pri"],
+            font=("Consolas", 10, "bold"),
+        ).pack(fill="x", padx=12, pady=(12, 4))
+        self._agent_mission = tk.Text(
+            window,
+            height=3,
+            wrap="word",
+            bg=self.col["input"],
+            fg=self.col["text"],
+            insertbackground=self.col["text"],
+            relief="flat",
+        )
+        self._agent_mission.pack(fill="x", padx=12)
+
+        controls = tk.Frame(window, bg=self.col["bg"])
+        controls.pack(fill="x", padx=12, pady=8)
+        self._agent_start_button = tk.Button(
+            controls,
+            text="▶ DEMARRER",
+            command=self._start_agent_mission,
+            bg=self.col["input"],
+            fg=self.col["green"],
+            relief="flat",
+        )
+        self._agent_start_button.pack(side="left", padx=(0, 6))
+        self._agent_stop_button = tk.Button(
+            controls,
+            text="■ ARRETER",
+            command=self._stop_agent_mission,
+            bg=self.col["input"],
+            fg=self.col["red"],
+            relief="flat",
+            state="disabled",
+        )
+        self._agent_stop_button.pack(side="left")
+        self._agent_resume_button = tk.Button(
+            controls,
+            text="↻ REPRENDRE",
+            command=self._resume_agent_mission,
+            bg=self.col["input"],
+            fg=self.col["pri"],
+            relief="flat",
+            state="disabled",
+        )
+        self._agent_resume_button.pack(side="left", padx=(6, 0))
+        self._agent_status_label = tk.Label(
+            controls,
+            text="Inactif",
+            anchor="w",
+            bg=self.col["bg"],
+            fg=self.col["text"],
+            font=("Consolas", 9),
+        )
+        self._agent_status_label.pack(side="left", fill="x", expand=True, padx=10)
+
+        tk.Label(
+            window,
+            text="ETAPES ET ACTIONS (le navigateur Playwright MCP s'ouvre dans sa propre fenetre)",
+            anchor="w",
+            bg=self.col["bg"],
+            fg=self.col["pri"],
+            font=("Consolas", 9, "bold"),
+        ).pack(fill="x", padx=12, pady=(4, 3))
+        self._agent_history_text = tk.Text(
+            window,
+            height=18,
+            wrap="word",
+            state="disabled",
+            bg=self.col["panel"],
+            fg=self.col["text"],
+            relief="flat",
+        )
+        self._agent_history_text.pack(fill="both", expand=True, padx=12)
+        self._agent_screenshot_label = tk.Label(
+            window,
+            text="Aucune capture d'ecran",
+            bg=self.col["panel"],
+            fg=self.col["dim"],
+        )
+        self._agent_screenshot_label.pack(fill="x", padx=12, pady=5)
+        screenshot_controls = tk.Frame(window, bg=self.col["bg"])
+        screenshot_controls.pack(fill="x", padx=12, pady=(0, 8))
+        tk.Button(
+            screenshot_controls,
+            text="OUVRIR LA CAPTURE",
+            command=self._open_agent_screenshot,
+            bg=self.col["input"],
+            fg=self.col["text"],
+            relief="flat",
+        ).pack(side="left")
+
+        tk.Label(
+            window,
+            text="RAPPORT FINAL",
+            anchor="w",
+            bg=self.col["bg"],
+            fg=self.col["pri"],
+            font=("Consolas", 9, "bold"),
+        ).pack(fill="x", padx=12, pady=(4, 3))
+        self._agent_report_text = tk.Text(
+            window,
+            height=5,
+            wrap="word",
+            state="disabled",
+            bg=self.col["panel"],
+            fg=self.col["text"],
+            relief="flat",
+        )
+        self._agent_report_text.pack(fill="x", padx=12, pady=(0, 12))
+
+        def close_panel():
+            if self._agent_refresh_after is not None:
+                try:
+                    self.root.after_cancel(self._agent_refresh_after)
+                except tk.TclError:
+                    pass
+                self._agent_refresh_after = None
+            self._agent_window = None
+            window.destroy()
+
+        window.protocol("WM_DELETE_WINDOW", close_panel)
+        self._refresh_agent_panel()
+
+    def open_pc_diagnostics_panel(self):
+        if self._diagnostics_window is not None and self._diagnostics_window.winfo_exists():
+            self._diagnostics_window.deiconify()
+            self._diagnostics_window.lift()
+            return
+
+        window = tk.Toplevel(self.root)
+        window.title("NIANG IA - Diagnostic PC")
+        window.geometry("860x720")
+        window.minsize(680, 560)
+        window.configure(bg=self.col["bg"])
+        self._diagnostics_window = window
+
+        tk.Label(
+            window,
+            text="DIAGNOSTIC PC",
+            anchor="w",
+            bg=self.col["bg"],
+            fg=self.col["pri"],
+            font=("Consolas", 12, "bold"),
+        ).pack(fill="x", padx=12, pady=(12, 4))
+        tk.Label(
+            window,
+            text=(
+                "Les analyses ne réparent pas Windows et ne touchent pas aux fichiers personnels. "
+                "SFC/DISM peuvent écrire dans leurs journaux Windows. Les réparations exigent "
+                "une confirmation et ne contournent jamais l’UAC."
+            ),
+            anchor="w",
+            justify="left",
+            wraplength=820,
+            bg=self.col["bg"],
+            fg=self.col["dim"],
+            font=("Consolas", 9),
+        ).pack(fill="x", padx=12, pady=(0, 8))
+
+        actions_frame = tk.Frame(window, bg=self.col["bg"])
+        actions_frame.pack(fill="x", padx=12)
+        actions = [
+            ("Analyser mon PC", "overview"),
+            ("Vérifier les pilotes", "drivers"),
+            ("Vérifier Windows", "windows"),
+            ("Diagnostiquer les performances", "performance"),
+            ("Détecter les erreurs", "errors"),
+            ("Vérifier le réseau", "network"),
+            ("Vérifier les services", "services"),
+            ("Vérifier les fichiers système", "system_files"),
+        ]
+        self._diagnostics_buttons = []
+        for index, (label, category) in enumerate(actions):
+            button = tk.Button(
+                actions_frame,
+                text=label,
+                command=lambda selected=category: self._start_pc_diagnostic(selected),
+                bg=self.col["input"],
+                fg=self.col["text"],
+                relief="flat",
+                wraplength=190,
+            )
+            button.grid(row=index // 4, column=index % 4, sticky="ew", padx=3, pady=3)
+            self._diagnostics_buttons.append(button)
+        for column in range(4):
+            actions_frame.grid_columnconfigure(column, weight=1)
+
+        controls = tk.Frame(window, bg=self.col["bg"])
+        controls.pack(fill="x", padx=12, pady=(5, 8))
+        tk.Button(
+            controls,
+            text="Proposer des réparations",
+            command=self._show_pc_repair_options,
+            bg=self.col["input"],
+            fg=self.col["acc2"],
+            relief="flat",
+        ).pack(side="left", padx=(0, 6))
+        tk.Button(
+            controls,
+            text="Historique des diagnostics",
+            command=self._show_pc_diagnostic_history,
+            bg=self.col["input"],
+            fg=self.col["text"],
+            relief="flat",
+        ).pack(side="left")
+        tk.Button(
+            controls,
+            text="Historique des réparations",
+            command=self._show_pc_repair_history,
+            bg=self.col["input"],
+            fg=self.col["acc2"],
+            relief="flat",
+        ).pack(side="left", padx=(6, 0))
+        self._diagnostics_stop_button = tk.Button(
+            controls,
+            text="Arrêter",
+            command=self._stop_pc_diagnostic,
+            bg=self.col["input"],
+            fg=self.col["red"],
+            relief="flat",
+            state="disabled",
+        )
+        self._diagnostics_stop_button.pack(side="right")
+
+        repair_frame = tk.Frame(window, bg=self.col["panel"])
+        repair_frame.pack(fill="x", padx=12, pady=(0, 8))
+        tk.Label(
+            repair_frame,
+            text="RÉPARATIONS DISPONIBLES — chaque action demande une confirmation",
+            anchor="w",
+            bg=self.col["panel"],
+            fg=self.col["acc2"],
+            font=("Consolas", 9, "bold"),
+        ).pack(fill="x", padx=8, pady=(6, 3))
+        for label, action in (
+            ("Vider le cache DNS", "flush_dns"),
+            ("Réparer les fichiers système (SFC)", "sfc_scannow"),
+            ("Réparer le magasin Windows (DISM)", "dism_restore_health"),
+        ):
+            button = tk.Button(
+                repair_frame,
+                text=label,
+                command=lambda selected=action: self._request_pc_repair(selected),
+                bg=self.col["input"],
+                fg=self.col["text"],
+                relief="flat",
+            )
+            button.pack(side="left", padx=4, pady=(2, 6))
+            self._diagnostics_buttons.append(button)
+
+        self._diagnostics_status = tk.Label(
+            window,
+            text="Prêt — aucune analyse en cours.",
+            anchor="w",
+            bg=self.col["bg"],
+            fg=self.col["text"],
+            font=("Consolas", 9),
+        )
+        self._diagnostics_status.pack(fill="x", padx=12, pady=(0, 5))
+
+        output_frame = tk.Frame(window, bg=self.col["panel"])
+        output_frame.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        output_scroll = tk.Scrollbar(output_frame)
+        output_scroll.pack(side="right", fill="y")
+        self._diagnostics_output = tk.Text(
+            output_frame,
+            wrap="word",
+            state="disabled",
+            bg=self.col["panel"],
+            fg=self.col["text"],
+            relief="flat",
+            yscrollcommand=output_scroll.set,
+        )
+        self._diagnostics_output.pack(side="left", fill="both", expand=True)
+        output_scroll.configure(command=self._diagnostics_output.yview)
+
+        def close_panel():
+            self._stop_pc_diagnostic()
+            self._diagnostics_window = None
+            self._diagnostics_output = None
+            self._diagnostics_status = None
+            self._diagnostics_stop_button = None
+            self._diagnostics_buttons = []
+            window.destroy()
+
+        window.protocol("WM_DELETE_WINDOW", close_panel)
+
+    def _set_pc_diagnostics_output(self, text):
+        output = self._diagnostics_output
+        if output is None:
+            return
+        output.configure(state="normal")
+        output.delete("1.0", "end")
+        output.insert("1.0", text)
+        output.configure(state="disabled")
+
+    def _set_pc_diagnostics_busy(self, busy, status):
+        self._diagnostics_busy = busy
+        if self._diagnostics_status is not None:
+            self._diagnostics_status.configure(text=status)
+        for button in self._diagnostics_buttons:
+            button.configure(state="disabled" if busy else "normal")
+        if self._diagnostics_stop_button is not None:
+            self._diagnostics_stop_button.configure(state="normal" if busy else "disabled")
+
+    def _start_pc_diagnostic(self, category):
+        if self._diagnostics_busy:
+            return
+        from actions.windows_diagnostics import run_diagnostic
+
+        cancel_event = threading.Event()
+        self._diagnostics_cancel_event = cancel_event
+        self._set_pc_diagnostics_busy(True, f"Analyse en cours : {category}…")
+        self._set_pc_diagnostics_output("Collecte des résultats locaux…")
+
+        def worker():
+            try:
+                report = run_diagnostic(category, cancel_event=cancel_event)
+                text = json.dumps(report, ensure_ascii=False, indent=2)
+                status = (
+                    f"Analyse terminée — état : {report['status']}; "
+                    f"{len(report['findings'])} problème(s) candidat(s)."
+                )
+                self.root.after(0, lambda: self._finish_pc_diagnostics(report, text, status))
+            except Exception as exc:
+                message = str(exc)
+                self.root.after(0, lambda: self._finish_pc_diagnostics_error(message))
+
+        threading.Thread(target=worker, name="NIANG-PC-Diagnostics", daemon=True).start()
+
+    def _finish_pc_diagnostics(self, report, text, status):
+        self._diagnostics_last_report = report
+        self._diagnostics_cancel_event = None
+        self._set_pc_diagnostics_busy(False, status)
+        self._set_pc_diagnostics_output(text)
+
+    def _finish_pc_diagnostics_error(self, message):
+        self._diagnostics_cancel_event = None
+        self._set_pc_diagnostics_busy(False, "Analyse interrompue ou en erreur.")
+        self._set_pc_diagnostics_output(f"Analyse non terminée : {message}")
+
+    def _stop_pc_diagnostic(self):
+        event = self._diagnostics_cancel_event
+        if event is not None:
+            event.set()
+            if self._diagnostics_status is not None:
+                self._diagnostics_status.configure(
+                    text="Arrêt demandé — une commande déjà lancée peut nécessiter un instant pour se fermer."
+                )
+
+    def _show_pc_repair_options(self):
+        report = self._diagnostics_last_report
+        if not report:
+            messagebox.showinfo(
+                "Proposer des réparations",
+                "Lancez d’abord une analyse. Les résultats servent à déterminer si une réparation est appropriée.",
+                parent=self._diagnostics_window,
+            )
+            return
+        proposals = report.get("repair_proposals") or []
+        summary = "\n".join(
+            f"• {item.get('severity', 'inconnu').upper()} — {item.get('problem', '')}\n"
+            f"  Confiance : {item.get('confidence', 'suspicion')} "
+            f"({item.get('confidence_score', 0)} / 100), récurrence : "
+            f"{item.get('recurrence_count', 0)}\n"
+            f"  Cause possible : {item.get('likely_cause', 'non déterminée')}\n"
+            f"  Réparation proposée : {item.get('proposed_repair', 'aucune')}\n"
+            f"  Risque : {item.get('risk', 'inconnu')}\n"
+            f"  Autorisation individuelle obligatoire : oui"
+            for item in proposals[:8]
+        )
+        if not summary:
+            summary = "Aucun problème candidat n’a été identifié par ces contrôles."
+        messagebox.showinfo(
+            "Proposition — aucune réparation automatique",
+            summary
+            + "\n\nRéparations fixes disponibles : cache DNS, SFC ou DISM. "
+            "Aucune ne sera lancée automatiquement. Choisissez une action distincte "
+            "et confirmez son exécution; SFC/DISM exigent un processus déjà administrateur "
+            "et un point de restauration vérifié.",
+            parent=self._diagnostics_window,
+        )
+
+    def _request_pc_repair(self, action):
+        if self._diagnostics_busy:
+            return
+        from actions.windows_repair import perform_repair, repair_description
+
+        description = repair_description(action)
+        extra_risk = (
+            "\n\nCette opération peut modifier des composants ou fichiers Windows. "
+            "Elle peut durer longtemps. Si NIANG IA n’est pas déjà exécuté avec les "
+            "permissions nécessaires, elle s’arrêtera sans ouvrir l’UAC."
+            if action != "flush_dns"
+            else "\n\nCette opération efface le cache DNS local; elle ne télécharge rien."
+        )
+        if not messagebox.askyesno(
+            "Autoriser la réparation ?",
+            description + extra_risk + "\n\nAutorisez-vous cette opération précise ?",
+            parent=self._diagnostics_window,
+        ):
+            return
+
+        cancel_event = threading.Event()
+        self._diagnostics_cancel_event = cancel_event
+        self._set_pc_diagnostics_busy(True, f"Réparation en cours : {action}…")
+        self._set_pc_diagnostics_output(
+            "Commande autorisée par l’utilisateur. Vérification du résultat en cours…"
+        )
+
+        def worker():
+            try:
+                result = perform_repair(
+                    action,
+                    approved=True,
+                    cancel_event=cancel_event,
+                    diagnostic_associated=str(
+                        (self._diagnostics_last_report or {}).get("timestamp_utc", "")
+                    )[:200],
+                    problem=action,
+                )
+                text = json.dumps(result, ensure_ascii=False, indent=2)
+                status = (
+                    f"Réparation : {result.get('status', 'état inconnu')} — "
+                    f"{result.get('reason') or 'consultez le résultat et sa vérification.'}"
+                )
+                self.root.after(0, lambda: self._finish_pc_diagnostics_error(status))
+                self.root.after(0, lambda: self._set_pc_diagnostics_output(text))
+            except Exception as exc:
+                message = str(exc)
+                self.root.after(0, lambda: self._finish_pc_diagnostics_error(message))
+
+        threading.Thread(target=worker, name="NIANG-PC-Repair", daemon=True).start()
+
+    def _show_pc_repair_history(self):
+        from actions.windows_repair_history import repair_history_text
+
+        try:
+            text = repair_history_text()
+        except Exception as exc:
+            messagebox.showerror(
+                "Historique des réparations",
+                f"Impossible de lire l’historique local : {exc}",
+                parent=self._diagnostics_window,
+            )
+            return
+        self._set_pc_diagnostics_output(
+            text if text != "[]" else "Aucun réparation enregistrée."
+        )
+
+    def _show_pc_diagnostic_history(self):
+        from actions.windows_diagnostics import history_text
+
+        try:
+            text = history_text()
+        except Exception as exc:
+            messagebox.showerror(
+                "Historique des diagnostics",
+                f"Impossible de lire l’historique local : {exc}",
+                parent=self._diagnostics_window,
+            )
+            return
+        self._set_pc_diagnostics_output(text if text != "[]" else "Aucun diagnostic enregistré.")
+
+    def _start_agent_mission(self):
+        goal = self._agent_mission.get("1.0", "end-1c").strip()
+        if not goal:
+            self._agent_status_label.configure(text="Saisissez une mission.")
+            return
+        if self._agent_task_id:
+            self._agent_status_label.configure(text="Une mission est deja suivie.")
+            return
+        if not self.on_agent_start:
+            self._agent_status_label.configure(text="Le moteur d'agent n'est pas disponible.")
+            return
+        try:
+            self._agent_task_id = self.on_agent_start(goal)
+            self._agent_history_task_id = None
+            self._agent_history_count = 0
+            self._agent_start_button.configure(state="disabled")
+            self._agent_stop_button.configure(state="normal")
+            self.write_log("SYS: Mission agent demarree.")
+            self._refresh_agent_panel()
+        except Exception as exc:
+            self._agent_status_label.configure(text=f"Echec: {str(exc)[:160]}")
+            self.write_log(f"ERR: Demarrage de l'agent impossible: {exc}")
+
+    def _stop_agent_mission(self):
+        task_id = self._agent_task_id
+        if not task_id or not self.on_agent_cancel:
+            return
+        try:
+            if self.on_agent_cancel(task_id):
+                self._agent_status_label.configure(text="Arret demande...")
+            else:
+                self._agent_status_label.configure(text="Aucune mission active.")
+        except Exception as exc:
+            self._agent_status_label.configure(text=f"Arret impossible: {str(exc)[:120]}")
+            self.write_log(f"ERR: Arret de l'agent impossible: {exc}")
+
+    def _resume_agent_mission(self):
+        from tkinter import messagebox
+
+        try:
+            from agent.task_queue import get_queue
+            queue = get_queue()
+            previous = queue.latest_interrupted()
+            if not previous:
+                self._agent_status_label.configure(text="Aucune mission interrompue.")
+                return
+            history = previous.get("action_history", [])
+            approved = messagebox.askyesno(
+                "Reprise avec verification",
+                "La mission interrompue sera replanifiee. Les actions precedentes "
+                "ne seront pas rejouees automatiquement, mais leurs effets peuvent "
+                "deja exister. NIANG IA devra verifier l'etat actuel; une action "
+                "impossible a verifier doit etre arretee.\n\n"
+                f"Actions enregistrees : {len(history)}\n"
+                "Continuer ?",
+                parent=self.root,
+            )
+            if not approved:
+                return
+            self._agent_task_id = queue.resume_interrupted(
+                previous["task_id"],
+                user_confirmed=True,
+                approval_callback=self.request_agent_approval,
+            )
+            self._agent_history_task_id = None
+            self._agent_history_count = 0
+            self._agent_start_button.configure(state="disabled")
+            self._agent_stop_button.configure(state="normal")
+            self._agent_resume_button.configure(state="disabled")
+            self._agent_status_label.configure(text="Reprise en cours...")
+            self._refresh_agent_panel()
+        except Exception as exc:
+            self._agent_status_label.configure(
+                text=f"Reprise impossible: {str(exc)[:120]}"
+            )
+            self.write_log(f"ERR: Reprise de l'agent impossible: {exc}")
+
+    def request_agent_approval(self, tool: str, parameters: dict, description: str) -> bool:
+        from tkinter import messagebox
+
+        prompt = (
+            f"Action sensible :\n\n{description}\n\n"
+            "Autoriser cette action unique ? Les autres actions sensibles "
+            "demanderont une nouvelle confirmation."
+        )
+        if threading.current_thread() is self._main_thread:
+            return messagebox.askyesno(
+                "Confirmation requise - NIANG IA",
+                prompt,
+                parent=self.root,
+            )
+
+        decision = {"approved": False}
+        completed = threading.Event()
+
+        def ask():
+            try:
+                decision["approved"] = messagebox.askyesno(
+                    "Confirmation requise - NIANG IA",
+                    prompt,
+                    parent=self.root,
+                )
+            except Exception as exc:
+                self.write_log(f"ERR: Demande de confirmation impossible: {exc}")
+            finally:
+                completed.set()
+
+        try:
+            self.root.after(0, ask)
+        except tk.TclError as exc:
+            self.write_log(f"ERR: Interface fermee pendant la confirmation: {exc}")
+            return False
+        if not completed.wait(timeout=300):
+            self.write_log(f"ERR: Confirmation expiree pour {tool}; action refusee.")
+            return False
+        return decision["approved"]
+
+    def _refresh_agent_panel(self):
+        window = self._agent_window
+        if window is None or not window.winfo_exists():
+            return
+        task_id = self._agent_task_id
+        try:
+            from agent.task_queue import get_queue
+            interrupted = get_queue().latest_interrupted()
+        except Exception as exc:
+            interrupted = None
+            self._agent_status_label.configure(
+                text=f"Lecture des missions interrompues impossible: {str(exc)[:80]}"
+            )
+        self._agent_resume_button.configure(
+            state=(
+                "normal"
+                if interrupted and not task_id
+                else "disabled"
+            )
+        )
+        if not task_id and interrupted:
+            interrupted_id = interrupted["task_id"]
+            self._agent_status_label.configure(
+                text=f"Mission interrompue [{interrupted_id}] - verification requise."
+            )
+            if self._agent_history_task_id != interrupted_id:
+                self._agent_history_task_id = interrupted_id
+                self._agent_history_count = 0
+                self._agent_history_text.configure(state="normal")
+                self._agent_history_text.delete("1.0", tk.END)
+                self._agent_report_text.configure(state="normal")
+                self._agent_report_text.delete("1.0", tk.END)
+                self._agent_report_text.insert(
+                    tk.END,
+                    f"Mission : {interrupted.get('goal', '')}\n"
+                    f"{interrupted.get('error', '')}",
+                )
+                self._agent_report_text.configure(state="disabled")
+            history = interrupted.get("action_history", [])
+            for action in history[self._agent_history_count:]:
+                self._agent_history_text.configure(state="normal")
+                self._agent_history_text.insert(
+                    tk.END,
+                    f"[{action.get('number', '?')}] "
+                    f"{action.get('status', 'unknown').upper()} "
+                    f"{action.get('tool', '')}: "
+                    f"{action.get('description', '')}\n"
+                    f"{action.get('result', '')}\n\n",
+                )
+                self._agent_history_text.see(tk.END)
+                self._agent_history_text.configure(state="disabled")
+                self._show_agent_screenshot(action.get("result", ""))
+            self._agent_history_count = len(history)
+        if task_id:
+            try:
+                from agent.task_queue import get_queue
+                status = get_queue().get_status(task_id)
+            except Exception as exc:
+                self._agent_status_label.configure(
+                    text=f"Lecture de l'etat impossible: {str(exc)[:100]}"
+                )
+                status = None
+            if status:
+                phase = status.get("phase", status.get("status", "running"))
+                progress = f"{status.get('completed_steps', 0)}/{status.get('total_steps', 0)}"
+                current = status.get("current_step", "")
+                self._agent_status_label.configure(
+                    text=f"{status.get('status', phase)} {progress} {current}"[:180]
+                )
+                if self._agent_history_task_id != task_id:
+                    self._agent_history_task_id = task_id
+                    self._agent_history_count = 0
+                    self._agent_history_text.configure(state="normal")
+                    self._agent_history_text.delete("1.0", tk.END)
+                    self._agent_history_text.configure(state="disabled")
+                    self._agent_report_text.configure(state="normal")
+                    self._agent_report_text.delete("1.0", tk.END)
+                    self._agent_report_text.configure(state="disabled")
+                history = status.get("action_history", [])
+                for action in history[self._agent_history_count:]:
+                    self._agent_history_text.configure(state="normal")
+                    self._agent_history_text.insert(
+                        tk.END,
+                        f"[{action.get('number', '?')}] {action.get('status', 'unknown').upper()} "
+                        f"{action.get('tool', '')}: {action.get('description', '')}\n"
+                        f"{action.get('result', '')}\n\n",
+                    )
+                    self._agent_history_text.see(tk.END)
+                    self._agent_history_text.configure(state="disabled")
+                    self._show_agent_screenshot(action.get("result", ""))
+                self._agent_history_count = len(history)
+
+                if status.get("status") in {
+                    "completed", "partial", "failed", "action_unknown", "cancelled", "interrupted",
+                }:
+                    result = status.get("result") or status.get("error") or "Mission terminee."
+                    self._agent_report_text.configure(state="normal")
+                    self._agent_report_text.delete("1.0", tk.END)
+                    self._agent_report_text.insert(tk.END, str(result))
+                    self._agent_report_text.configure(state="disabled")
+                    self._agent_start_button.configure(state="normal")
+                    self._agent_stop_button.configure(state="disabled")
+                    self._agent_task_id = None
+            elif self._agent_task_id:
+                self._agent_status_label.configure(text="Mission introuvable.")
+        if self._agent_window is not None and self._agent_window.winfo_exists():
+            self._agent_refresh_after = self.root.after(500, self._refresh_agent_panel)
+
+    def _show_agent_screenshot(self, result: str):
+        import re
+
+        match = re.search(r"Screenshot saved:\s*(.+)", str(result))
+        if not match:
+            return
+        path = Path(match.group(1).strip().strip('"'))
+        if not path.is_file():
+            return
+        try:
+            image = Image.open(path).convert("RGB")
+            image.thumbnail((560, 220), Image.Resampling.LANCZOS)
+            self._agent_screenshot_image = ImageTk.PhotoImage(image)
+            self._agent_screenshot_label.configure(
+                image=self._agent_screenshot_image,
+                text=str(path),
+                compound="top",
+            )
+            self._agent_screenshot_path = path
+        except Exception as exc:
+            self.write_log(f"ERR: Apercu de capture impossible: {exc}")
+
+    def _open_agent_screenshot(self):
+        path = self._agent_screenshot_path
+        if not path or not path.is_file():
+            self.write_log("ERR: Aucune capture d'ecran disponible.")
+            return
+        try:
+            os.startfile(str(path))
+        except (AttributeError, OSError) as exc:
+            self.write_log(f"ERR: Ouverture de capture impossible: {exc}")
 
     def _refresh_deck_status(self):
         if hasattr(self, "_vision_status"):
@@ -1374,6 +2143,11 @@ class KaizumiUI:
             self.write_log(f"ERR: Enregistrement audio impossible : {exc}")
 
     def _close_application(self):
+        if self.on_application_close:
+            try:
+                self.on_application_close()
+            except Exception as exc:
+                self.write_log(f"ERR: Nettoyage des services agent impossible : {exc}")
         self._stop_voiceover()
         if self._voiceover_path:
             try:
@@ -1433,7 +2207,7 @@ class KaizumiUI:
             highlightthickness=1,
             highlightbackground=self.col["mid"],
         )
-        self._update_button.place(x=294, y=BTN_Y, width=140, height=32)
+        self._update_button.place(x=min(294, max(180, self.W - 210)), y=BTN_Y, width=140, height=32)
 
     def _draw_silent_button(self):
         c = getattr(self, "_silent_canvas", None)
@@ -1547,25 +2321,31 @@ class KaizumiUI:
 
     def _relayout(self):
         W, H = self.W, self.H
-        LW = max(320, W - 440) if W >= 900 else int(W * 0.72)
-        LH = int(H * 0.11)
-        LOG_Y = H - LH - int(H * 0.13)
+        is_compact = W < 900 or H < 700
+        if is_compact:
+            LW = max(260, int(W * 0.82))
+            LH = max(70, int(H * 0.12))
+            LOG_Y = max(30, H - LH - 90)
+        else:
+            LW = max(320, W - 440)
+            LH = int(H * 0.11)
+            LOG_Y = H - LH - int(H * 0.13)
         self.log_frame.place(x=(W - LW) // 2, y=LOG_Y, width=LW, height=LH)
         INPUT_Y = LOG_Y + LH + 6
         x0    = (W - LW) // 2
-        BTN_W = 62
-        CLR_W = 62
-        INP_W = LW - BTN_W - CLR_W - 8
-        self._input_text.place(x=x0, y=INPUT_Y, width=INP_W, height=46)
-        self._clear_btn.place(x=x0 + INP_W + 4, y=INPUT_Y, width=CLR_W, height=46)
+        BTN_W = 56 if is_compact else 62
+        CLR_W = 56 if is_compact else 62
+        INP_W = max(140, LW - BTN_W - CLR_W - 8)
+        self._input_text.place(x=x0, y=INPUT_Y, width=INP_W, height=40 if is_compact else 46)
+        self._clear_btn.place(x=x0 + INP_W + 4, y=INPUT_Y, width=CLR_W, height=40 if is_compact else 46)
         self._send_btn.place(x=x0 + INP_W + CLR_W + 8, y=INPUT_Y,
-                             width=BTN_W, height=46)
-        footer_y = min(H - 38, INPUT_Y + 52)
+                             width=BTN_W, height=40 if is_compact else 46)
+        footer_y = min(H - 38, INPUT_Y + 48)
         self._mute_canvas.place(x=18, y=footer_y)
         if getattr(self, "_silent_canvas", None) is not None:
             self._silent_canvas.place(x=136, y=footer_y)
-        self._update_button.place(x=294, y=footer_y, width=140, height=32)
-        if W >= 900:
+        self._update_button.place(x=min(294, max(180, W - 210)), y=footer_y, width=126 if is_compact else 140, height=32)
+        if W >= 900 and not is_compact:
             self._left_deck.place(x=16, y=96, width=184, height=max(260, H - 210))
             self._right_deck.place(x=W - 216, y=96, width=200, height=max(260, H - 210))
         else:

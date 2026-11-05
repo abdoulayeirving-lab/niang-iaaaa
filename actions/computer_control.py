@@ -276,6 +276,71 @@ def _find_ui_elements() -> list[dict]:
     return elements
 
 
+def _find_accessible_control(description: str, roles: set[str]):
+    requested = str(description or "").strip().casefold()
+    if not requested:
+        raise ValueError("An accessible control name is required.")
+    if platform.system() != "Windows":
+        raise RuntimeError("UI Automation is currently supported on Windows only.")
+    try:
+        from pywinauto import Desktop
+    except ImportError as exc:
+        raise RuntimeError("pywinauto is required for Windows UI Automation.") from exc
+
+    window = Desktop(backend="uia").window(handle=_active_window()["handle"])
+    candidates = [
+        control for control in window.descendants()
+        if (control.element_info.control_type or "") in roles
+        and control.window_text().strip()
+    ]
+    exact = [
+        control for control in candidates
+        if control.window_text().strip().casefold() == requested
+    ]
+    matches = exact or [
+        control for control in candidates
+        if requested in control.window_text().strip().casefold()
+    ]
+    if len(matches) != 1:
+        reason = "not found" if not matches else f"ambiguous ({len(matches)} matches)"
+        raise RuntimeError(
+            f"Accessible control {description!r} is {reason}. "
+            "Inspect the current window's UI Automation controls before retrying."
+        )
+    return matches[0]
+
+
+def _uia_click(description: str) -> dict:
+    control = _find_accessible_control(
+        description,
+        {"Button", "Hyperlink", "MenuItem", "TabItem", "CheckBox", "RadioButton"},
+    )
+    control.click_input()
+    return {
+        "control": control.window_text().strip(),
+        "role": control.element_info.control_type,
+        "dispatched": True,
+    }
+
+
+def _uia_type(description: str, text: str) -> dict:
+    control = _find_accessible_control(description, {"Edit", "Document", "ComboBox"})
+    try:
+        control.set_edit_text(str(text))
+    except (AttributeError, NotImplementedError):
+        control.click_input()
+        control.type_keys(str(text), with_spaces=True)
+    try:
+        verified = control.get_value() == str(text)
+    except (AttributeError, NotImplementedError):
+        verified = control.window_text() == str(text)
+    return {
+        "control": control.window_text().strip() or description,
+        "dispatched": True,
+        "verified": verified,
+    }
+
+
 def _wait_for_visual_change(timeout: float = 10, threshold: float = 3.0) -> dict:
     _ensure_pyautogui()
     timeout = float(timeout)
@@ -772,6 +837,8 @@ def computer_control(
       screen_info   : Screen resolution, scaling, and attached monitors
       active_window : Current foreground window title and bounds
       find_ui_elements : Accessible controls from the active Windows window
+      uia_click     : Click a uniquely named accessible control in the active window
+      uia_type      : Type into a uniquely named accessible edit control
       wait_for_visual_change : Wait for a real screen change
       screen_monitor_start : Sample screen changes locally at a 30 ms target (no uploads)
       screen_monitor_status : Show local monitor state and change counts only
@@ -794,6 +861,14 @@ def computer_control(
     _log(f"[ComputerControl] Action: {action}  Params: {_safe_params(parameters)}")
 
     try:
+        if action.startswith("window_") or action == "list_windows":
+            from agent.windows_desktop import windows_desktop_control
+
+            desktop_parameters = dict(parameters or {})
+            if action == "list_windows":
+                desktop_parameters["action"] = "window_list"
+            return windows_desktop_control(desktop_parameters)
+
         if action == "screen_monitor_start":
             from actions.local_screen_monitor import start_monitor
             result = start_monitor()
@@ -949,6 +1024,27 @@ def computer_control(
         elif action in {"find_ui_elements", "ui_elements"}:
             elements = _find_ui_elements()
             return _action_result(action, executed=True, result=elements, verified=True)
+
+        elif action == "uia_click":
+            result = _uia_click(parameters.get("description", ""))
+            return _action_result(
+                action,
+                executed=True,
+                result=result,
+                verified=bool(result["dispatched"]),
+            )
+
+        elif action == "uia_type":
+            result = _uia_type(
+                parameters.get("description", ""),
+                parameters.get("text", ""),
+            )
+            return _action_result(
+                action,
+                executed=True,
+                result=result,
+                verified=bool(result["verified"]),
+            )
 
         elif action == "wait_for_visual_change":
             result = _wait_for_visual_change(

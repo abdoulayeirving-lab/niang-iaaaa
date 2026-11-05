@@ -733,9 +733,8 @@ def _detect_action(description: str) -> dict:
     Herhangi bir dilde çalışır.
     Döner: {"action": str, "value": optional}
     """
-    import google.generativeai as genai
-    genai.configure(api_key=_get_api_key())
-    model = genai.GenerativeModel("gemini-3.5-flash-lite")
+    from api_keys import GeminiModel
+    model = GeminiModel("gemini-3.5-flash-lite")
 
     available = ", ".join(sorted(ACTION_MAP.keys())) + ", volume_set, brightness_set, app_volume, mute_app, type_text, write_on_screen, reload_n, press_key"
 

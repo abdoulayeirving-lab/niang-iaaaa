@@ -53,6 +53,7 @@ external APIs. It is **free to self-host** — you only need a Gemini API key
 | 📱 **Android app** | Standalone Gemini voice/chat assistant with optional Bluetooth control of the Windows PC |
 | 💬 **Telegram control** | Remote-control from any Telegram chat (text + voice notes) |
 | 🕐 **Guardian** | Watches battery, RAM, CPU, disk, and temperature; alerts on thresholds |
+| 🩺 **PC diagnostics** | Read-only Windows health checks with separately confirmed, allow-listed repairs |
 | 🗓️ **Google integration** | Gmail, Calendar, Drive via OAuth (device flow) |
 | 🧩 **50+ tools** | Web search, reminders, PDF/Word/Excel/PowerPoint, YouTube, weather, translation, and more |
 | 📄 **Smart analysis** | Drag/drop files, ask questions about documents/pages, compare sources, and create real Gemini TTS WAV voice-overs |
@@ -62,8 +63,8 @@ external APIs. It is **free to self-host** — you only need a Gemini API key
 | 🔇 **Hotkeys** | `F4` mute, `F5` cycle theme |
 | ⌨️ **Keyboard input** | Type commands in the UI instead of speaking |
 | 🗓️ **In-app scheduler** | "Remind me in 10 minutes" — fires with speech + phone notification |
-| 🧠 **Agent mode** | Background `agent/` planner-executor handles multi-step tasks |
-| 🔒 **Safety gate** | Central risk model — HIGH-risk actions need your verbal confirmation |
+| 🧠 **Agent mode** | Mission panel, bounded planner/executor, action history, stop, and reports |
+| 🔒 **Safety gate** | Central risk model — HIGH-risk actions need explicit user approval |
 
 ---
 
@@ -73,6 +74,7 @@ external APIs. It is **free to self-host** — you only need a Gemini API key
 - **Python 3.11 or 3.12** (the Windows launcher supports these versions)
 - A microphone and speakers
 - Bluetooth adapter (optional — for the Android app)
+- Node.js 18+ and npm/npx (optional, for Microsoft Playwright MCP browser mode)
 - A free [Gemini API key](https://aistudio.google.com/apikey)
 - Internet access and several GB of free disk space for the installer to set up Ollama and the `qwen3-vl:2b` model
 - [Tesseract OCR](https://github.com/UB-Mannheim/tesseract/wiki) for optional screen-text recognition (standard install location or `PATH`)
@@ -85,7 +87,12 @@ For a Windows install, run `START_NIANG_IA.bat`. It installs the bundled
 Python 3.12.10 automatically when Python 3.11 or 3.12 is not already available,
 then creates a virtual environment and installs app dependencies. Installing
 Python works offline; dependency and Playwright browser installation on first
-launch requires internet. The Windows installer also offers an optional
+launch requires internet. If the default microphone or speaker changes when a
+headset is connected or removed, NIANG IA resolves the Windows default device
+before comparing it to the active stream, and reopens audio only when the
+resolved device changes. Voice playback uses a dedicated output thread and the
+audio driver's preferred buffer size to reduce stuttering.
+The Windows installer also offers an optional
 personalization page for the name NIANG IA should use and its default response
 language. A following setup page links directly to Google AI Studio to create a
 Gemini API key and accepts pasting it during installation. The name and language
@@ -218,6 +225,90 @@ hosts; do not allowlist hosts you do not control. Screenshots are saved to
 `Downloads`. The managed browser cannot inspect tabs in unrelated browser
 windows.
 
+### Autonomous agent mode
+
+Open **AUTONOMOUS AGENT** in the command deck to submit a natural-language
+mission, monitor its plan and action history, stop it, review its final report,
+and view browser screenshots. The existing planner/executor is reused: plans
+are bounded to five steps, missions to 20 tool actions by default, and failed
+browser or desktop actions can trigger bounded retries and replanning. Mission
+limits are configurable below. The stop button requests cancellation; computer
+input is also stopped where supported and held mouse buttons are released.
+
+Interactive browser actions use an isolated Microsoft Playwright MCP browser
+when available; it does not reuse the user's Chrome/Edge profile or cookies.
+Each agent mission gets an isolated browser context with separate cookies and
+site storage. A mission can explicitly request a named persistent session when
+the user asks for it; the sensitive-action confirmation gate still applies.
+Persistent sessions exist only in memory and end when NIANG IA closes. Do not
+enter credentials on sites unless the mission requires it and you approve the
+action.
+NIANG IA pins the server to `@playwright/mcp@0.0.84` and uses the Python MCP
+client from `requirements.txt`. Node.js 18 or newer, npm/npx on `PATH`, and an
+internet connection for the first server launch are required. If MCP or Node
+is unavailable, unsupported browser actions use NIANG IA's Python Playwright
+browser through the same URL-policy proxy.
+
+MCP browser HTTP(S) traffic is routed through a loopback-only NIANG IA policy proxy.
+It resolves each destination once, rejects private/reserved addresses for
+requests, redirects, and subresources, and connects to the validated address.
+`NIANG_IA_BROWSER_ALLOWED_DOMAINS` and
+`NIANG_IA_BROWSER_BLOCKED_DOMAINS` are comma-separated public-domain policies.
+`NIANG_IA_BROWSER_ALLOWED_LOCAL_HOSTS` is a separate, exact-host exception
+for trusted local development services; it weakens that network protection.
+The MCP server's origin flags alone are not treated as a security boundary.
+Snapshots are untrusted page data, and typed/form values are omitted from MCP
+action results. Temporary page snapshots and console logs created by each MCP
+action are removed; requested screenshots and approved downloads remain in
+`Downloads\NIANG_IA_Agent`. These user-visible files are not automatically
+deleted. Sensitive file access, file overwrites, form
+submissions, downloads, dialogs, external messages, and recognized
+purchase/delete actions require a one-time approval.
+
+The stop control prevents subsequent agent actions and interrupts supported
+desktop input. A synchronous action already in progress may finish before it
+can be interrupted; when its result is unknown, the agent will not dispatch a
+replacement action. Mission goals and action history are stored encrypted with
+Windows DPAPI in `%LOCALAPPDATA%\NIANG IA\agent_missions.db`. After an
+application restart, unfinished missions are marked interrupted and are never
+replayed automatically. The mission panel displays the recovered history and
+requires explicit user confirmation before creating a recovery mission. An
+action whose result was uncertain is treated as potentially completed; the
+agent is instructed to verify current state before continuing. This cannot
+guarantee that every external side effect can be detected.
+
+Install the project's Python dependencies and browser as usual, then install
+Node.js separately if it is not already available:
+
+```powershell
+python setup.py
+node --version
+npm --version
+```
+
+The MCP server is downloaded by `npx` on first use; it is not bundled into the
+Windows installer. To run the ordinary focused tests:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_playwright_mcp.py tests\test_browser_network_proxy.py tests\test_agent_approval.py -q
+```
+
+The live browser and desktop scenarios are opt-in because they use the public
+internet, create a temporary folder on the Desktop, and open Notepad. Run them
+on Windows with:
+
+```powershell
+$env:NIANG_IA_RUN_MANUAL_AGENT_TESTS = "1"
+.\.venv\Scripts\python.exe -m pytest tests\test_autonomous_agent_manual.py -q
+Remove-Item Env:\NIANG_IA_RUN_MANUAL_AGENT_TESTS
+```
+
+The manual suite covers Google search (which may be skipped if Google
+rate-limits the network), three-site comparison, filling a demo form without
+submitting it, Notepad UI Automation, temporary Desktop-folder creation,
+reading a file, and recovery after blocked navigation. It does not send forms
+or messages, make purchases, or delete user files.
+
 ### Project workspace tools
 
 For code tasks, set `NIANG_IA_WORKSPACE_ROOT` to the one project directory
@@ -347,6 +438,96 @@ files).
     "cooldown": 3600          // seconds between repeated alerts
 }
 ```
+
+### PC diagnostics and assisted repair
+
+The **DIAGNOSTIC PC** panel runs local, read-only checks for CPU/RAM/disk,
+Windows version and update status, GPU and device status, storage health when
+the controller exposes it, services, network adapters, recent event summaries,
+and system-file integrity. It reuses `psutil` and fixed PowerShell/CIM queries;
+it does not download tools, install updates, or execute model-supplied commands.
+Temperature and SMART data may be unavailable on some hardware. Network
+diagnostics report adapter state but do not probe external services. SFC/DISM
+integrity checks do not repair Windows, but Windows may append their standard
+diagnostic records to its own CBS/DISM logs.
+
+The report omits process command lines, executable paths, serial numbers, IP
+addresses, Windows event messages, and personal file contents. A short
+diagnostic summary is kept locally at
+`%LOCALAPPDATA%\NIANG IA\diagnostics\history.json`; diagnostic tool results are
+not written to application logs. When the autonomous agent requests a report,
+the one-time confirmation explains that the privacy-limited report will be
+shared with Gemini.
+
+Repairs are separate, fixed operations: DNS cache flush, `sfc /scannow`, and
+`DISM /Online /Cleanup-Image /RestoreHealth`. Each requires a separate human
+confirmation. SFC/DISM require NIANG IA to already be running elevated and a
+verified restore point; if either requirement is unavailable, the repair is
+not started. NIANG IA never requests an administrator password or bypasses
+UAC. It does not disable Defender/antivirus, change the registry, uninstall
+drivers, delete system files, or reset Windows. The SFC/DISM repair commands
+and their verification can take a long time and may have partial effects if
+stopped; inspect the reported final state before retrying.
+
+### Autonomous mission limits and recovery
+
+These settings are optional environment variables; defaults are shown.
+
+| Variable | Default | Supported range / behavior |
+|----------|---------|-----------------------------|
+| `NIANG_IA_AGENT_ACTION_TIMEOUT_S` | `180` | 1-1800 seconds per tool action |
+| `NIANG_IA_WINDOWS_ACTION_TIMEOUT_S` | `4200` | 30-7200 seconds per Windows diagnostic/repair tool action |
+| `NIANG_IA_GEMINI_TIMEOUT_S` | `180` | 1-1800 seconds for each Gemini request; quota-key retries share this budget |
+| `NIANG_IA_AGENT_MISSION_TIMEOUT_S` | `1800` | 1-86400 seconds per mission |
+| `NIANG_IA_AGENT_MAX_ACTIONS` | `20` | 1-1000 dispatched actions |
+| `NIANG_IA_AGENT_MAX_ATTEMPTS_PER_STEP` | `3` | 1-10 attempts |
+| `NIANG_IA_AGENT_MAX_REPLANS` | `2` | 0-10 replans |
+| `NIANG_IA_ARTIFACT_RETENTION_DAYS` | `30` | 1-3650 days for terminal mission records |
+| `NIANG_IA_SENSITIVE_MISSION_POLICY` | `block` | `block` or `confirm` before a sensitive mission is sent to Gemini |
+
+The mission deadline also applies to autonomous Windows repairs. Increase
+`NIANG_IA_AGENT_MISSION_TIMEOUT_S` when a long repair needs more time; stopping
+an active repair can leave Windows in a partially changed state.
+
+### Supervised terminal and project execution
+
+Set `NIANG_IA_WORKSPACE_ROOT` to the exact project folder before using
+`terminal_control` or `project_execution`. Inspection is read-only. Starting a
+project or running a command requires explicit confirmation; commands run as
+the current account. The selected working directory is workspace-confined, but
+the subprocess is **not** an operating-system sandbox and can still access
+other files or the network if its command does so. Do not approve commands you
+have not reviewed.
+
+`terminal_control` supports PowerShell on Windows and Bash when installed.
+Foreground commands have a 1-1800 second timeout; started processes can be
+queried by their NIANG-issued ID for state and bounded logs, or stopped. The
+process environment omits API-key variables, and obviously secret-bearing
+output is redacted. Cancellation and shutdown target only processes started by
+NIANG; terminating a wrapper cannot guarantee that every third-party child
+process exits on all platforms.
+
+`project_execution inspect` reads known manifests and reports framework,
+package manager, scripts, and dependency presence without executing project
+code or installing dependencies. Supervised launch currently supports an
+existing Node `dev`/`start`/`serve` script and a Python `main.py` entry point.
+It avoids duplicate NIANG-managed launches, refuses an occupied expected web
+port when project ownership cannot be established, and reports a local URL
+only after an HTTP health probe. Python desktop applications are distinguished
+from web servers; a desktop launch is marked verified only when a window for
+that process is visible through Windows UI Automation.
+
+The browser continues to block private addresses by default. It may visit
+`127.0.0.1` only on the exact port of a currently running, NIANG-managed
+project preview; this exception does not authorize other local ports or
+redirect destinations. Screenshots remain local browser artifacts and are not
+sent to Gemini by Windows screen analysis.
+
+The secret detector is heuristic and cannot identify every credential. New API
+keys entered through the application are protected with Windows DPAPI in
+`%LOCALAPPDATA%\NIANG IA\api_keys.dpapi`. Existing `config/api_keys.json` and
+installer key files remain readable for compatibility and are not rewritten
+automatically. Do not treat this compatibility behavior as encryption.
 
 ### Smart home (`smart_home.json`)
 

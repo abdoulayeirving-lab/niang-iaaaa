@@ -1,5 +1,5 @@
 #define AppName "NIANG IA"
-#define AppVersion "1.0.21"
+#define AppVersion "1.0.24"
 #define SourceDir AddBackslash(SourcePath) + "dist\NIANG_IA_" + AppVersion
 
 [Setup]
@@ -113,15 +113,8 @@ procedure InitializeWizard;
 var
   ContentWidth, ContentLeft: Integer;
 begin
-  ExistingProfile :=
-    FileExists(ExpandConstant('{app}\memory\long_term.json')) or
-    FileExists(ExpandConstant('{app}\memory\installer_profile.json'));
-  ExistingApiConfig :=
-    FileExists(ExpandConstant('{app}\config\installer_gemini_key.txt')) or
-    FileExists(ExpandConstant('{app}\config\api_keys.json'));
-
   PersonalizationPage :=
-    CreateCustomPage(wpWelcome, '', '');
+    CreateCustomPage(wpSelectDir, '', '');
 
   ContentWidth := PersonalizationPage.Surface.Width - ScaleX(48);
   ContentLeft := ScaleX(24);
@@ -294,6 +287,23 @@ begin
     ScaleY(10);
   ApiKeyInfo.Width := ContentWidth;
   ApiKeyInfo.Height := ScaleY(36);
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+var
+  AppDir: string;
+begin
+  Result := True;
+  if CurPageID <> wpSelectDir then
+    Exit;
+
+  AppDir := AddBackslash(WizardDirValue);
+  ExistingProfile :=
+    FileExists(AppDir + 'memory\long_term.json') or
+    FileExists(AppDir + 'memory\installer_profile.json');
+  ExistingApiConfig :=
+    FileExists(AppDir + 'config\installer_gemini_key.txt') or
+    FileExists(AppDir + 'config\api_keys.json');
 end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;

@@ -64,10 +64,9 @@ def _ask_gemini_for_desktop_action(task: str) -> str:
     Asks Gemini to generate safe Python/pyautogui code
     to accomplish a desktop-related task.
     """
-    import google.generativeai as genai
+    from api_keys import GeminiModel
 
-    genai.configure(api_key=_get_api_key())
-    model = genai.GenerativeModel("gemini-2.5-flash")
+    model = GeminiModel("gemini-2.5-flash")
 
     desktop = str(_get_desktop())
 

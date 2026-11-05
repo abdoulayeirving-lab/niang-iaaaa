@@ -252,10 +252,9 @@ def _get_transcript(video_id: str) -> str | None:
 
 
 def _summarize_with_gemini(transcript: str, video_url: str) -> str:
-    import google.generativeai as genai
+    from api_keys import GeminiModel
 
-    genai.configure(api_key=_get_api_key())
-    model = genai.GenerativeModel(
+    model = GeminiModel(
         model_name="gemini-2.5-flash",
         system_instruction=(
             "You are NIANG IA, a sharp and efficient AI assistant. "

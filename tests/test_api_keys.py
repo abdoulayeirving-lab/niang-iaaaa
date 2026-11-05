@@ -21,6 +21,13 @@ class ApiKeysTest(unittest.TestCase):
     def setUp(self):
         self._old_path = api_keys.CONFIG_PATH
         self._old_installer_key_path = api_keys.INSTALLER_KEY_PATH
+        self._old_secure_keys_path = api_keys.SECURE_KEYS_PATH
+        secure_dir = tempfile.TemporaryDirectory()
+        api_keys.SECURE_KEYS_PATH = Path(secure_dir.name) / "api_keys.dpapi"
+        self.addCleanup(secure_dir.cleanup)
+        self._env_loader_patch = mock.patch.object(api_keys, "load_env_file")
+        self._env_loader_patch.start()
+        self.addCleanup(self._env_loader_patch.stop)
         fd, key_path = tempfile.mkstemp(suffix=".txt")
         os.close(fd)
         os.remove(key_path)
@@ -38,6 +45,7 @@ class ApiKeysTest(unittest.TestCase):
     def tearDown(self):
         api_keys.CONFIG_PATH = self._old_path
         api_keys.INSTALLER_KEY_PATH = self._old_installer_key_path
+        api_keys.SECURE_KEYS_PATH = self._old_secure_keys_path
         for name in ("KAIZUMI_GEMINI_API_KEY", "KAIZUMI_GEMINI_API_KEYS"):
             if name == "KAIZUMI_GEMINI_API_KEY" and self._old_env_key is not None:
                 os.environ[name] = self._old_env_key
@@ -100,6 +108,10 @@ class ApiKeysTest(unittest.TestCase):
 
         self.assertEqual(api_keys.add_key("AQexample-new-key-format"), 1)
         self.assertEqual(api_keys.get_all_keys(), ["AQexample-new-key-format"])
+        self.assertNotIn(
+            b"AQexample-new-key-format",
+            api_keys.SECURE_KEYS_PATH.read_bytes(),
+        )
 
     def test_api_key_without_legacy_prefix_reaches_gemini_client(self):
         self._write_config({})
@@ -119,6 +131,27 @@ class ApiKeysTest(unittest.TestCase):
         create_client.assert_called_once_with(api_key="AQexample-new-key-format")
         client.models.generate_content.assert_called_once_with(
             model="gemini-test", contents="test request", config=None
+        )
+
+    def test_gemini_model_uses_google_genai_and_preserves_system_instruction(self):
+        response = object()
+        with mock.patch(
+            "api_keys.generate_with_retry",
+            return_value=response,
+        ) as generate:
+            result = api_keys.GeminiModel(
+                "gemini-test",
+                system_instruction="Return JSON only.",
+            ).generate_content("safe prompt")
+
+        self.assertIs(result, response)
+        config = generate.call_args.kwargs["config"]
+        self.assertEqual(config.system_instruction, "Return JSON only.")
+        generate.assert_called_once_with(
+            "gemini-test",
+            "safe prompt",
+            config=config,
+            timeout_ms=180000,
         )
 
 

@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -35,8 +36,72 @@ class RiskClassificationTest(unittest.TestCase):
             safety.Risk.HIGH,
         )
 
+    def test_overwriting_files_requires_confirmation(self):
+        for action in ("write", "create_file"):
+            with self.subTest(action=action):
+                args = {"action": action, "path": "documents", "name": "report.txt"}
+                self.assertEqual(safety.classify("file_controller", args), safety.Risk.HIGH)
+                self.assertTrue(safety.needs_confirmation("file_controller", args))
+
+    def test_sensitive_file_access_requires_confirmation(self):
+        for tool, args in (
+            ("file_controller", {"action": "read", "path": "home", "name": ".env"}),
+            ("file_controller", {"action": "write", "path": r"C:\Users\pc", "name": "api_keys.json"}),
+            ("read_document", {"path": "documents/client_secret.json"}),
+            ("pdf_qa", {"file_path": "private/signing-key.pem"}),
+        ):
+            with self.subTest(tool=tool, args=args):
+                self.assertEqual(safety.classify(tool, args), safety.Risk.HIGH)
+                self.assertTrue(safety.needs_confirmation(tool, args))
+
+    def test_browser_download_links_require_confirmation_when_clicked(self):
+        for target in ("Download report", "installer.exe", "archive.zip"):
+            with self.subTest(target=target):
+                args = {"action": "click", "description": target}
+                self.assertEqual(safety.classify("browser_control", args), safety.Risk.HIGH)
+                self.assertTrue(safety.needs_confirmation("browser_control", args))
+
+    def test_persistent_browser_session_requires_confirmation(self):
+        args = {
+            "action": "state",
+            "persistent_session_id": "work-profile",
+        }
+        self.assertEqual(safety.classify("browser_control", args), safety.Risk.HIGH)
+        self.assertTrue(safety.needs_confirmation("browser_control", args))
+
     def test_terminal_is_high(self):
         self.assertEqual(safety.classify("cmd_control", {"command": "dir"}), safety.Risk.HIGH)
+
+    def test_workspace_terminal_commands_and_project_start_require_confirmation(self):
+        for tool, args in (
+            ("terminal_control", {"action": "run", "command": "python -m pytest"}),
+            ("terminal_control", {"action": "start", "command": "npm run dev"}),
+            ("project_execution", {"action": "start", "path": "."}),
+        ):
+            with self.subTest(tool=tool, args=args):
+                self.assertEqual(safety.classify(tool, args), safety.Risk.HIGH)
+                self.assertTrue(safety.needs_confirmation(tool, args))
+
+        self.assertEqual(
+            safety.classify("terminal_control", {"action": "logs", "process_id": "id"}),
+            safety.Risk.LOW,
+        )
+        self.assertEqual(
+            safety.classify("project_execution", {"action": "stop", "process_id": "id"}),
+            safety.Risk.MEDIUM,
+        )
+
+    def test_terminal_confirmation_describes_command_but_audit_sanitization_omits_it(self):
+        command = "python -m pytest tests"
+
+        self.assertIn(command, safety.describe(
+            "terminal_control",
+            {"action": "run", "command": command},
+        ))
+        self.assertNotIn(
+            command,
+            str(safety.sanitize("terminal_control", {"action": "run", "command": command})),
+        )
 
     def test_gmail_send_high_read_low(self):
         self.assertEqual(safety.classify("gmail", {"action": "send"}), safety.Risk.HIGH)
@@ -78,6 +143,20 @@ class RiskClassificationTest(unittest.TestCase):
             safety.classify("browser_control", {"action": "fill_form"}),
             safety.Risk.MEDIUM,
         )
+
+    def test_external_messages_and_enter_to_submit_require_confirmation(self):
+        message = {
+            "receiver": "Ada",
+            "message_text": "Please review the attached report.",
+        }
+        self.assertEqual(safety.classify("send_message", message), safety.Risk.HIGH)
+        self.assertTrue(safety.needs_confirmation("send_message", message))
+        self.assertIn("Ada", safety.describe("send_message", message))
+        self.assertIn("attached report", safety.describe("send_message", message))
+
+        enter = {"action": "press", "key": "Enter"}
+        self.assertEqual(safety.classify("browser_control", enter), safety.Risk.HIGH)
+        self.assertTrue(safety.needs_confirmation("browser_control", enter))
 
     def test_workspace_reads_are_low_risk_and_writes_or_checks_require_confirmation(self):
         for name in ("workspace_list_files", "workspace_read_file", "workspace_search"):
@@ -246,6 +325,25 @@ class ConfirmationTokenTest(unittest.TestCase):
             safety.needs_confirmation("desktop_control", {"action": "reset"},
                                       confirm=True, confirm_token=tok)
         )
+        workspace_token = safety.issue_confirmation_token(
+            "workspace_edit_file",
+            {"path": "safe.txt", "find": "alpha", "replace": "beta"},
+        )
+        self.assertTrue(safety.redeem_confirmation_token(
+            "workspace_edit_file",
+            {"path": "safe.txt", "find": "other", "replace": "beta"},
+            workspace_token,
+        ) is False)
+
+    def test_confirmation_token_expires_after_ttl(self):
+        with mock.patch.object(safety.time, "monotonic", side_effect=[1000.0, 1600.0]):
+            token = safety.issue_confirmation_token(
+                "cmd_control", {"command": "dir"}
+            )
+            redeemed = safety.redeem_confirmation_token(
+                "cmd_control", {"command": "dir"}, token
+            )
+        self.assertFalse(redeemed)
 
     def test_low_risk_never_asks_for_token(self):
         self.assertFalse(
@@ -300,6 +398,36 @@ class SanitizeTest(unittest.TestCase):
         self.assertNotIn("student name", output.getvalue())
         self.assertNotIn("Private Student", output.getvalue())
         self.assertNotIn("93841", output.getvalue())
+
+    def test_file_contents_and_private_results_are_not_written_to_logs(self):
+        import logger
+
+        output = StringIO()
+        with redirect_stdout(output):
+            logger.log_tool(
+                "file_controller",
+                {
+                    "action": "write",
+                    "path": r"C:\Users\pc\Documents\private.txt",
+                    "content": "synthetic-private-marker",
+                },
+                result="synthetic-private-marker",
+            )
+            logger.log_tool(
+                "read_document",
+                {"path": "notes.txt"},
+                result="synthetic-document-marker",
+            )
+
+        logged = output.getvalue()
+        for marker in (
+            "synthetic-private-marker",
+            "synthetic-document-marker",
+            "private.txt",
+            "Documents",
+        ):
+            self.assertNotIn(marker, logged)
+        self.assertIn("details=[omitted]", logged)
 
     def test_computer_use_content_is_redacted_from_logs(self):
         computer_args = safety.sanitize("computer_control", {

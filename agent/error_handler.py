@@ -48,10 +48,40 @@ Return ONLY valid JSON:
 }
 """
 
+def _safe_error_summary(error: str) -> str:
+    lowered = str(error).casefold()
+    if "blocked for safety" in lowered or "safety policy" in lowered:
+        return "The action was blocked by the safety policy."
+    if "timeout" in lowered or "timed out" in lowered:
+        return "The action timed out."
+    if any(term in lowered for term in ("permission", "access denied", "unauthorized")):
+        return "The action was denied by permissions."
+    if any(term in lowered for term in ("not found", "no such element", "missing element")):
+        return "The requested element or resource was not found."
+    status = re.search(r"\bhttp(?: status)?\s*[:=]?\s*(\d{3})\b", lowered)
+    if status:
+        return f"The remote server returned HTTP status {status.group(1)}."
+    if any(term in lowered for term in ("network", "connection", "dns", "net::err")):
+        return "A network connection failed."
+    if any(term in lowered for term in ("unsupported", "invalid argument", "invalid url")):
+        return "The action used an unsupported or invalid argument."
+    return "The action failed; exact details are omitted."
 
-def _get_api_key() -> str:
-    from api_keys import next_key
-    return next_key()
+
+def _safe_step_metadata(step: dict) -> tuple[str, str, bool]:
+    parameters = step.get("parameters", {})
+    action = parameters.get("action", "") if isinstance(parameters, dict) else ""
+    tool = str(step.get("tool", "unknown"))
+    action = str(action)
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", tool):
+        tool = "unknown"
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", action):
+        action = ""
+    return (
+        tool,
+        action,
+        bool(step.get("critical", False)),
+    )
 
 
 def analyze_error(
@@ -78,32 +108,31 @@ def analyze_error(
             "user_message": str
         }
     """
-    import google.generativeai as genai
+    from api_keys import GeminiModel
 
     if attempt >= max_attempts:
         print(f"[ErrorHandler] ⚠️ Max attempts reached for step {step.get('step')} — forcing replan")
         return {
             "decision":      ErrorDecision.REPLAN,
-            "reason":        f"Failed {attempt} times: {error[:100]}",
+            "reason":        f"Failed {attempt} times. {_safe_error_summary(error)}",
             "fix_suggestion": "Try a completely different approach or tool",
             "max_retries":   0,
             "user_message":  "Trying a different approach, sir."
         }
 
-    genai.configure(api_key=_get_api_key())
-    model = genai.GenerativeModel(
+    model = GeminiModel(
         model_name="gemini-3.5-flash-lite",
         system_instruction=ERROR_ANALYST_PROMPT
     )
 
+    tool, action, critical = _safe_step_metadata(step)
     prompt = f"""Failed step:
-Tool: {step.get('tool')}
-Description: {step.get('description')}
-Parameters: {json.dumps(step.get('parameters', {}), indent=2)}
-Critical: {step.get('critical', False)}
+Tool: {tool}
+Action: {action or '(unspecified)'}
+Critical: {critical}
 
-Error:
-{error[:500]}
+Error summary:
+{_safe_error_summary(error)}
 
 Attempt number: {attempt}"""
 
@@ -127,14 +156,14 @@ Attempt number: {attempt}"""
             result["decision"]     = ErrorDecision.REPLAN
             result["user_message"] = "This step is critical — finding alternative approach, sir."
 
-        print(f"[ErrorHandler] Decision: {result['decision'].value} — {result.get('reason', '')}")
+        print(f"[ErrorHandler] Recovery decision: {result['decision'].value}")
         return result
 
-    except Exception as e:
-        print(f"[ErrorHandler] ⚠️ Analysis failed: {e} — defaulting to replan")
+    except Exception:
+        print("[ErrorHandler] Recovery analysis failed; defaulting to replan.")
         return {
             "decision":       ErrorDecision.REPLAN,
-            "reason":         str(e),
+            "reason":         "Recovery analysis failed.",
             "fix_suggestion": "Try alternative approach",
             "max_retries":    1,
             "user_message":   "Encountered an issue, adjusting approach, sir."
@@ -148,19 +177,17 @@ def generate_fix(step: dict, error: str, fix_suggestion: str) -> dict:
 
     Returns a modified step dict.
     """
-    import google.generativeai as genai
+    from api_keys import GeminiModel
 
-    genai.configure(api_key=_get_api_key())
-    model = genai.GenerativeModel(model_name="gemini-2.0-flash")
+    model = GeminiModel(model_name="gemini-2.0-flash")
 
+    tool, action, _ = _safe_step_metadata(step)
     prompt = f"""A task step failed. Generate a replacement step.
 
-Original step:
-Tool: {step.get('tool')}
-Description: {step.get('description')}
-Parameters: {json.dumps(step.get('parameters', {}), indent=2)}
+Tool: {tool}
+Action: {action or '(unspecified)'}
 
-Error: {error[:300]}
+Error summary: {_safe_error_summary(error)}
 Fix suggestion: {fix_suggestion}
 
 Write a Python script that accomplishes the same goal differently.
@@ -174,7 +201,7 @@ Return ONLY the Python code, no explanation."""
         return {
             "step":        step.get("step"),
             "tool":        "code_helper",
-            "description": f"Auto-fix for: {step.get('description')}",
+            "description": f"Alternative for {tool} action",
             "parameters": {
                 "action":      "run",
                 "description": fix_suggestion,
@@ -185,13 +212,13 @@ Return ONLY the Python code, no explanation."""
             "critical":   step.get("critical", False)
         }
 
-    except Exception as e:
-        print(f"[ErrorHandler] ⚠️ Fix generation failed: {e}")
+    except Exception:
+        print("[ErrorHandler] Recovery action generation failed.")
         return {
             "step":        step.get("step"),
             "tool":        "generated_code",
-            "description": f"Fallback for: {step.get('description')}",
-            "parameters":  {"description": step.get("description", "")},
+            "description": f"Fallback for {tool} action",
+            "parameters":  {"description": f"Alternative for {tool} action"},
             "depends_on":  step.get("depends_on", []),
             "critical":    step.get("critical", False)
         }
