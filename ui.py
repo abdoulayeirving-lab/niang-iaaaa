@@ -3,7 +3,9 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 from collections import deque
 from PIL import Image, ImageTk, ImageDraw, ImageFont, ImageOps
+import tkinter.font as tkfont
 import sys
+from i18n import tr
 from pathlib import Path
 from vision.arcade import VisionArcade
 try:
@@ -26,6 +28,7 @@ INSTALLER_API_KEY_FILE = CONFIG_DIR / "installer_gemini_key.txt"
 THEME_FILE = CONFIG_DIR / "ui_theme.json"
 
 SYSTEM_NAME = "NIANG IA"
+INTRO_END   = 5.8      # seconds: end of the startup animation (click / key skips it)
 MODEL_BADGE = "NIANG IA"
 
 # ── High-DPI awareness: crisp text on 125% / 150% laptop scaling ───────────
@@ -43,16 +46,18 @@ if sys.platform == "win32":
 # ── Themes ──────────────────────────────────────────────────────────────────
 # Each theme: UI colors + RGB tuples for the orb / halos.
 THEMES = {
+    # Palette taken from the "NIANG IA – Pub 30 s" video (cyan HUD on black,
+    # glass panels rgba(0,229,255,.07), magenta chromatic glitch).
     "cyber": {
         "name": "CYBER",
-        "bg": "#000000", "pri": "#00d4ff", "mid": "#007a99",
-        "dim": "#003344", "dimmer": "#001520",
-        "acc": "#ff6600", "acc2": "#ffcc00",
-        "text": "#8ffcff", "panel": "#010c10",
-        "green": "#00ff88", "red": "#ff3333", "mutcol": "#ff3366",
-        "hdr": "#00080d", "input": "#000d12", "inp_border": "#003344",
-        "halo": (0, 212, 255), "halo_mut": (255, 30, 80),
-        "orb": (0, 65, 120), "scan2": (255, 100, 0),
+        "bg": "#000000", "pri": "#00e5ff", "mid": "#0098ab",
+        "dim": "#0a3a44", "dimmer": "#03161c",
+        "acc": "#ff2bd6", "acc2": "#7df3ff",
+        "text": "#eaffff", "panel": "#021b23",
+        "green": "#00ff9c", "red": "#ff3b55", "mutcol": "#ff3b55",
+        "hdr": "#000000", "input": "#03252e", "inp_border": "#0a6a78",
+        "halo": (0, 229, 255), "halo_mut": (255, 59, 85),
+        "orb": (0, 229, 255), "scan2": (255, 43, 214),
     },
     "ocean": {
         "name": "OCEAN",
@@ -111,6 +116,133 @@ def _save_theme_name(name: str) -> None:
         pass
 
 
+# ── Drawing helpers (video look: glass panels, rounded "pill" buttons) ──────
+def _hex_rgb(h):
+    if isinstance(h, (tuple, list)):          # theme "halo"/"scan2" are RGB tuples
+        return tuple(int(v) for v in h[:3])
+    h = h.lstrip("#")
+    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+
+def _blend(c1, c2, k):
+    """Mix two #rrggbb colours (k=0 → c1, k=1 → c2). Poor man's alpha for Tk."""
+    k = max(0.0, min(1.0, k))
+    a, b = _hex_rgb(c1), _hex_rgb(c2)
+    return "#%02x%02x%02x" % tuple(int(a[i] + (b[i] - a[i]) * k) for i in range(3))
+
+
+def _round_poly(c, x1, y1, x2, y2, r, **kw):
+    r = max(1, min(r, (x2 - x1) // 2, (y2 - y1) // 2))
+    pts = [x1 + r, y1, x1 + r, y1, x2 - r, y1, x2 - r, y1, x2, y1, x2, y1 + r,
+           x2, y1 + r, x2, y2 - r, x2, y2 - r, x2, y2, x2 - r, y2, x2 - r, y2,
+           x1 + r, y2, x1 + r, y2, x1, y2, x1, y2 - r, x1, y2 - r, x1, y1 + r,
+           x1, y1 + r, x1, y1]
+    return c.create_polygon(pts, smooth=True, **kw)
+
+
+class PillButton(tk.Canvas):
+    """Rounded glass button like the cards / CTA of the video.
+
+    style="outline": translucent cyan fill + cyan border (hover → brighter)
+    style="solid"  : filled cyan pill with dark text (the "Essayez NIANG IA" CTA)
+    Colours always come from the live theme (app.col) so theme switching works.
+    API is a subset of tk.Button: configure(text=, state=, command=).
+    """
+    _IGNORED = {"fg", "foreground", "bg", "background", "activebackground",
+                "activeforeground", "highlightbackground", "highlightcolor",
+                "relief", "borderwidth", "bd"}
+
+    def __init__(self, parent, app, text="", command=None, style="outline",
+                 anchor="center", font=("Segoe UI", 9, "bold"), height=30,
+                 radius=None, width=10):
+        tk.Canvas.__init__(self, parent, height=height, width=width,
+                           highlightthickness=0, bd=0, cursor="hand2")
+        self._app = app
+        self._text = text
+        self._command = command
+        self._style = style
+        self._anchor = anchor
+        self._font = font
+        self._radius = radius
+        self._state = "normal"
+        self._hover = False
+        self.bind("<Configure>", lambda e: self._redraw())
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+        self.bind("<ButtonRelease-1>", self._on_click)
+        self._redraw()
+
+    def configure(self, cnf=None, **kw):
+        if cnf:
+            kw.update(cnf)
+        if "text" in kw:
+            self._text = kw.pop("text")
+        if "command" in kw:
+            self._command = kw.pop("command")
+        if "state" in kw:
+            self._state = kw.pop("state")
+            tk.Canvas.configure(self, cursor="hand2" if self._state != "disabled" else "arrow")
+        for k in list(kw):
+            if k in self._IGNORED:
+                kw.pop(k)
+        if kw:
+            tk.Canvas.configure(self, **kw)
+        self._redraw()
+
+    config = configure
+
+    def refresh(self):
+        self._redraw()
+
+    def _on_enter(self, _e=None):
+        self._hover = True
+        self._redraw()
+
+    def _on_leave(self, _e=None):
+        self._hover = False
+        self._redraw()
+
+    def _on_click(self, e):
+        if self._state == "disabled" or not self._command:
+            return
+        if 0 <= e.x <= self.winfo_width() and 0 <= e.y <= self.winfo_height():
+            self._command()
+
+    def _redraw(self):
+        try:
+            if not self.winfo_exists():
+                return
+            col = self._app.col
+            w = max(self.winfo_width(), 24)
+            h = max(self.winfo_height(), 16)
+            try:
+                parent_bg = self.master.cget("bg")
+            except Exception:
+                parent_bg = col["bg"]
+            tk.Canvas.configure(self, bg=parent_bg)
+            self.delete("all")
+            hov = self._hover and self._state != "disabled"
+            if self._state == "disabled":
+                fill, border, fg = col["panel"], col["dim"], col["dim"]
+            elif self._style == "solid":
+                fill = col["text"] if hov else col["pri"]
+                border, fg = fill, "#001a20"
+            else:
+                fill = _blend(col["input"], col["pri"], .22) if hov else col["input"]
+                border = col["pri"] if hov else col["mid"]
+                fg = "#ffffff" if hov else col["text"]
+            r = self._radius if self._radius is not None else h // 2
+            _round_poly(self, 1, 1, w - 1, h - 1, r, fill=fill, outline=border, width=1)
+            if self._anchor == "w":
+                self.create_text(min(r, 14) + 6, h // 2, text=self._text, fill=fg,
+                                 font=self._font, anchor="w")
+            else:
+                self.create_text(w // 2, h // 2, text=self._text, fill=fg,
+                                 font=self._font)
+        except tk.TclError:
+            pass
+
+
 class KaizumiUI:
     def __init__(self, face_path, size=None):
         self.root = TkinterDnD.Tk() if TkinterDnD else tk.Tk()
@@ -156,10 +288,30 @@ class KaizumiUI:
         self.scan2_angle  = 180.0
         self.rings_spin   = [0.0, 120.0, 240.0]
         self.pulse_r      = [0.0, self.FACE_SZ * 0.26, self.FACE_SZ * 0.52]
-        self.status_text  = "INITIALISING"
+        self.status_text  = "INITIALISATION"
         self.status_blink = True
 
         self._state = "INITIALISING"
+
+        # Video-style HUD state (ring phases, particles, waveform level)
+        self._t_start   = time.time()
+        self._intro_done = False
+        self._prev_now  = self._t_start
+        self._ph_arc    = 0.0
+        self._ph_dash   = 0.0
+        self._ph_tick   = 0.0
+        self._lv        = 0.15
+        self._bd_key    = None
+        self._bd_tk     = None
+        self._font_cache = {}
+        self._cache_keys = {}
+        rng = random.Random(7)
+        self._particles = [
+            {"a": rng.random() * math.tau, "far": 600 + rng.random() * 900,
+             "off": (i % 4) * 16, "sp": (.05 + rng.random() * .15) * (1 if i % 2 else -1),
+             "s": 1 + rng.random() * 2.2}
+            for i in range(110)
+        ]
 
         self.typing_queue = deque()
         self.is_typing    = False
@@ -211,9 +363,9 @@ class KaizumiUI:
         self._update_check_in_progress = False
         self.on_whatsapp_call_control = None
         self.vision_mode = "STANDBY"
-        self.vision_signal = "Awaiting camera input"
+        self.vision_signal = "En attente de la caméra"
         self.live_camera_active = False
-        self.whatsapp_call_status = "OFF — manual call mode"
+        self.whatsapp_call_status = "DÉSACTIVÉ — appel manuel"
         self.vision_preview_open = False
         self._preview_window = None
         self._preview_label = None
@@ -256,13 +408,11 @@ class KaizumiUI:
         self.log_text = tk.Text(self.log_frame, fg=self.col["text"],
                                 bg=self.col["panel"],
                                 insertbackground=self.col["text"], borderwidth=0,
-                                wrap="word", font=("Segoe UI", 10), padx=10, pady=6)
+                                wrap="word", font=("Segoe UI", 10), padx=10, pady=6,
+                                highlightthickness=0)
         self.log_text.pack(fill="both", expand=True)
         self.log_text.configure(state="disabled")
-        self.log_text.tag_config("you", foreground="#e8e8e8")
-        self.log_text.tag_config("ai",  foreground=self.col["pri"])
-        self.log_text.tag_config("sys", foreground=self.col["acc2"])
-        self.log_text.tag_config("err", foreground=self.col["red"])
+        self._style_log_tags()
 
         # ── Keyboard input ────────────────────────────────────────────────────
         # Keep the footer controls below the input even on compact windows.
@@ -295,9 +445,12 @@ class KaizumiUI:
 
         # Re-layout widgets when the window is resized
         self.root.bind("<Configure>", self._on_configure)
+        self.root.bind("<Button-1>", self._finish_intro, add="+")
+        self.root.bind("<Key>", self._finish_intro, add="+")
+        self._hide_main_widgets()      # revealed when the startup animation ends
         self._relayout()
         self.write_log(
-            "SYS: Fichier : Ctrl+O · voix off : Ctrl+Maj+V · export rapport : Ctrl+Maj+S."
+            "SYS: Fichier : Ctrl+O · voix off : Ctrl+Maj+V · exporter le rapport : Ctrl+Maj+S."
         )
 
         # ── API key ───────────────────────────────────────────────────────────
@@ -324,15 +477,23 @@ class KaizumiUI:
         self.set_theme(names[(idx + 1) % len(names)])
         self.write_log(f"SYS: Theme → {THEMES[self._theme]['name']}.")
 
+    def _style_log_tags(self):
+        """Chat 'bubbles' of the video: small cyan label (VOUS / NIANG IA) + light text."""
+        t = self.log_text
+        t.tag_config("you", foreground=self.col["text"])
+        t.tag_config("ai",  foreground=self.col["text"])
+        t.tag_config("sys", foreground=self.col["acc2"])
+        t.tag_config("err", foreground=self.col["red"])
+        t.tag_config("lbl_you", foreground=self.col["acc2"], font=("Segoe UI", 8, "bold"))
+        t.tag_config("lbl_ai",  foreground=self.col["pri"],  font=("Segoe UI", 8, "bold"))
+
     def _apply_theme_ui(self):
         self.root.configure(bg=self.col["bg"])
         self.bg.configure(bg=self.col["bg"])
         self.log_frame.configure(bg=self.col["panel"],
                                  highlightbackground=self.col["mid"])
         self.log_text.configure(fg=self.col["text"], bg=self.col["panel"])
-        self.log_text.tag_config("ai", foreground=self.col["pri"])
-        self.log_text.tag_config("sys", foreground=self.col["acc2"])
-        self.log_text.tag_config("err", foreground=self.col["red"])
+        self._style_log_tags()
         self._file_card.configure(bg=self.col["panel"], highlightbackground=self.col["mid"])
         self._file_rows.configure(bg=self.col["panel"])
         self._file_progress.configure(bg=self.col["panel"])
@@ -342,13 +503,8 @@ class KaizumiUI:
         if self._selected_paths:
             self._refresh_file_card()
         self._draw_mute_button()
-        self._update_button.configure(
-            fg=self.col["pri"],
-            bg=self.col["panel"],
-            activeforeground=self.col["bg"],
-            activebackground=self.col["pri"],
-            highlightbackground=self.col["mid"],
-        )
+        self._update_button.refresh()
+        self._draw_silent_button()
         self._refresh_input_style()
         self._apply_deck_theme()
 
@@ -359,10 +515,8 @@ class KaizumiUI:
                                        insertbackground=self.col["text"],
                                        highlightbackground=self.col["inp_border"],
                                        highlightcolor=self.col["pri"])
-            self._clear_btn.configure(fg=self.col["mid"],
-                                      highlightbackground=self.col["mid"])
-            self._send_btn.configure(fg=self.col["pri"],
-                                     highlightbackground=self.col["mid"])
+            self._clear_btn.refresh()
+            self._send_btn.refresh()
         except Exception:
             pass
 
@@ -372,24 +526,24 @@ class KaizumiUI:
                                    highlightbackground=self.col["mid"], highlightthickness=1)
         self._right_deck = tk.Frame(self.root, bg=self.col["panel"],
                                     highlightbackground=self.col["mid"], highlightthickness=1)
-        self._deck_title(self._left_deck, "COMMAND DECK", self.col["pri"])
-        self._deck_title(self._right_deck, "VISION DECK", self.col["acc2"])
+        self._deck_title(self._left_deck, "COMMANDES", self.col["pri"])
+        self._deck_title(self._right_deck, "VISION", self.col["acc2"])
 
-        self._deck_label(self._left_deck, "QUICK ACTIONS")
-        self._deck_button(self._left_deck, "AUTONOMOUS AGENT", "__open_agent__")
-        self._deck_button(self._left_deck, "DIAGNOSTIC PC", "__open_pc_diagnostics__")
-        self._deck_button(self._left_deck, "VISION ARCADE", "__open_arcade__")
+        self._deck_label(self._left_deck, "ACTIONS RAPIDES")
+        self._deck_button(self._left_deck, "AGENT AUTONOME", "__open_agent__")
+        self._deck_button(self._left_deck, "DIAGNOSTIC DU PC", "__open_pc_diagnostics__")
+        self._deck_button(self._left_deck, "JEUX DE VISION", "__open_arcade__")
         for label, command in [
-            ("DAILY BRIEFING", "give me my daily briefing"),
-            ("SYSTEM STATUS", "show system status"),
+            ("RÉSUMÉ DU JOUR", "give me my daily briefing"),
+            ("ÉTAT DU SYSTÈME", "show system status"),
             (
-                "READ SCREEN",
+                "DÉCRIRE L’ÉCRAN",
                 "look at my screen and describe the windows, icons, buttons, images, and everything visible",
             ),
-            ("FOCUS MODE", "start focus mode"),
+            ("MODE CONCENTRATION", "start focus mode"),
         ]:
             self._deck_button(self._left_deck, label, command)
-        self._deck_label(self._left_deck, "WHATSAPP AI CALL (MANUAL)")
+        self._deck_label(self._left_deck, "APPEL WHATSAPP IA (MANUEL)")
         self._whatsapp_call_status_label = tk.Label(
             self._left_deck,
             text=self.whatsapp_call_status,
@@ -402,45 +556,45 @@ class KaizumiUI:
         )
         self._whatsapp_call_status_label.pack(fill="x", padx=12, pady=(0, 6))
         for label, action in [
-            ("MUTE AI AUDIO", "mute"),
-            ("RESUME AI AUDIO", "resume"),
-            ("STOP AI AUDIO", "stop"),
+            ("COUPER LE SON DE L’IA", "mute"),
+            ("RÉACTIVER LE SON DE L’IA", "resume"),
+            ("ARRÊTER LE SON DE L’IA", "stop"),
         ]:
             self._call_deck_button(self._left_deck, label, action)
 
-        self._deck_label(self._right_deck, "CAMERA CONTROL")
-        self._deck_button(self._right_deck, "OPEN CAMERA PREVIEW", "__open_preview__")
-        for label, mode in [("GESTURE CONTROL", "gesture"), ("OBJECT DETECTION", "objects"),
-                            ("AIR MOUSE", "air_mouse"),
-                            ("VOLUME HAND", "volume"), ("POSTURE", "posture"),
-                            ("MOTION WATCH", "motion")]:
+        self._deck_label(self._right_deck, "CONTRÔLE DE LA CAMÉRA")
+        self._deck_button(self._right_deck, "APERÇU DE LA CAMÉRA", "__open_preview__")
+        for label, mode in [("CONTRÔLE PAR GESTES", "gesture"), ("DÉTECTION D’OBJETS", "objects"),
+                            ("SOURIS GESTUELLE", "air_mouse"),
+                            ("VOLUME PAR GESTES", "volume"), ("POSTURE", "posture"),
+                            ("SUIVI DES MOUVEMENTS", "motion")]:
             self._deck_button(self._right_deck, label, f"start vision {mode}", mode)
-        self._deck_button(self._right_deck, "START RECORDING", "__record_start__")
-        self._deck_button(self._right_deck, "STOP RECORDING", "__record_stop__")
-        self._deck_button(self._right_deck, "STOP VISION", "stop vision", "STANDBY")
-        self._deck_label(self._right_deck, "ONE-SHOT SCANS")
-        for label, command in [("SNAPSHOT", "take a camera snapshot"),
-                                ("FACE COUNT", "count faces in front of the camera"),
-                                ("READ QR", "read a QR code with the camera"),
-                                ("READ TEXT", "read text with the camera"),
-                                ("REMOVE BACKGROUND", "remove the background from the camera subject"),
-                                ("DESCRIBE SCENE", "describe everything visible to the camera")]:
+        self._deck_button(self._right_deck, "DÉMARRER L’ENREGISTREMENT", "__record_start__")
+        self._deck_button(self._right_deck, "ARRÊTER L’ENREGISTREMENT", "__record_stop__")
+        self._deck_button(self._right_deck, "ARRÊTER LA VISION", "stop vision", "STANDBY")
+        self._deck_label(self._right_deck, "ANALYSES PONCTUELLES")
+        for label, command in [("CAPTURER UNE IMAGE", "take a camera snapshot"),
+                                ("COMPTER LES VISAGES", "count faces in front of the camera"),
+                                ("LIRE UN CODE QR", "read a QR code with the camera"),
+                                ("LIRE LE TEXTE", "read text with the camera"),
+                                ("SUPPRIMER L’ARRIÈRE-PLAN", "remove the background from the camera subject"),
+                                ("DÉCRIRE LA SCÈNE", "describe everything visible to the camera")]:
             self._deck_button(self._right_deck, label, command)
-        self._vision_status = tk.Label(self._right_deck, text="● STANDBY", anchor="w",
+        self._vision_status = tk.Label(self._right_deck, text="● VEILLE", anchor="w",
                                        bg=self.col["panel"], fg=self.col["green"],
                                        font=("Consolas", 9, "bold"))
         self._vision_status.pack(fill="x", padx=12, pady=(10, 8))
         self._live_camera_status = tk.Label(
             self._right_deck,
-            text="● LIVE CAMERA: OFF",
+            text="● CAMÉRA EN DIRECT : NON",
             anchor="w",
             bg=self.col["panel"],
             fg=self.col["dim"],
             font=("Consolas", 9, "bold"),
         )
         self._live_camera_status.pack(fill="x", padx=12, pady=(0, 8))
-        self._deck_label(self._right_deck, "LOCAL CV MODULES")
-        for text in ("HAND LANDMARKS   READY", "POSE ESTIMATION   READY", "QR / FACE SCAN   READY"):
+        self._deck_label(self._right_deck, "MODULES DE VISION LOCALE")
+        for text in ("REPÉRAGE DES MAINS   PRÊT", "ANALYSE DE LA POSTURE   PRÊTE", "SCAN QR / VISAGE   PRÊT"):
             self._deck_label(self._right_deck, text, compact=True)
         self._vision_signal_label = tk.Label(self._right_deck, text=self.vision_signal,
                                               anchor="w", justify="left", wraplength=170,
@@ -450,7 +604,7 @@ class KaizumiUI:
 
     def _deck_title(self, parent, text, color):
         tk.Label(parent, text=text, anchor="w", bg=self.col["panel"], fg=color,
-                 font=("Consolas", 10, "bold")).pack(fill="x", padx=12, pady=(12, 8))
+                 font=("Segoe UI", 10, "bold")).pack(fill="x", padx=12, pady=(12, 8))
 
     def _deck_label(self, parent, text, compact=False):
         tk.Label(parent, text=text, anchor="w", bg=self.col["panel"], fg=self.col["dim"],
@@ -458,35 +612,21 @@ class KaizumiUI:
                  pady=(5 if compact else 10, 3))
 
     def _deck_button(self, parent, text, command, mode=None):
-        btn = tk.Button(parent, text="▸  " + text, anchor="w", command=lambda: self._deck_command(command, mode),
-                        bg=self.col["input"], fg=self.col["text"], activebackground=self.col["pri"],
-                        activeforeground=self.col["bg"], relief="flat", borderwidth=0,
-                        highlightthickness=1, highlightbackground=self.col["dim"],
-                        font=("Consolas", 8, "bold"), cursor="hand2")
-        btn.pack(fill="x", padx=10, pady=3, ipady=5)
+        btn = PillButton(parent, self, text="▸  " + tr(text), anchor="w",
+                         command=lambda: self._deck_command(command, mode),
+                         font=("Segoe UI", 8, "bold"), height=30, radius=10)
+        btn.pack(fill="x", padx=10, pady=3)
         self._deck_buttons.append(btn)
 
     def _call_deck_button(self, parent, text, command):
-        btn = tk.Button(
-            parent,
-            text="▸  " + text,
-            anchor="w",
-            command=lambda: self._call_deck_command(command),
-            bg=self.col["input"],
-            fg=self.col["text"],
-            activebackground=self.col["pri"],
-            activeforeground=self.col["bg"],
-            relief="flat",
-            borderwidth=0,
-            highlightthickness=1,
-            highlightbackground=self.col["dim"],
-            font=("Consolas", 8, "bold"),
-            cursor="hand2",
-        )
-        btn.pack(fill="x", padx=10, pady=3, ipady=5)
+        btn = PillButton(parent, self, text="▸  " + tr(text), anchor="w",
+                         command=lambda: self._call_deck_command(command),
+                         font=("Segoe UI", 8, "bold"), height=30, radius=10)
+        btn.pack(fill="x", padx=10, pady=3)
+        self._deck_buttons.append(btn)
 
     def _call_deck_command(self, command):
-        self.write_log("SYS: WhatsApp AI call control requested.")
+        self.write_log("SYS: Commande de contrôle de l’appel WhatsApp IA demandée.")
         if command in {"mute", "stop"} and self.on_whatsapp_call_control:
             threading.Thread(
                 target=self.on_whatsapp_call_control,
@@ -517,14 +657,43 @@ class KaizumiUI:
             self.open_vision_arcade()
             return
         if command in ("__record_start__", "__record_stop__"):
-            self.write_log("SYS: " + ("Recording requested." if command == "__record_start__" else "Recording stop requested."))
+            self.write_log(
+                "SYS: " + (
+                    "Démarrage de l’enregistrement demandé."
+                    if command == "__record_start__"
+                    else "Arrêt de l’enregistrement demandé."
+                )
+            )
             if self.on_text_command:
                 text = "start recording" if command == "__record_start__" else "stop recording"
                 threading.Thread(target=self.on_text_command, args=(text,), daemon=True).start()
             return
         self.vision_mode = (mode or self.vision_mode).upper()
         self._safe_ui(self._refresh_deck_status)
-        self.write_log("SYS: Command deck → " + command)
+        command_labels = {
+            "give me my daily briefing": "Résumé du jour",
+            "show system status": "État du système",
+            "look at my screen and describe the windows, icons, buttons, images, and everything visible": "Décrire l’écran",
+            "start focus mode": "Mode concentration",
+            "mute": "Couper le son de l’IA",
+            "resume": "Réactiver le son de l’IA",
+            "resume WhatsApp call audio": "Réactiver le son de l’appel WhatsApp",
+            "stop": "Arrêter le son de l’IA",
+            "stop vision": "Arrêter la vision",
+            "start vision gesture": "Démarrer le contrôle par gestes",
+            "start vision objects": "Démarrer la détection d’objets",
+            "start vision air_mouse": "Démarrer la souris gestuelle",
+            "start vision volume": "Démarrer le contrôle du volume par gestes",
+            "start vision posture": "Démarrer l’analyse de la posture",
+            "start vision motion": "Démarrer le suivi des mouvements",
+            "take a camera snapshot": "Capturer une image",
+            "count faces in front of the camera": "Compter les visages",
+            "read a QR code with the camera": "Lire un code QR",
+            "read text with the camera": "Lire le texte",
+            "remove the background from the camera subject": "Supprimer l’arrière-plan",
+            "describe everything visible to the camera": "Décrire la scène",
+        }
+        self.write_log("SYS: Commande sélectionnée : " + command_labels.get(command, self._translate_status(command)))
         if self.on_text_command:
             threading.Thread(target=self.on_text_command, args=(command,), daemon=True).start()
 
@@ -536,7 +705,7 @@ class KaizumiUI:
             return
 
         window = tk.Toplevel(self.root)
-        window.title("NIANG IA - Agent autonome")
+        window.title("NIANG IA — Agent autonome")
         window.geometry("760x700")
         window.minsize(620, 560)
         window.configure(bg=self.col["bg"])
@@ -544,7 +713,7 @@ class KaizumiUI:
 
         tk.Label(
             window,
-            text="MISSION",
+            text="VOTRE MISSION",
             anchor="w",
             bg=self.col["bg"],
             fg=self.col["pri"],
@@ -565,7 +734,7 @@ class KaizumiUI:
         controls.pack(fill="x", padx=12, pady=8)
         self._agent_start_button = tk.Button(
             controls,
-            text="▶ DEMARRER",
+            text=tr("▶ DÉMARRER"),
             command=self._start_agent_mission,
             bg=self.col["input"],
             fg=self.col["green"],
@@ -574,7 +743,7 @@ class KaizumiUI:
         self._agent_start_button.pack(side="left", padx=(0, 6))
         self._agent_stop_button = tk.Button(
             controls,
-            text="■ ARRETER",
+            text=tr("■ ARRÊTER"),
             command=self._stop_agent_mission,
             bg=self.col["input"],
             fg=self.col["red"],
@@ -584,7 +753,7 @@ class KaizumiUI:
         self._agent_stop_button.pack(side="left")
         self._agent_resume_button = tk.Button(
             controls,
-            text="↻ REPRENDRE",
+            text=tr("↻ REPRENDRE"),
             command=self._resume_agent_mission,
             bg=self.col["input"],
             fg=self.col["pri"],
@@ -604,7 +773,7 @@ class KaizumiUI:
 
         tk.Label(
             window,
-            text="ETAPES ET ACTIONS (le navigateur Playwright MCP s'ouvre dans sa propre fenetre)",
+            text="ÉTAPES ET ACTIONS (le navigateur Playwright MCP s’ouvre dans sa propre fenêtre)",
             anchor="w",
             bg=self.col["bg"],
             fg=self.col["pri"],
@@ -622,7 +791,7 @@ class KaizumiUI:
         self._agent_history_text.pack(fill="both", expand=True, padx=12)
         self._agent_screenshot_label = tk.Label(
             window,
-            text="Aucune capture d'ecran",
+            text="Aucune capture d’écran",
             bg=self.col["panel"],
             fg=self.col["dim"],
         )
@@ -631,7 +800,7 @@ class KaizumiUI:
         screenshot_controls.pack(fill="x", padx=12, pady=(0, 8))
         tk.Button(
             screenshot_controls,
-            text="OUVRIR LA CAPTURE",
+            text=tr("OUVRIR LA CAPTURE"),
             command=self._open_agent_screenshot,
             bg=self.col["input"],
             fg=self.col["text"],
@@ -677,7 +846,7 @@ class KaizumiUI:
             return
 
         window = tk.Toplevel(self.root)
-        window.title("NIANG IA - Diagnostic PC")
+        window.title("NIANG IA — Diagnostic du PC")
         window.geometry("860x720")
         window.minsize(680, 560)
         window.configure(bg=self.col["bg"])
@@ -685,7 +854,7 @@ class KaizumiUI:
 
         tk.Label(
             window,
-            text="DIAGNOSTIC PC",
+            text="DIAGNOSTIC DU PC",
             anchor="w",
             bg=self.col["bg"],
             fg=self.col["pri"],
@@ -722,7 +891,7 @@ class KaizumiUI:
         for index, (label, category) in enumerate(actions):
             button = tk.Button(
                 actions_frame,
-                text=label,
+                text=tr(label),
                 command=lambda selected=category: self._start_pc_diagnostic(selected),
                 bg=self.col["input"],
                 fg=self.col["text"],
@@ -738,7 +907,7 @@ class KaizumiUI:
         controls.pack(fill="x", padx=12, pady=(5, 8))
         tk.Button(
             controls,
-            text="Proposer des réparations",
+            text=tr("Proposer des réparations"),
             command=self._show_pc_repair_options,
             bg=self.col["input"],
             fg=self.col["acc2"],
@@ -746,7 +915,7 @@ class KaizumiUI:
         ).pack(side="left", padx=(0, 6))
         tk.Button(
             controls,
-            text="Historique des diagnostics",
+            text=tr("Historique des diagnostics"),
             command=self._show_pc_diagnostic_history,
             bg=self.col["input"],
             fg=self.col["text"],
@@ -754,7 +923,7 @@ class KaizumiUI:
         ).pack(side="left")
         tk.Button(
             controls,
-            text="Historique des réparations",
+            text=tr("Historique des réparations"),
             command=self._show_pc_repair_history,
             bg=self.col["input"],
             fg=self.col["acc2"],
@@ -762,7 +931,7 @@ class KaizumiUI:
         ).pack(side="left", padx=(6, 0))
         self._diagnostics_stop_button = tk.Button(
             controls,
-            text="Arrêter",
+            text=tr("Arrêter"),
             command=self._stop_pc_diagnostic,
             bg=self.col["input"],
             fg=self.col["red"],
@@ -788,7 +957,7 @@ class KaizumiUI:
         ):
             button = tk.Button(
                 repair_frame,
-                text=label,
+                text=tr(label),
                 command=lambda selected=action: self._request_pc_repair(selected),
                 bg=self.col["input"],
                 fg=self.col["text"],
@@ -859,7 +1028,17 @@ class KaizumiUI:
 
         cancel_event = threading.Event()
         self._diagnostics_cancel_event = cancel_event
-        self._set_pc_diagnostics_busy(True, f"Analyse en cours : {category}…")
+        category_label = {
+            "overview": "générale",
+            "drivers": "des pilotes",
+            "windows": "de Windows",
+            "performance": "des performances",
+            "errors": "des erreurs",
+            "network": "du réseau",
+            "services": "des services",
+            "system_files": "des fichiers système",
+        }.get(category, category)
+        self._set_pc_diagnostics_busy(True, f"Analyse {category_label} en cours…")
         self._set_pc_diagnostics_output("Collecte des résultats locaux…")
 
         def worker():
@@ -908,7 +1087,7 @@ class KaizumiUI:
             return
         proposals = report.get("repair_proposals") or []
         summary = "\n".join(
-            f"• {item.get('severity', 'inconnu').upper()} — {item.get('problem', '')}\n"
+            f"• {self._translate_status(item.get('severity', 'inconnu').upper())} — {item.get('problem', '')}\n"
             f"  Confiance : {item.get('confidence', 'suspicion')} "
             f"({item.get('confidence_score', 0)} / 100), récurrence : "
             f"{item.get('recurrence_count', 0)}\n"
@@ -994,7 +1173,7 @@ class KaizumiUI:
             )
             return
         self._set_pc_diagnostics_output(
-            text if text != "[]" else "Aucun réparation enregistrée."
+            text if text != "[]" else "Aucune réparation enregistrée."
         )
 
     def _show_pc_diagnostic_history(self):
@@ -1017,10 +1196,10 @@ class KaizumiUI:
             self._agent_status_label.configure(text="Saisissez une mission.")
             return
         if self._agent_task_id:
-            self._agent_status_label.configure(text="Une mission est deja suivie.")
+            self._agent_status_label.configure(text="Une mission est déjà en cours.")
             return
         if not self.on_agent_start:
-            self._agent_status_label.configure(text="Le moteur d'agent n'est pas disponible.")
+            self._agent_status_label.configure(text="Le moteur de l’agent n’est pas disponible.")
             return
         try:
             self._agent_task_id = self.on_agent_start(goal)
@@ -1028,11 +1207,11 @@ class KaizumiUI:
             self._agent_history_count = 0
             self._agent_start_button.configure(state="disabled")
             self._agent_stop_button.configure(state="normal")
-            self.write_log("SYS: Mission agent demarree.")
+            self.write_log("SYS: Mission de l’agent démarrée.")
             self._refresh_agent_panel()
         except Exception as exc:
-            self._agent_status_label.configure(text=f"Echec: {str(exc)[:160]}")
-            self.write_log(f"ERR: Demarrage de l'agent impossible: {exc}")
+            self._agent_status_label.configure(text=f"Échec : {str(exc)[:160]}")
+            self.write_log(f"ERR: Démarrage de l’agent impossible : {exc}")
 
     def _stop_agent_mission(self):
         task_id = self._agent_task_id
@@ -1040,12 +1219,12 @@ class KaizumiUI:
             return
         try:
             if self.on_agent_cancel(task_id):
-                self._agent_status_label.configure(text="Arret demande...")
+                self._agent_status_label.configure(text="Arrêt demandé…")
             else:
-                self._agent_status_label.configure(text="Aucune mission active.")
+                self._agent_status_label.configure(text="Aucune mission en cours.")
         except Exception as exc:
-            self._agent_status_label.configure(text=f"Arret impossible: {str(exc)[:120]}")
-            self.write_log(f"ERR: Arret de l'agent impossible: {exc}")
+            self._agent_status_label.configure(text=f"Arrêt impossible : {str(exc)[:120]}")
+            self.write_log(f"ERR: Arrêt de l’agent impossible : {exc}")
 
     def _resume_agent_mission(self):
         from tkinter import messagebox
@@ -1059,12 +1238,12 @@ class KaizumiUI:
                 return
             history = previous.get("action_history", [])
             approved = messagebox.askyesno(
-                "Reprise avec verification",
-                "La mission interrompue sera replanifiee. Les actions precedentes "
-                "ne seront pas rejouees automatiquement, mais leurs effets peuvent "
-                "deja exister. NIANG IA devra verifier l'etat actuel; une action "
-                "impossible a verifier doit etre arretee.\n\n"
-                f"Actions enregistrees : {len(history)}\n"
+                "Reprise avec vérification",
+                "La mission interrompue sera replanifiée. Les actions précédentes "
+                "ne seront pas rejouées automatiquement, mais leurs effets peuvent "
+                "déjà exister. NIANG IA devra vérifier l’état actuel ; toute action "
+                "impossible à vérifier devra être arrêtée.\n\n"
+                f"Actions enregistrées : {len(history)}\n"
                 "Continuer ?",
                 parent=self.root,
             )
@@ -1080,11 +1259,11 @@ class KaizumiUI:
             self._agent_start_button.configure(state="disabled")
             self._agent_stop_button.configure(state="normal")
             self._agent_resume_button.configure(state="disabled")
-            self._agent_status_label.configure(text="Reprise en cours...")
+            self._agent_status_label.configure(text="Reprise en cours…")
             self._refresh_agent_panel()
         except Exception as exc:
             self._agent_status_label.configure(
-                text=f"Reprise impossible: {str(exc)[:120]}"
+                text=f"Reprise impossible : {str(exc)[:120]}"
             )
             self.write_log(f"ERR: Reprise de l'agent impossible: {exc}")
 
@@ -1093,12 +1272,12 @@ class KaizumiUI:
 
         prompt = (
             f"Action sensible :\n\n{description}\n\n"
-            "Autoriser cette action unique ? Les autres actions sensibles "
-            "demanderont une nouvelle confirmation."
+            "Autorisez-vous cette action uniquement ? Toute autre action sensible "
+            "nécessitera une nouvelle confirmation."
         )
         if threading.current_thread() is self._main_thread:
             return messagebox.askyesno(
-                "Confirmation requise - NIANG IA",
+                "Confirmation requise — NIANG IA",
                 prompt,
                 parent=self.root,
             )
@@ -1109,7 +1288,7 @@ class KaizumiUI:
         def ask():
             try:
                 decision["approved"] = messagebox.askyesno(
-                    "Confirmation requise - NIANG IA",
+                    "Confirmation requise — NIANG IA",
                     prompt,
                     parent=self.root,
                 )
@@ -1124,7 +1303,7 @@ class KaizumiUI:
             self.write_log(f"ERR: Interface fermee pendant la confirmation: {exc}")
             return False
         if not completed.wait(timeout=300):
-            self.write_log(f"ERR: Confirmation expiree pour {tool}; action refusee.")
+            self.write_log(f"ERR: Confirmation expirée pour {tool} ; action refusée.")
             return False
         return decision["approved"]
 
@@ -1139,7 +1318,7 @@ class KaizumiUI:
         except Exception as exc:
             interrupted = None
             self._agent_status_label.configure(
-                text=f"Lecture des missions interrompues impossible: {str(exc)[:80]}"
+                text=f"Impossible de lire les missions interrompues : {str(exc)[:80]}"
             )
         self._agent_resume_button.configure(
             state=(
@@ -1151,7 +1330,7 @@ class KaizumiUI:
         if not task_id and interrupted:
             interrupted_id = interrupted["task_id"]
             self._agent_status_label.configure(
-                text=f"Mission interrompue [{interrupted_id}] - verification requise."
+                text=f"Mission interrompue [{interrupted_id}] — vérification requise."
             )
             if self._agent_history_task_id != interrupted_id:
                 self._agent_history_task_id = interrupted_id
@@ -1172,7 +1351,7 @@ class KaizumiUI:
                 self._agent_history_text.insert(
                     tk.END,
                     f"[{action.get('number', '?')}] "
-                    f"{action.get('status', 'unknown').upper()} "
+                    f"{self._translate_status(action.get('status', 'unknown').upper())} "
                     f"{action.get('tool', '')}: "
                     f"{action.get('description', '')}\n"
                     f"{action.get('result', '')}\n\n",
@@ -1187,7 +1366,7 @@ class KaizumiUI:
                 status = get_queue().get_status(task_id)
             except Exception as exc:
                 self._agent_status_label.configure(
-                    text=f"Lecture de l'etat impossible: {str(exc)[:100]}"
+                    text=f"Impossible de lire l’état : {str(exc)[:100]}"
                 )
                 status = None
             if status:
@@ -1195,7 +1374,7 @@ class KaizumiUI:
                 progress = f"{status.get('completed_steps', 0)}/{status.get('total_steps', 0)}"
                 current = status.get("current_step", "")
                 self._agent_status_label.configure(
-                    text=f"{status.get('status', phase)} {progress} {current}"[:180]
+                    text=f"{self._translate_status(status.get('status', phase).upper())} {progress} {current}"[:180]
                 )
                 if self._agent_history_task_id != task_id:
                     self._agent_history_task_id = task_id
@@ -1211,7 +1390,7 @@ class KaizumiUI:
                     self._agent_history_text.configure(state="normal")
                     self._agent_history_text.insert(
                         tk.END,
-                        f"[{action.get('number', '?')}] {action.get('status', 'unknown').upper()} "
+                        f"[{action.get('number', '?')}] {self._translate_status(action.get('status', 'unknown').upper())} "
                         f"{action.get('tool', '')}: {action.get('description', '')}\n"
                         f"{action.get('result', '')}\n\n",
                     )
@@ -1223,7 +1402,7 @@ class KaizumiUI:
                 if status.get("status") in {
                     "completed", "partial", "failed", "action_unknown", "cancelled", "interrupted",
                 }:
-                    result = status.get("result") or status.get("error") or "Mission terminee."
+                    result = status.get("result") or status.get("error") or "Mission terminée."
                     self._agent_report_text.configure(state="normal")
                     self._agent_report_text.delete("1.0", tk.END)
                     self._agent_report_text.insert(tk.END, str(result))
@@ -1271,7 +1450,7 @@ class KaizumiUI:
     def _refresh_deck_status(self):
         if hasattr(self, "_vision_status"):
             color = self.col["green"] if self.vision_mode != "STANDBY" else self.col["dim"]
-            self._vision_status.configure(text="● " + self.vision_mode, fg=color,
+            self._vision_status.configure(text="● " + self._translate_status(self.vision_mode), fg=color,
                                           bg=self.col["panel"])
         if hasattr(self, "_vision_signal_label"):
             self._vision_signal_label.configure(text=self.vision_signal,
@@ -1279,7 +1458,7 @@ class KaizumiUI:
         if hasattr(self, "_live_camera_status"):
             active = self.live_camera_active
             self._live_camera_status.configure(
-                text=f"● LIVE CAMERA: {'ON' if active else 'OFF'}",
+                text=f"● CAMÉRA EN DIRECT : {'ACTIVE' if active else 'INACTIVE'}",
                 bg=self.col["panel"],
                 fg=self.col["red"] if active else self.col["dim"],
             )
@@ -1289,14 +1468,67 @@ class KaizumiUI:
                 for state in ("CONNECTED", "LISTENING", "SPEAKING")
             )
             self._whatsapp_call_status_label.configure(
-                text=self.whatsapp_call_status,
+                text=self._translate_status(self.whatsapp_call_status),
                 bg=self.col["panel"],
                 fg=self.col["red"] if active else self.col["dim"],
             )
 
+    @staticmethod
+    def _translate_status(text):
+        translations = {
+            "STANDBY": "VEILLE",
+            "ONLINE": "EN LIGNE",
+            "OFFLINE": "HORS LIGNE",
+            "CONNECTED": "CONNECTÉ",
+            "LISTENING": "À L’ÉCOUTE",
+            "SPEAKING": "PARLE",
+            "PROCESSING": "TRAITEMENT EN COURS",
+            "THINKING": "RÉFLEXION EN COURS",
+            "GESTURE": "GESTES",
+            "OBJECTS": "OBJETS",
+            "AIR_MOUSE": "SOURIS GESTUELLE",
+            "VOLUME": "VOLUME",
+            "POSTURE": "POSTURE",
+            "MOTION": "MOUVEMENTS",
+            "RUNNING": "EN COURS",
+            "COMPLETED": "TERMINÉE",
+            "PARTIAL": "PARTIELLE",
+            "FAILED": "ÉCHEC",
+            "CANCELLED": "ANNULÉE",
+            "INTERRUPTED": "INTERROMPUE",
+            "ACTION_UNKNOWN": "ACTION INCONNUE",
+            "PENDING": "EN ATTENTE",
+            "UNKNOWN": "INCONNU",
+            "CRITICAL": "CRITIQUE",
+            "HIGH": "ÉLEVÉ",
+            "MEDIUM": "MOYEN",
+            "LOW": "FAIBLE",
+            "IDLE": "INACTIF",
+            "PREPARING": "PRÉPARATION",
+            "ON_HOLD": "EN PAUSE",
+            "ENDING": "ARRÊT EN COURS",
+        }
+        translated = str(text or "")
+        for source, target in translations.items():
+            translated = translated.replace(source, target)
+        for source, target in {
+            "LIVE CAMERA: frames are streamed to Gemini": "Caméra en direct : les images sont transmises à Gemini",
+            "Live camera is off": "La caméra en direct est désactivée",
+            "Live camera stopped: Gemini session disconnected": "Caméra en direct arrêtée : session Gemini déconnectée",
+            "Awaiting camera input": "En attente de la caméra",
+            "NIANG IA microphone input and playback are paused.": "Le microphone et la lecture audio de NIANG IA sont en pause.",
+            "NIANG IA call audio resumed.": "Le son de l’appel de NIANG IA a repris.",
+            "Stopping NIANG IA audio; WhatsApp remains under your control.": "Arrêt du son de NIANG IA ; WhatsApp reste sous votre contrôle.",
+            "NIANG IA is speaking to the call.": "NIANG IA parle pendant l’appel.",
+            "Listening to the WhatsApp call audio.": "Écoute du son de l’appel WhatsApp.",
+            "The AI response was interrupted.": "La réponse de l’IA a été interrompue.",
+        }.items():
+            translated = translated.replace(source, target)
+        return translated
+
     def set_vision_signal(self, text: str):
         """Publish the latest local CV observation to the command deck."""
-        self.vision_signal = str(text or "Awaiting camera input")[:120]
+        self.vision_signal = self._translate_status(text or "En attente de la caméra")[:120]
         self._safe_ui(self._refresh_deck_status)
 
     def set_live_camera_status(self, active: bool):
@@ -1311,12 +1543,43 @@ class KaizumiUI:
 
     def set_vision_detections(self, events):
         """Show a compact object summary from the active detector."""
+        labels_fr = {
+            "person": "personne", "bicycle": "vélo", "car": "voiture",
+            "motorcycle": "moto", "airplane": "avion", "bus": "bus",
+            "train": "train", "truck": "camion", "boat": "bateau",
+            "traffic light": "feu de circulation", "fire hydrant": "borne incendie",
+            "stop sign": "panneau stop", "parking meter": "horodateur", "bench": "banc",
+            "bird": "oiseau", "cat": "chat", "dog": "chien", "horse": "cheval",
+            "sheep": "mouton", "cow": "vache", "elephant": "éléphant", "bear": "ours",
+            "zebra": "zèbre", "giraffe": "girafe", "backpack": "sac à dos",
+            "umbrella": "parapluie", "handbag": "sac à main", "tie": "cravate",
+            "suitcase": "valise", "frisbee": "disque volant", "skis": "skis",
+            "snowboard": "planche à neige", "sports ball": "ballon",
+            "kite": "cerf-volant", "baseball bat": "batte de baseball",
+            "baseball glove": "gant de baseball", "skateboard": "planche à roulettes",
+            "surfboard": "planche de surf", "tennis racket": "raquette de tennis",
+            "bottle": "bouteille", "wine glass": "verre à vin", "cup": "tasse",
+            "fork": "fourchette", "knife": "couteau", "spoon": "cuillère", "bowl": "bol",
+            "banana": "banane", "apple": "pomme", "sandwich": "sandwich",
+            "orange": "orange", "broccoli": "brocoli", "carrot": "carotte",
+            "hot dog": "hot-dog", "pizza": "pizza", "donut": "beignet", "cake": "gâteau",
+            "chair": "chaise", "couch": "canapé", "potted plant": "plante en pot",
+            "bed": "lit", "dining table": "table", "toilet": "toilettes",
+            "tv": "télévision", "laptop": "ordinateur portable", "mouse": "souris",
+            "remote": "télécommande", "keyboard": "clavier", "cell phone": "téléphone portable",
+            "microwave": "micro-ondes", "oven": "four", "toaster": "grille-pain",
+            "sink": "évier", "refrigerator": "réfrigérateur", "book": "livre",
+            "clock": "horloge", "vase": "vase", "scissors": "ciseaux",
+            "teddy bear": "ours en peluche", "hair drier": "sèche-cheveux",
+            "toothbrush": "brosse à dents",
+        }
         counts = {}
         for event in events or []:
-            label = getattr(event, "label", "object")
+            label = str(getattr(event, "label", "objet"))
+            label = labels_fr.get(label.lower(), label)
             counts[label] = counts.get(label, 0) + 1
         if counts:
-            summary = "OBJECTS: " + ", ".join(
+            summary = "OBJETS : " + ", ".join(
                 f"{count}× {label}" for label, count in counts.items()
             )
             self.set_vision_signal(summary)
@@ -1327,11 +1590,11 @@ class KaizumiUI:
             self._preview_window.lift()
             return
         win = tk.Toplevel(self.root)
-        win.title("NIANG IA Vision Preview · Privacy Blur")
+        win.title("NIANG IA — Aperçu de la vision · Floutage privé")
         win.configure(bg=self.col["bg"])
         win.geometry("700x560")
         win.resizable(True, True)
-        label = tk.Label(win, text="Waiting for camera frames…", bg=self.col["bg"],
+        label = tk.Label(win, text="En attente d’images de la caméra…", bg=self.col["bg"],
                          fg=self.col["text"], font=("Consolas", 11))
         label.pack(fill="both", expand=True, padx=12, pady=12)
         self._preview_window = win
@@ -1356,7 +1619,7 @@ class KaizumiUI:
             self._arcade_window.lift()
             return
         win = tk.Toplevel(self.root)
-        win.title("NIANG IA Vision Arcade · Local CV")
+        win.title("NIANG IA — Jeux de vision · Vision locale")
         win.configure(bg=self.col["bg"])
         win.geometry("1100x760")
         win.minsize(900, 620)
@@ -1366,21 +1629,21 @@ class KaizumiUI:
             pass
         toolbar = tk.Frame(win, bg=self.col["panel"])
         toolbar.pack(fill="x", padx=10, pady=10)
-        for label, game in [("FACE FILTER", "face_filter"),
-                            ("GESTURE PONG", "gesture_pong"),
-                            ("ORB HUNT", "orb_hunt"),
-                            ("ROCK PAPER SCISSORS", "rps"),
-                            ("SHAPE CREATOR", "shape_creator"),
-                            ("FLOOR IS LAVA", "floor_lava"),
-                            ("PLANET EXPLORER", "planet_explorer"),
-                            ("WHIRLPOOL", "whirlpool"),
-                            ("LASER DEFENSE", "laser_defense"),
-                            ("ARPEGGIATOR", "arpeggiator")]:
-            tk.Button(toolbar, text=label, command=lambda g=game: self._start_arcade_game(g),
+        for label, game in [("FILTRE VISAGE", "face_filter"),
+                            ("PONG GESTUEL", "gesture_pong"),
+                            ("CHASSE AUX ORBES", "orb_hunt"),
+                            ("PIERRE-FEUILLE-CISEAUX", "rps"),
+                            ("CRÉATEUR DE FORMES", "shape_creator"),
+                            ("LE SOL EST EN LAVE", "floor_lava"),
+                            ("EXPLORATEUR PLANÉTAIRE", "planet_explorer"),
+                            ("TOURBILLON", "whirlpool"),
+                            ("DÉFENSE LASER", "laser_defense"),
+                            ("ARPÉGIATEUR", "arpeggiator")]:
+            tk.Button(toolbar, text=tr(label), command=lambda g=game: self._start_arcade_game(g),
                       bg=self.col["input"], fg=self.col["text"], activebackground=self.col["pri"],
                       activeforeground=self.col["bg"], relief="flat", font=("Consolas", 9, "bold"),
                       cursor="hand2").pack(side="left", padx=3, ipady=7)
-        label = tk.Label(win, text="Waiting for camera frames…", bg=self.col["bg"],
+        label = tk.Label(win, text="En attente d’images de la caméra…", bg=self.col["bg"],
                          fg=self.col["text"], font=("Consolas", 11))
         label.pack(fill="both", expand=True, padx=12, pady=(0, 12))
         self._arcade_window, self._arcade_label = win, label
@@ -1400,7 +1663,7 @@ class KaizumiUI:
 
     def _start_arcade_game(self, game):
         self._arcade.start(game)
-        self.write_log("SYS: Vision Arcade → " + game)
+        self.write_log("SYS: Jeux de vision → " + game)
 
     def set_arcade_signal(self, gesture: str, x: float = 0.5):
         if not self.arcade_open:
@@ -1437,14 +1700,29 @@ class KaizumiUI:
             title_font = ImageFont.truetype("C:/Windows/Fonts/segoeuib.ttf", max(18, image.width // 55))
             msg_font = ImageFont.truetype("C:/Windows/Fonts/segoeui.ttf", max(15, image.width // 72))
             draw.rectangle((0, 0, image.width, hud_h), fill="#001520", outline="#00d4ff", width=3)
-            draw.text((24, 14), f"{state.game.upper()}   SCORE {state.score}   LIVES {state.lives}",
+            game_names = {
+                "face_filter": "FILTRE VISAGE",
+                "gesture_pong": "PONG GESTUEL",
+                "rps": "PIERRE-FEUILLE-CISEAUX",
+                "shape_creator": "CRÉATEUR DE FORMES",
+                "orb_hunt": "CHASSE AUX ORBES",
+                "floor_lava": "LE SOL EST EN LAVE",
+                "planet_explorer": "EXPLORATION PLANÉTAIRE",
+                "whirlpool": "TOURBILLON",
+                "laser_defense": "DÉFENSE LASER",
+                "arpeggiator": "ARPÉGIATEUR",
+                "idle": "VEILLE",
+            }
+            draw.text(
+                (24, 14),
+                f"{game_names.get(state.game, state.game)}   POINTS {state.score}   VIES {state.lives}",
                       fill="#8ffcff", font=title_font, stroke_width=2, stroke_fill="#001520")
-            extra = f"  ROUND {state.rounds}  STREAK {state.streak}" if state.rounds else ""
+            extra = f"  MANCHE {state.rounds}  SÉRIE {state.streak}" if state.rounds else ""
             draw.text((24, 14 + title_font.size + 8), state.message + extra,
                       fill="#ffcc00", font=msg_font, stroke_width=1, stroke_fill="#001520")
             if state.game == "floor_lava":
                 draw.rectangle((0, int(image.height * 0.82), image.width, image.height), fill="#8b1900")
-                draw.text((24, int(image.height * 0.86)), "LAVA", fill="#ffcc00", font=title_font)
+                draw.text((24, int(image.height * 0.86)), "LAVE", fill="#ffcc00", font=title_font)
             elif state.game == "planet_explorer":
                 cx, cy = int(image.width * 0.72), int(image.height * 0.55)
                 draw.ellipse((cx - 100, cy - 100, cx + 100, cy + 100), outline="#38bdf8", width=5)
@@ -1499,21 +1777,21 @@ class KaizumiUI:
             if deck is not None:
                 deck.configure(bg=self.col["panel"], highlightbackground=self.col["mid"])
                 for widget in deck.winfo_children():
+                    if isinstance(widget, PillButton):
+                        continue
                     try:
                         widget.configure(bg=self.col["panel"])
                     except tk.TclError:
                         pass
         for btn in getattr(self, "_deck_buttons", []):
-            btn.configure(bg=self.col["input"], fg=self.col["text"],
-                          activebackground=self.col["pri"], activeforeground=self.col["bg"],
-                          highlightbackground=self.col["dim"])
+            btn.refresh()
         self._refresh_deck_status()
 
     def _check_for_updates(self):
         if self._update_check_in_progress:
             return
         self._update_check_in_progress = True
-        self._update_button.configure(state="disabled", text="VÉRIFICATION…")
+        self._update_button.configure(state="disabled", text=tr("VÉRIFICATION…"))
 
         def worker():
             try:
@@ -1527,7 +1805,7 @@ class KaizumiUI:
 
     def _finish_update_check(self, update, error):
         self._update_check_in_progress = False
-        self._update_button.configure(state="normal", text="↻ MISE À JOUR")
+        self._update_button.configure(state="normal", text=tr("↻ MISE À JOUR"))
         if error:
             self.write_log(f"ERR: Vérification des mises à jour impossible : {error}")
             messagebox.showerror(
@@ -1538,12 +1816,12 @@ class KaizumiUI:
             return
         if update is None:
             from app_update import CURRENT_VERSION
-            self._update_button.configure(text="NIANG IA À JOUR")
+            self._update_button.configure(text=tr("NIANG IA À JOUR"))
             self.root.after(5000, self._reset_update_button)
             self.write_log("SYS: NIANG IA est déjà à jour.")
             return
 
-        self._update_button.configure(text=f"VERSION {update.version}")
+        self._update_button.configure(text=tr("VERSION ") + update.version)
         self.write_log(f"SYS: Mise à jour NIANG IA {update.version} disponible.")
         if messagebox.askyesno(
             "Mise à jour disponible",
@@ -1555,7 +1833,7 @@ class KaizumiUI:
             self._download_update(update)
 
     def _download_update(self, update):
-        self._update_button.configure(state="disabled", text="TÉLÉCHARGEMENT 0 %")
+        self._update_button.configure(state="disabled", text=tr("TÉLÉCHARGEMENT ") + "0 %")
 
         def report_progress(percent):
             try:
@@ -1574,10 +1852,10 @@ class KaizumiUI:
         threading.Thread(target=worker, daemon=True).start()
 
     def _set_update_download_progress(self, percent):
-        self._update_button.configure(text=f"TÉLÉCHARGEMENT {percent} %")
+        self._update_button.configure(text=f"{tr('TÉLÉCHARGEMENT ')}{percent} %")
 
     def _finish_update_download(self, installer, error):
-        self._update_button.configure(state="normal", text="↻ MISE À JOUR")
+        self._update_button.configure(state="normal", text=tr("↻ MISE À JOUR"))
         if error:
             self.write_log(f"ERR: Téléchargement de la mise à jour impossible : {error}")
             messagebox.showerror(
@@ -1587,7 +1865,7 @@ class KaizumiUI:
             )
             return
 
-        self._update_button.configure(text="INSTALLATEUR PRÊT")
+        self._update_button.configure(text=tr("INSTALLATEUR PRÊT"))
         self.root.after(8000, self._reset_update_button)
         self.write_log(f"SYS: Installateur vérifié téléchargé : {installer}")
         if messagebox.askyesno(
@@ -1602,7 +1880,7 @@ class KaizumiUI:
     def _reset_update_button(self):
         try:
             if self._update_button.winfo_exists():
-                self._update_button.configure(text="↻ MISE À JOUR")
+                self._update_button.configure(text=tr("↻ MISE À JOUR"))
         except tk.TclError:
             pass
 
@@ -1907,13 +2185,13 @@ class KaizumiUI:
 
         window = tk.Toplevel(self.root)
         self._voiceover_window = window
-        window.title("NIANG IA · VOIX OFF")
+        window.title("NIANG IA · Voix off")
         window.configure(bg=self.col["bg"])
         window.geometry("620x610")
         window.minsize(500, 500)
 
         tk.Label(
-            window, text="GÉNÉRATION VOIX OFF · GEMINI TTS",
+            window, text="GÉNÉRATION DE VOIX OFF · GEMINI TTS",
             bg=self.col["bg"], fg=self.col["pri"], font=("Consolas", 12, "bold"),
         ).pack(anchor="w", padx=16, pady=(14, 4))
         tk.Label(
@@ -1959,7 +2237,7 @@ class KaizumiUI:
             "VOIX", ["Kore", "Aoede", "Puck", "Charon", "Fenrir", "Leda", "Orus", "Zephyr"],
             "Kore", 12,
         )
-        language = add_option("LANGUE", ["français", "English", "español", "العربية"], "français", 12)
+        language = add_option("LANGUE", ["français", "anglais", "espagnol", "arabe"], "français", 12)
         pace = add_option("RYTHME", ["lent", "normal", "rapide"], "normal", 10)
         tone_cell = tk.Frame(options, bg=self.col["bg"])
         tone_cell.pack(side="left")
@@ -1978,19 +2256,19 @@ class KaizumiUI:
         controls = tk.Frame(window, bg=self.col["bg"])
         controls.pack(fill="x", padx=16, pady=(4, 14))
         generate = tk.Button(
-            controls, text="GÉNÉRER", bg=self.col["panel"], fg=self.col["pri"],
+            controls, text=tr("GÉNÉRER"), bg=self.col["panel"], fg=self.col["pri"],
             activebackground=self.col["pri"], activeforeground=self.col["bg"],
             relief="flat", highlightthickness=1, highlightbackground=self.col["mid"],
             cursor="hand2",
         )
         generate.pack(side="left")
-        play = tk.Button(controls, text="▶ LIRE", command=self._play_voiceover,
+        play = tk.Button(controls, text=tr("▶ LIRE"), command=self._play_voiceover,
                          bg=self.col["panel"], fg=self.col["text"], state="disabled")
         play.pack(side="left", padx=6)
-        pause = tk.Button(controls, text="Ⅱ PAUSE / REPRISE", command=self._pause_voiceover,
+        pause = tk.Button(controls, text=tr("Ⅱ PAUSE / REPRISE"), command=self._pause_voiceover,
                           bg=self.col["panel"], fg=self.col["text"], state="disabled")
         pause.pack(side="left")
-        save = tk.Button(controls, text="TÉLÉCHARGER WAV", command=self._save_voiceover,
+        save = tk.Button(controls, text=tr("TÉLÉCHARGER WAV"), command=self._save_voiceover,
                          bg=self.col["panel"], fg=self.col["text"], state="disabled")
         save.pack(side="right")
 
@@ -2016,11 +2294,15 @@ class KaizumiUI:
                     generate.configure(state="normal")
                     return
             self._voiceover_path = None
-            self._set_voiceover_status(status, "Envoi du texte et génération audio…")
+            self._set_voiceover_status(status, "Envoi du texte et génération de l’audio…")
             text = text_box.get("1.0", "end-1c").strip()
             settings = {
                 "voice": voice.get(),
-                "language": language.get(),
+                "language": {
+                    "anglais": "English",
+                    "espagnol": "español",
+                    "arabe": "العربية",
+                }.get(language.get(), language.get()),
                 "pace": pace.get(),
                 "tone": tone.get().strip() or "naturel",
             }
@@ -2082,7 +2364,7 @@ class KaizumiUI:
         if result:
             message = ctypes.create_unicode_buffer(256)
             ctypes.windll.winmm.mciGetErrorStringW(result, message, len(message))
-            raise RuntimeError(message.value or "Windows Media Control Interface error")
+            raise RuntimeError(message.value or "Erreur de l’interface de contrôle multimédia de Windows.")
 
     def _play_voiceover(self):
         if not self._voiceover_path:
@@ -2193,19 +2475,10 @@ class KaizumiUI:
         self._silent_canvas.bind("<Button-1>", lambda e: self._toggle_silent_mode())
         self._draw_silent_button()
 
-        self._update_button = tk.Button(
-            self.root,
-            text="↻ MISE À JOUR",
+        self._update_button = PillButton(
+            self.root, self, text=tr("↻ MISE À JOUR"),
             command=self._check_for_updates,
-            fg=self.col["pri"],
-            bg=self.col["panel"],
-            activeforeground=self.col["bg"],
-            activebackground=self.col["pri"],
-            font=("Segoe UI", 8, "bold"),
-            borderwidth=0,
-            cursor="hand2",
-            highlightthickness=1,
-            highlightbackground=self.col["mid"],
+            font=("Segoe UI", 8, "bold"), height=32,
         )
         self._update_button.place(x=min(294, max(180, self.W - 210)), y=BTN_Y, width=140, height=32)
 
@@ -2216,36 +2489,38 @@ class KaizumiUI:
         c.delete("all")
         active = self.silent_mode
         border = self.col["acc2"] if active else self.col["mid"]
-        fill = "#211900" if active else self.col["panel"]
+        fill = "#06262e" if active else self.col["panel"]
         fg = self.col["acc2"] if active else self.col["text"]
-        label = " TEXT-ONLY" if active else " VOICE ON"
-        c.create_rectangle(0, 0, 150, 32, outline=border, fill=fill, width=1)
+        label = tr(" TEXTE SEUL") if active else tr(" VOIX ACTIVÉE")
+        c.configure(bg=self.col["bg"])
+        _round_poly(c, 1, 1, 149, 31, 15, outline=border, fill=fill, width=1)
         c.create_text(75, 16, text=f"▣{label}", fill=fg, font=("Segoe UI", 10, "bold"))
 
     def _toggle_silent_mode(self):
         self.silent_mode = not self.silent_mode
         self._draw_silent_button()
         self.set_state("TEXT-ONLY" if self.silent_mode else ("MUTED" if self.muted else "LISTENING"))
-        self.write_log("SYS: Text-only mode enabled — NIANG IA will type, not speak." if self.silent_mode
-                       else "SYS: Voice output restored.")
+        self.write_log("SYS: Mode texte activé — NIANG IA répondra par écrit." if self.silent_mode
+                       else "SYS: Sortie vocale réactivée.")
 
     def _draw_mute_button(self):
         c = self._mute_canvas
         c.delete("all")
         if self.muted:
             border = self.col["mutcol"]
-            fill   = "#1a0008"
+            fill   = "#240009"
             icon   = "🔇"
-            label  = " MUTED"
+            label  = tr(" MUET")
             fg     = self.col["mutcol"]
         else:
             border = self.col["mid"]
             fill   = self.col["panel"]
             icon   = "🎙"
-            label  = " LIVE"
+            label  = tr(" EN DIRECT")
             fg     = self.col["green"]
 
-        c.create_rectangle(0, 0, 110, 32, outline=border, fill=fill, width=1)
+        c.configure(bg=self.col["bg"])
+        _round_poly(c, 1, 1, 109, 31, 15, outline=border, fill=fill, width=1)
         c.create_text(55, 16, text=f"{icon}{label}",
                       fill=fg, font=("Segoe UI", 10, "bold"))
 
@@ -2254,10 +2529,10 @@ class KaizumiUI:
         self._draw_mute_button()
         if self.muted:
             self.set_state("MUTED")
-            self.write_log("SYS: Microphone muted.")
+            self.write_log("SYS: Microphone désactivé.")
         else:
             self.set_state("LISTENING")
-            self.write_log("SYS: Microphone active.")
+            self.write_log("SYS: Microphone activé.")
 
     # ── Keyboard input ────────────────────────────────────────────────────────
 
@@ -2292,34 +2567,42 @@ class KaizumiUI:
         self._hist_idx    = -1
         self._draft       = ""
 
-        self._clear_btn = tk.Button(
-            self.root,
-            text="CLEAR",
-            command=self._on_clear_log,
-            fg=self.col["mid"], bg=self.col["panel"],
-            activeforeground=self.col["bg"], activebackground=self.col["acc2"],
-            font=("Segoe UI", 9, "bold"),
-            borderwidth=0, cursor="hand2",
-            highlightthickness=1,
-            highlightbackground=self.col["mid"],
+        self._clear_btn = PillButton(
+            self.root, self, text=tr("EFFACER"), command=self._on_clear_log,
+            font=("Segoe UI", 9, "bold"), height=46, radius=14,
         )
         self._clear_btn.place(x=x0 + INP_W + 4, y=y, width=CLR_W, height=46)
 
-        self._send_btn = tk.Button(
-            self.root,
-            text="SEND ▸",
-            command=self._on_input_submit,
-            fg=self.col["pri"], bg=self.col["panel"],
-            activeforeground=self.col["bg"], activebackground=self.col["pri"],
-            font=("Segoe UI", 9, "bold"),
-            borderwidth=0, cursor="hand2",
-            highlightthickness=1,
-            highlightbackground=self.col["mid"],
+        self._send_btn = PillButton(
+            self.root, self, text=tr("ENVOYER ▸"), command=self._on_input_submit,
+            style="solid", font=("Segoe UI", 9, "bold"), height=46, radius=14,
         )
         self._send_btn.place(x=x0 + INP_W + CLR_W + 8, y=y,
                              width=BTN_W, height=46)
 
+    def _hide_main_widgets(self):
+        for w in (self._left_deck, self._right_deck, self.log_frame, self._input_text,
+                  self._clear_btn, self._send_btn, self._mute_canvas,
+                  self._silent_canvas, self._update_button):
+            w.place_forget()
+
+    def _finish_intro(self, event=None):
+        """End the startup animation (called at INTRO_END, or on click / key)."""
+        if self._intro_done:
+            return
+        T = time.time() - self._t_start
+        if T < INTRO_END:
+            self._t_start -= (INTRO_END - T)       # jump the clock to the final layout
+        self._intro_done = True
+        self._relayout()
+        try:
+            self._input_text.focus_set()
+        except Exception:
+            pass
+
     def _relayout(self):
+        if not self._intro_done:
+            return
         W, H = self.W, self.H
         is_compact = W < 900 or H < 700
         if is_compact:
@@ -2449,22 +2732,22 @@ class KaizumiUI:
         """
         self._state = state
         if state == "MUTED":
-            self.status_text = "MUTED"
+            self.status_text = "MUET"
             self.speaking    = False
         elif state == "SPEAKING":
-            self.status_text = "SPEAKING"
+            self.status_text = "PARLE"
             self.speaking    = True
         elif state == "THINKING":
-            self.status_text = "THINKING"
+            self.status_text = "RÉFLEXION"
             self.speaking    = False
         elif state == "LISTENING":
-            self.status_text = "LISTENING"
+            self.status_text = "À L’ÉCOUTE"
             self.speaking    = False
         elif state == "PROCESSING":
-            self.status_text = "PROCESSING"
+            self.status_text = "TRAITEMENT"
             self.speaking    = False
         else:
-            self.status_text = "ONLINE"
+            self.status_text = "EN LIGNE"
             self.speaking    = False
 
     # ── Face loading ─────────────────────────────────────────────────────────
@@ -2531,6 +2814,26 @@ class KaizumiUI:
         if t % 40 == 0:
             self.status_blink = not self.status_blink
 
+        # Video-style HUD phases (ring arcs, dashed ring, tick marks)
+        dt   = max(0.0, min(0.1, now - self._prev_now))
+        self._prev_now = now
+        spin = 2.2 if self.speaking else 1.0
+        self._ph_arc  += dt * 0.8 * spin
+        self._ph_dash += dt * 22 * spin
+        self._ph_tick += dt * 0.15
+        T = now - self._t_start
+        if self.muted:
+            tgt = 0.04
+        elif self.speaking:
+            tgt = 0.5 + 0.45 * abs(math.sin(T * 5.0)) + random.uniform(-0.08, 0.08)
+        elif self._state in ("THINKING", "PROCESSING"):
+            tgt = 0.35 + 0.12 * math.sin(T * 4.0)
+        else:
+            tgt = 0.14 + 0.05 * math.sin(T * 2.0)
+        self._lv += (tgt - self._lv) * 0.25
+
+        if not self._intro_done and T >= INTRO_END:
+            self._finish_intro()
         self._draw()
         self.root.after(16, self._animate)
 
@@ -2555,214 +2858,318 @@ class KaizumiUI:
 
     # ── Drawing ──────────────────────────────────────────────────────────────
 
+    # ── Video look: backdrop, text helpers ───────────────────────────────────
+
+    def _font(self, px, weight="bold"):
+        key = (int(px), weight)
+        f = self._font_cache.get(key)
+        if f is None:
+            f = tkfont.Font(family="Segoe UI", size=-int(px), weight=weight)
+            self._font_cache[key] = f
+        return f
+
+    def _spaced(self, text, x, y, px, fill, gap, weight="bold", anchor="center", tag="dyn"):
+        """Letter-spaced text (the video uses wide tracking on every caption)."""
+        f  = self._font(px, weight)
+        ws = [f.measure(ch) for ch in text]
+        tot = sum(ws) + gap * (len(text) - 1)
+        xx = x - tot / 2 if anchor == "center" else (x - tot if anchor == "e" else x)
+        for ch, w in zip(text, ws):
+            if ch != " ":
+                self.bg.create_text(xx + w / 2, y, text=ch, fill=fill, font=f, tags=tag)
+            xx += w + gap
+        return tot
+
+    def _cached(self, name, key, fn):
+        """Redraw a block of static canvas items only when its key changes."""
+        if self._cache_keys.get(name) != key:
+            self._cache_keys[name] = key
+            self.bg.delete(name)
+            fn()
+
+    def _ensure_backdrop(self):
+        """Radial gradient + vignette + scanlines (pre-rendered, like the video's bg())."""
+        col = self.col
+        key = (self.W, self.H, self.FCX, self.FCY, col["pri"])
+        if key == self._bd_key or self.W < 4 or self.H < 4:
+            return
+        self._bd_key = key
+        W, H = self.W, self.H
+        pri = _hex_rgb(col["pri"])
+        c0 = tuple(v * 0.13 for v in pri)      # #03202a-ish centre glow
+        c1 = tuple(v * 0.045 for v in pri)     # #020c12-ish mid
+        half = math.hypot(W / 2, H / 2)
+        step = 8
+        sw, sh = max(2, W // step), max(2, H // step)
+        img = Image.new("RGB", (sw, sh))
+        px = []
+        for yy in range(sh):
+            for xx in range(sw):
+                d = math.hypot((xx + .5) * step - self.FCX, (yy + .5) * step - self.FCY) / half
+                if d < .55:
+                    k = max(0.0, (d - .045) / .505)
+                    rgb = [c0[i] + (c1[i] - c0[i]) * k for i in range(3)]
+                else:
+                    k = min(1.0, (d - .55) / .45)
+                    rgb = [c1[i] * (1 - k) for i in range(3)]
+                vg = .65 * max(0.0, min(1.0, (d - .36) / .685))
+                px.append(tuple(int(v * (1 - vg)) for v in rgb))
+        img.putdata(px)
+        img = img.resize((W, H), Image.BILINEAR)
+        mask = Image.new("L", (W, H), 0)
+        md = ImageDraw.Draw(mask)
+        for yy in range(0, H, 4):
+            md.rectangle([0, yy, W, yy + 1], fill=14)       # scanlines, ~5 %
+        img = Image.composite(Image.new("RGB", (W, H), (0, 0, 0)), img, mask)
+        self._bd_tk = ImageTk.PhotoImage(img)
+        self.bg.delete("bgimg")
+        self.bg.create_image(0, 0, image=self._bd_tk, anchor="nw", tags=("bgimg",))
+        self.bg.tag_lower("bgimg")
+
+    # ── Drawing ──────────────────────────────────────────────────────────────
+
     def _draw(self):
         c    = self.bg
         W, H = self.W, self.H
-        t    = self.tick
-        FCX  = self.FCX
-        FCY  = self.FCY
-        FW   = self.FACE_SZ
         col  = self.col
-        c.delete("all")
+        FCX, FCY, FW = self.FCX, self.FCY, self.FACE_SZ
+        T    = time.time() - self._t_start
+        self._ensure_backdrop()
+        c.delete("dyn")
+        D = ("dyn",)
 
-        # Background grid
-        for x in range(0, W, 44):
-            for y in range(0, H, 44):
-                c.create_rectangle(x, y, x+1, y+1, fill=col["dimmer"], outline="")
+        muted = self.muted
+        rgb   = col["halo_mut"] if muted else col["halo"]
+        pri   = "#%02x%02x%02x" % rgb
+        bgc   = col["bg"]
+        clamp = lambda x, a=0.0, b=1.0: max(a, min(b, x))
+        mix   = lambda k: _blend(bgc, pri, k)
 
-        # Halo rings
-        halo_rgb  = col["halo_mut"] if self.muted else col["halo"]
-        for r in range(int(FW * 0.54), int(FW * 0.28), -22):
-            frac = 1.0 - (r - FW * 0.28) / (FW * 0.26)
-            ga   = max(0, min(255, int(self.halo_a * 0.09 * frac)))
-            c.create_oval(FCX-r, FCY-r, FCX+r, FCY+r,
-                          outline=self._ac(*halo_rgb, ga), width=2)
+        sg = lambda a_, b_: clamp((T - a_) / (b_ - a_))
+        ez = lambda x: 1 - (1 - x) ** 3
+        k  = H / 1080.0                 # video (1080p) → window scale
+        R_rest = FW * 0.36              # resting ring radius (video: 210)
+        s  = R_rest / 210.0             # line widths / tick sizes
+        # Startup timeline (same as the ad): ring grows 300→500 at 2.2-3.2 s,
+        # then at 5.0-5.8 s it shrinks and moves up to its resting place.
+        if T < 5.0:
+            R  = 300 * k + (500 - 300) * k * ez(sg(2.2, 3.2))
+            ry = H / 2.0
+        elif T < INTRO_END:
+            kk = ez(sg(5.0, 5.8))
+            R  = 500 * k + (R_rest - 500 * k) * kk
+            ry = H / 2.0 + (FCY - H / 2.0) * kk
+        else:
+            R, ry = R_rest, FCY
+        ia = sg(1.6, 2.6)               # ring fade-in
 
-        # Pulse waves
+        # ── Perspective grid floor (animated, as in bg()) ────────────────────
+        y0 = ry + FW * 0.18
+        gcol = mix(.11)
+        sx = W / 1920.0
+        for i in range(14):
+            z = ((i + T * .6) % 14) / 14.0
+            y = y0 + (z ** 2.2) * (H - y0)
+            c.create_line(0, y, W, y, fill=gcol, tags=D)
+        for i in range(-14, 15):
+            c.create_line(FCX + i * 40 * sx, y0, FCX + i * 260 * sx, H, fill=gcol, tags=D)
+
+        # ── Particles converging on the ring, then orbiting ──────────────────
+        pe = 1 - (1 - clamp(T / 2.0)) ** 3
+        pfill = mix(.7 * clamp(T / 1.5))
+        far_k = W / 1920.0
+        for p in self._particles:
+            r = p["far"] * far_k * (1 - pe) + (R + 70 * s + p["off"] * s) * pe
+            a = p["a"] + T * p["sp"]
+            x = FCX + math.cos(a) * r
+            y = ry + math.sin(a) * r
+            sz = p["s"] * 0.6
+            c.create_oval(x - sz, y - sz, x + sz, y + sz, fill=pfill, outline="", tags=D)
+
+        # ── Expanding pulse rings (speech) ───────────────────────────────────
         for pr in self.pulse_r:
-            pa = max(0, int(220 * (1.0 - pr / (FW * 0.72))))
-            r  = int(pr)
-            colr = halo_rgb if not self.muted else (255, 30, 80)
-            c.create_oval(FCX-r, FCY-r, FCX+r, FCY+r,
-                          outline=self._ac(*colr, pa if not self.muted else pa // 3),
-                          width=2)
+            f = 1.0 - pr / (FW * 0.72)
+            r = int(pr)
+            if r > 4:
+                # fade toward the local glow (not toward black) so no dark ring shows
+                c.create_oval(FCX - r, ry - r, FCX + r, ry + r,
+                              outline=_blend(mix(.06), pri, .55 * f * (.35 if muted else 1)),
+                              width=2, tags=D)
 
-        # Spinning rings
-        for idx, (r_frac, w_ring, arc_l, gap) in enumerate([
-                (0.47, 3, 110, 75), (0.39, 2, 75, 55), (0.31, 1, 55, 38)]):
-            ring_r = int(FW * r_frac)
-            base_a = self.rings_spin[idx]
-            a_val  = max(0, min(255, int(self.halo_a * (1.0 - idx * 0.18))))
-            rcol   = halo_rgb if not self.muted else (255, 30, 80)
-            for s in range(360 // (arc_l + gap)):
-                start = (base_a + s * (arc_l + gap)) % 360
-                c.create_arc(FCX-ring_r, FCY-ring_r, FCX+ring_r, FCY+ring_r,
-                             start=start, extent=arc_l,
-                             outline=self._ac(*rcol, a_val), width=w_ring, style="arc")
+        # ── HUD ring: circle + 3 thick arcs + dashed ring + 72 ticks ─────────
+        base = mix(.06)                 # fade from the local glow, not from black
+        glow = _blend(base, pri, .22 * ia)
+        main = _blend(base, pri, ia)
+        c.create_oval(FCX - R, ry - R, FCX + R, ry + R, outline=glow, width=6, tags=D)
+        c.create_oval(FCX - R, ry - R, FCX + R, ry + R, outline=main, width=2, tags=D)
 
-        # Scan arcs
-        sr      = int(FW * 0.49)
-        scan_a  = min(255, int(self.halo_a * 1.4))
-        arc_ext = 70 if self.speaking else 42
-        c.create_arc(FCX-sr, FCY-sr, FCX+sr, FCY+sr,
-                     start=self.scan_angle, extent=arc_ext,
-                     outline=self._ac(*halo_rgb, scan_a), width=3, style="arc")
-        c.create_arc(FCX-sr, FCY-sr, FCX+sr, FCY+sr,
-                     start=self.scan2_angle, extent=arc_ext,
-                     outline=self._ac(*col["scan2"], scan_a // 2), width=2, style="arc")
+        Ra = R - 22 * s
+        aw = max(3, int(round(7 * s * 1.1)))
+        for i in range(3):
+            a0 = self._ph_arc + i * 2.0944
+            st = -math.degrees(a0 + 1.1)
+            for wd, colr in ((aw + 5, glow), (aw, main)):
+                c.create_arc(FCX - Ra, ry - Ra, FCX + Ra, ry + Ra, start=st,
+                             extent=math.degrees(1.1), style="arc",
+                             outline=colr, width=wd, tags=D)
 
-        # Ticks
-        t_out = int(FW * 0.495)
-        t_in  = int(FW * 0.472)
-        a_mk  = self._ac(*halo_rgb, 155)
-        for deg in range(0, 360, 10):
-            rad = math.radians(deg)
-            inn = t_in if deg % 30 == 0 else t_in + 5
-            c.create_line(FCX + t_out * math.cos(rad), FCY - t_out * math.sin(rad),
-                          FCX + inn  * math.cos(rad), FCY - inn  * math.sin(rad),
-                          fill=a_mk, width=1)
+        Rd = R + 26 * s
+        c.create_oval(FCX - Rd, ry - Rd, FCX + Rd, ry + Rd, outline=main, width=1,
+                      dash=(3, 9), dashoffset=int(self._ph_dash), tags=D)
 
-        # Crosshair
-        ch_r = int(FW * 0.50)
-        gap  = int(FW * 0.15)
-        ch_a = self._ac(*halo_rgb, int(self.halo_a * 0.55))
-        for x1, y1, x2, y2 in [
-                (FCX - ch_r, FCY, FCX - gap, FCY), (FCX + gap, FCY, FCX + ch_r, FCY),
-                (FCX, FCY - ch_r, FCX, FCY - gap), (FCX, FCY + gap, FCX, FCY + ch_r)]:
-            c.create_line(x1, y1, x2, y2, fill=ch_a, width=1)
+        t_in = R + 50 * s
+        for i in range(72):
+            a = i / 72 * math.tau + self._ph_tick
+            ln = 20 * s if i % 6 == 0 else 8 * s
+            ca, sa = math.cos(a), math.sin(a)
+            c.create_line(FCX + ca * t_in, ry + sa * t_in,
+                          FCX + ca * (t_in + ln), ry + sa * (t_in + ln),
+                          fill=main, width=1, tags=D)
 
-        # Corner brackets
-        blen = 22
-        bc   = self._ac(*halo_rgb, 200)
-        hl = FCX - FW // 2; hr = FCX + FW // 2
-        ht = FCY - FW // 2; hb = FCY + FW // 2
-        for bx, by, sdx, sdy in [(hl, ht, 1, 1), (hr, ht, -1, 1),
-                                   (hl, hb, 1, -1), (hr, hb, -1, -1)]:
-            c.create_line(bx, by, bx + sdx * blen, by,            fill=bc, width=2)
-            c.create_line(bx, by, bx,               by + sdy * blen, fill=bc, width=2)
+        # ── Orb: glow + 96 radial waveform bars + core (video orb()) ─────────
+        oa = sg(5.2, 5.9)
+        if oa > 0:
+            lv = self._lv
+            r0 = R * .55 * self.scale
+            for i in range(8, 0, -1):
+                rr = R * .6 * i / 8
+                c.create_oval(FCX - rr, ry - rr, FCX + rr, ry + rr,
+                              fill=mix(.55 * (1 - i / 8) * oa), outline="", tags=D)
+            bw = max(2, int(round(5 * s * 1.1)))
+            bar = _blend(mix(.06), pri, oa)
+            N = 96
+            for i in range(N):
+                a = i / N * math.tau
+                w = (math.sin(a * 3 + T * 6) + math.sin(a * 5 - T * 4) * .7
+                     + math.sin(a * 9 + T * 9) * .4)
+                L = 3 + abs(w) * lv * R * .2
+                ca, sa = math.cos(a), math.sin(a)
+                c.create_line(FCX + ca * r0, ry + sa * r0,
+                              FCX + ca * (r0 + L), ry + sa * (r0 + L),
+                              fill=bar, width=bw, capstyle="round", tags=D)
+            ri = r0 - 12 * s
+            c.create_oval(FCX - ri, ry - ri, FCX + ri, ry + ri, outline=bar, width=2, tags=D)
+            cr = (10 + lv * 10) * s * 1.2 * self.scale
+            c.create_oval(FCX - cr - 4, ry - cr - 4, FCX + cr + 4, ry + cr + 4,
+                          fill=mix(.35 * oa), outline="", tags=D)
+            c.create_oval(FCX - cr, ry - cr, FCX + cr, ry + cr,
+                          fill="#eaffff" if not muted else "#ffdde2", outline="", tags=D)
 
-        # Face / orb
-        if self._has_face:
-            fw = int(FW * self.scale)
-            if (self._face_scale_cache is None or
-                    abs(self._face_scale_cache[0] - self.scale) > 0.004):
-                scaled = self._face_pil.resize((fw, fw), Image.BILINEAR)
-                tk_img = ImageTk.PhotoImage(scaled)
-                self._face_scale_cache = (self.scale, tk_img)
-            c.create_image(FCX, FCY, image=self._face_scale_cache[1])
-        else:
-            orb_r = int(FW * 0.27 * self.scale)
-            orb_color = (255, 30, 80) if self.muted else col["orb"]
-            for i in range(7, 0, -1):
-                r2   = int(orb_r * i / 7)
-                frac = i / 7
-                ga   = max(0, min(255, int(self.halo_a * 1.1 * frac)))
-                c.create_oval(FCX-r2, FCY-r2, FCX+r2, FCY+r2,
-                              fill=self._ac(int(orb_color[0]*frac),
-                                            int(orb_color[1]*frac),
-                                            int(orb_color[2]*frac), ga),
-                              outline="")
-            c.create_text(FCX, FCY, text=SYSTEM_NAME,
-                          fill=self._ac(*halo_rgb, min(255, int(self.halo_a * 2))),
-                          font=("Segoe UI", 14, "bold"))
+        # ── Startup: "INITIALISATION…" + 0→100 % counter (video scene A) ─────
+        if T < 2.4:
+            aA = min(clamp(T / 0.4), 1 - clamp((T - 2.0) / 0.4))
+            if aA > 0:
+                blink = 0.6 + 0.4 * math.sin(T * 14)
+                self._spaced("INITIALISATION…", W / 2, H - 170 * k, max(12, int(26 * k)),
+                             mix(aA * blink), 10 * k, weight="normal")
+                pf = self._font(int(120 * k), "normal")
+                pct = f"{int(sg(0.2, 2.1) * 100)}%"
+                for dx, dy in ((-2, 0), (2, 0), (0, -2), (0, 2)):
+                    c.create_text(W / 2 + dx, ry + dy, text=pct, font=pf, tags=D,
+                                  fill=mix(.28 * aA))
+                c.create_text(W / 2, ry, text=pct, font=pf, tags=D,
+                              fill=_blend(bgc, "#eaffff", aA))
+        # intro subtitle (centre), fades out as the layout moves up
+        if T < 5.4:
+            aS = min(sg(3.5, 3.9), 1 - sg(5.0, 5.4))
+            if aS > 0:
+                self._spaced("ASSISTANT VOCAL INTELLIGENT", W / 2, H / 2 + 110 * k,
+                             max(11, int(26 * k)), mix(aS), 14 * k, weight="normal")
 
-        # ── Header ────────────────────────────────────────────────────────────
-        HDR = 78
-        c.create_rectangle(0, 0, W, HDR, fill=col["hdr"], outline="")
-        c.create_line(0, HDR, W, HDR, fill=col["mid"], width=1)
-        c.create_text(W // 2, 16, text=SYSTEM_NAME,
-                      fill=col["pri"], font=("Segoe UI", 15, "bold"))
-        c.create_text(W // 2, 36, text="Just A Rather Very Intelligent System",
-                      fill=col["mid"], font=("Segoe UI", 8))
-        c.create_text(16, 16, text=MODEL_BADGE,
-                      fill=col["dim"], font=("Segoe UI", 8), anchor="w")
-        c.create_text(W - 16, 18, text=time.strftime("%H:%M:%S"),
-                      fill=col["pri"], font=("Segoe UI", 12, "bold"), anchor="e")
+        # ── Logo "NIANG IA": letter-by-letter reveal with chromatic glitch ───
+        def draw_logo():
+            px_rest = int(clamp(H * 0.045, 24, 40))
+            kk2 = ez(sg(5.0, 5.8))
+            px = int(130 * k + (px_rest - 130 * k) * kk2)
+            f = self._font(px, "bold")
+            L = "NIANG IA"
+            gap = px * .16
+            ws = [f.measure(ch) for ch in L]
+            tot = sum(ws) + gap * (len(L) - 1)
+            x = W / 2 - tot / 2
+            ly = H / 2.0 + (38 - H / 2.0) * kk2
+            for i, ch in enumerate(L):
+                k0 = 2.5 + i * .09
+                u = clamp((T - k0) / .35)
+                if u > 0 and ch != " ":
+                    cx_ = x + ws[i] / 2
+                    if 0 < T - k0 < .3:                      # glitch frame
+                        c.create_text(cx_ - 3, ly + 1, text=ch, font=f, tags="logo",
+                                      fill=_blend(bgc, col["scan2"], .6))
+                        c.create_text(cx_ + 3, ly - 1, text=ch, font=f, tags="logo",
+                                      fill=_blend(bgc, col["pri"], .6))
+                    for dx, dy in ((-1.5, 0), (1.5, 0), (0, -1.5), (0, 1.5)):
+                        c.create_text(cx_ + dx, ly + dy, text=ch, font=f, tags="logo",
+                                      fill=_blend(bgc, col["pri"], .30 * u))
+                    c.create_text(cx_, ly, text=ch, font=f, tags="logo",
+                                  fill=_blend(bgc, "#eaffff", u))
+                x += ws[i] + gap
+            if H >= 640:
+                sa_ = clamp((T - 5.4) / 0.8)
+                if sa_ > 0:
+                    sub_px = 11
+                    self._spaced("ASSISTANT VOCAL INTELLIGENT", W / 2, ly + px / 2 + 16,
+                                 sub_px, _blend(bgc, col["pri"], .85 * sa_), 5,
+                                 weight="normal", tag="logo")
+        self._cached("logo", (W, H, col["pri"], bgc, True if T > INTRO_END + 0.9 else round(T * 40)), draw_logo)
 
-        # Connection indicator (right side of header)
+        # ── HUD corners (video: "NIANG//IA  v1.0" / REC) ─────────────────────
+        self._cached("hud_tl", (W, col["pri"]), lambda: self._spaced(
+            "NIANG//IA  v1.0", 24, 18, 11, _blend(bgc, col["pri"], .6), 3,
+            weight="normal", anchor="w", tag="hud_tl"))
+
+        c.create_text(W - 24, 18, text=time.strftime("%H:%M:%S"),
+                      fill=col["pri"], font=("Segoe UI", 11, "bold"), anchor="e", tags=D)
         if self.connecting:
-            conn_txt, conn_col = "◌ CONNECTING", col["acc2"]
+            conn_txt, conn_col = "◌ CONNEXION…", col["acc2"]
         elif self.connected:
-            conn_txt, conn_col = "● ONLINE", col["green"]
+            conn_txt, conn_col = ("● " if self.status_blink else "○ ") + "EN LIGNE", col["green"]
         else:
-            conn_txt, conn_col = "○ OFFLINE", col["red"]
-        c.create_text(W - 16, 40, text=conn_txt, fill=conn_col,
-                      font=("Segoe UI", 8, "bold"), anchor="e")
+            conn_txt, conn_col = "○ HORS LIGNE", col["red"]
+        c.create_text(W - 24, 40, text=conn_txt, fill=conn_col,
+                      font=("Segoe UI", 8, "bold"), anchor="e", tags=D)
+        if T < INTRO_END:
+            for _name in ("logo", "hud_tl"):
+                c.tag_raise(_name)
+            return
+        persona_mode = {"normal": "NORMAL"}.get(self.persona_mode.lower(), self.persona_mode.upper())
+        persona_mood = {"calm": "CALME"}.get(self.persona_mood.lower(), self.persona_mood.upper())
+        badge = f"◈ {persona_mode} · {persona_mood} · {self.persona_voice}"
+        c.create_text(24, 40, text=badge, fill=col["acc2"],
+                      font=("Segoe UI", 8, "bold"), anchor="w", tags=D)
 
-        # Persona badges (left side of header)
-        badge = (f"◈ {self.persona_mode.upper()} · "
-                 f"{self.persona_mood.upper()} · {self.persona_voice}")
-        c.create_text(16, 40, text=badge, fill=col["acc2"],
-                      font=("Segoe UI", 8, "bold"), anchor="w")
-
-        # ── Status indicator ──────────────────────────────────────────────────
+        # ── Status caption (wide tracking, like "INITIALISATION…") ───────────
         sy = FCY + FW // 2 + 45
-
         if self.muted:
-            stat = "⊘ MUTED"
-            sc   = col["mutcol"]
+            stat, sc = "⊘ MUET", col["mutcol"]
         elif self.speaking:
-            stat = "● SPEAKING"
-            sc   = col["acc"]
+            stat, sc = "● PARLE", col["text"]
         elif self._state == "THINKING":
-            sym  = "◈" if self.status_blink else "◇"
-            stat = f"{sym} THINKING"
-            sc   = col["acc2"]
+            stat, sc = ("◈" if self.status_blink else "◇") + " RÉFLEXION", col["acc2"]
         elif self._state == "PROCESSING":
-            sym  = "▷" if self.status_blink else "▶"
-            stat = f"{sym} PROCESSING"
-            sc   = col["acc2"]
+            stat, sc = ("▷" if self.status_blink else "▶") + " TRAITEMENT", col["acc2"]
         elif self._state == "LISTENING":
-            sym  = "●" if self.status_blink else "○"
-            stat = f"{sym} LISTENING"
-            sc   = col["green"]
+            stat, sc = ("●" if self.status_blink else "○") + " À L’ÉCOUTE", col["green"]
         else:
-            sym  = "●" if self.status_blink else "○"
-            stat = f"{sym} {self.status_text}"
-            sc   = col["pri"]
+            stat, sc = ("●" if self.status_blink else "○") + f" {self.status_text}", col["pri"]
+        self._cached("status", (stat, sc, W, sy), lambda: self._spaced(
+            stat, W / 2, sy, 13, sc, 6, weight="bold", tag="status"))
 
-        c.create_text(W // 2, sy, text=stat,
-                      fill=sc, font=("Segoe UI", 11, "bold"))
+        for _name in ("logo", "hud_tl", "status"):
+            c.tag_raise(_name)
 
-        # ── Sound wave ────────────────────────────────────────────────────────
-        wy = sy + 22
-        N  = 32
-        BH = 18
-        bw = 8
-        total_w = N * bw
-        wx0 = (W - total_w) // 2
-        for i in range(N):
-            if self.muted:
-                hb  = 2
-                wcol = col["mutcol"]
-            elif self.speaking:
-                hb  = random.randint(3, BH)
-                wcol = col["pri"] if hb > BH * 0.6 else col["mid"]
-            else:
-                hb  = int(3 + 2 * math.sin(t * 0.08 + i * 0.55))
-                wcol = col["dim"]
-            bx = wx0 + i * bw
-            c.create_rectangle(bx, wy + BH - hb, bx + bw - 1, wy + BH,
-                               fill=wcol, outline="")
-
-        # ── Footer / status bar ───────────────────────────────────────────────
-        c.create_rectangle(0, H - 40, W, H, fill=col["hdr"], outline="")
-        c.create_line(0, H - 40, W, H - 40, fill=col["dim"], width=1)
-
-        # Last system event (alerts, reminders) — center-left
+        # ── Footer (no band: the video is full-bleed) ────────────────────────
         if self.last_event:
-            ev = self.last_event if len(self.last_event) <= 72 else self.last_event[:69] + "..."
-            c.create_text(W // 2, H - 26, text=ev, fill=col["mid"],
-                          font=("Segoe UI", 8), anchor="center")
-
-        # Battery + hints — right side
+            lim = 56 if W >= 900 else 34
+            ev = self.last_event if len(self.last_event) <= lim else self.last_event[:lim - 3] + "..."
+            c.create_text(W - 16, H - 30, text=ev, fill=col["mid"],
+                          font=("Segoe UI", 8), anchor="e", tags=D)
         batt = self._battery_text()
-        hints = "  ".join(x for x in [batt, "[F4] MUTE", "[F5] THEME"] if x)
-        c.create_text(W - 16, H - 14, text=hints, fill=col["dim"],
-                      font=("Segoe UI", 8), anchor="e")
-
-        c.create_text(16, H - 14, text=f"Kaizumi · {THEMES[self._theme]['name']}",
-                      fill=col["dim"], font=("Segoe UI", 8), anchor="w")
+        hints = "  ".join(x for x in [batt, "[F4] SON", "[F5] THÈME"] if x)
+        c.create_text(W - 16, H - 12, text=hints, fill=col["mid"],
+                      font=("Segoe UI", 8), anchor="e", tags=D)
+        c.create_text(16, H - 12, text=f"NIANG//IA · {THEMES[self._theme]['name']}",
+                      fill=col["mid"], font=("Segoe UI", 8), anchor="w", tags=D)
 
     # ── Log ───────────────────────────────────────────────────────────────────
 
@@ -2794,15 +3201,22 @@ class KaizumiUI:
         self.is_typing = True
         text = self.typing_queue.popleft()
         tl   = text.lower()
+        label = None
         if tl.startswith("you:"):
-            tag = "you"
+            tag, label, text = "you", "VOUS", text[4:].lstrip()
         elif tl.startswith("kaizumi:") or tl.startswith("ai:"):
-            tag = "ai"
-        elif tl.startswith("err:") or "error" in tl or "failed" in tl:
+            tag, label, text = "ai", "NIANG IA", text.split(":", 1)[1].lstrip()
+        elif tl.startswith("err:"):
+            tag, text = "err", "ERREUR :" + text[4:]
+        elif "error" in tl or "failed" in tl:
             tag = "err"
+        elif tl.startswith("sys:"):
+            tag, text = "sys", "SYSTÈME :" + text[4:]
         else:
             tag = "sys"
         self.log_text.configure(state="normal")
+        if label:
+            self.log_text.insert(tk.END, label + "  ", "lbl_" + tag)
         self._type_char(text, 0, tag)
 
     def _type_char(self, text, i, tag):
@@ -2852,38 +3266,40 @@ class KaizumiUI:
             time.sleep(0.1)
 
     def _show_setup_ui(self):
+        self._finish_intro()
+        col = self.col
         self.setup_frame = tk.Frame(
-            self.root, bg=THEMES[self._theme]["hdr"],
-            highlightbackground=THEMES[self._theme]["pri"], highlightthickness=1
+            self.root, bg=col["panel"],
+            highlightbackground=col["pri"], highlightthickness=1
         )
         self.setup_frame.place(relx=0.5, rely=0.5, anchor="center")
 
-        tk.Label(self.setup_frame, text="◈  INITIALISATION REQUIRED",
-                 fg=THEMES[self._theme]["pri"], bg=THEMES[self._theme]["hdr"],
-                 font=("Segoe UI", 13, "bold")).pack(pady=(18, 4))
+        tk.Label(self.setup_frame, text="◈  INITIALISATION REQUISE",
+                 fg=col["pri"], bg=col["panel"],
+                 font=("Segoe UI", 13, "bold")).pack(pady=(20, 4), padx=34)
         tk.Label(self.setup_frame,
-                 text="Enter your Gemini API key to boot NIANG IA.",
-                 fg=THEMES[self._theme]["mid"], bg=THEMES[self._theme]["hdr"],
+                 text="Saisissez votre clé d’API Gemini pour démarrer NIANG IA.",
+                 fg=col["acc2"], bg=col["panel"],
                  font=("Segoe UI", 9)).pack(pady=(0, 10))
 
-        tk.Label(self.setup_frame, text="GEMINI API KEY",
-                 fg=THEMES[self._theme]["dim"], bg=THEMES[self._theme]["hdr"],
-                 font=("Segoe UI", 9)).pack(pady=(8, 2))
+        tk.Label(self.setup_frame, text="CLÉ D’API GEMINI",
+                 fg=col["mid"], bg=col["panel"],
+                 font=("Segoe UI", 8, "bold")).pack(pady=(8, 3))
         self.gemini_entry = tk.Entry(
-            self.setup_frame, width=52, fg=THEMES[self._theme]["text"],
-            bg=THEMES[self._theme]["input"],
-            insertbackground=THEMES[self._theme]["text"], borderwidth=0,
+            self.setup_frame, width=52, fg=col["text"],
+            bg=col["input"],
+            insertbackground=col["text"], borderwidth=0,
+            highlightthickness=1, highlightbackground=col["inp_border"],
+            highlightcolor=col["pri"],
             font=("Segoe UI", 10), show="*"
         )
-        self.gemini_entry.pack(pady=(0, 4))
+        self.gemini_entry.pack(pady=(0, 4), padx=34, ipady=6)
 
-        tk.Button(
-            self.setup_frame, text="▸  INITIALISE SYSTEMS",
-            command=self._save_api_keys, bg=THEMES[self._theme]["bg"],
-            fg=THEMES[self._theme]["pri"],
-            activebackground=THEMES[self._theme]["mid"], font=("Segoe UI", 10),
-            borderwidth=0, pady=8
-        ).pack(pady=14)
+        PillButton(
+            self.setup_frame, self, text=tr("DÉMARRER LE SYSTÈME  ▸"),
+            command=self._save_api_keys, style="solid",
+            font=("Segoe UI", 10, "bold"), height=44, width=260,
+        ).pack(pady=(16, 22))
 
     def _save_api_keys(self):
         gemini = self.gemini_entry.get().strip()
@@ -2895,4 +3311,4 @@ class KaizumiUI:
         self.setup_frame.destroy()
         self._api_key_ready = True
         self.set_state("LISTENING")
-        self.write_log("SYS: Systems initialised. NIANG IA online.")
+        self.write_log("SYS: Système initialisé. NIANG IA est en ligne.")

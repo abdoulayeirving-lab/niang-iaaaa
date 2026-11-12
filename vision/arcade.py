@@ -16,7 +16,7 @@ class ArcadeState:
     game: str = "idle"
     score: int = 0
     lives: int = 3
-    message: str = "Choose a game"
+    message: str = "Choisissez un jeu"
     hand_x: float = 0.5
     player_choice: str = ""
     cpu_choice: str = ""
@@ -45,34 +45,34 @@ class VisionArcade:
                         "floor_lava", "planet_explorer", "whirlpool", "laser_defense",
                         "arpeggiator"}:
             raise ValueError(f"Unknown arcade game: {game}")
-        self.state = ArcadeState(game=game, message="Show your gesture")
+        self.state = ArcadeState(game=game, message="Montrez un geste")
         self._last_gesture = ""
         self._last_action_at = 0.0
         self._last_pose = False
         if game == "face_filter":
-            self.state.message = "Move your head — filter locked"
+            self.state.message = "Bougez la tête — filtre activé"
         elif game == "gesture_pong":
-            self.state.message = "Point left/right to move"
+            self.state.message = "Pointez à gauche ou à droite pour vous déplacer"
         else:
-            self.state.message = "Show rock, paper or scissors"
+            self.state.message = "Montrez pierre, feuille ou ciseaux"
         if game == "shape_creator":
-            self.state.message = "Point to move · open hand changes shape"
+            self.state.message = "Pointez pour déplacer · ouvrez la main pour changer de forme"
         elif game == "floor_lava":
-            self.state.message = "Raise both arms to jump"
+            self.state.message = "Levez les deux bras pour sauter"
         elif game == "planet_explorer":
-            self.state.message = "Point to explore the planet"
+            self.state.message = "Pointez pour explorer la planète"
         elif game == "whirlpool":
-            self.state.message = "Wave your hand to bend the camera"
+            self.state.message = "Agitez la main pour déformer l’image"
         elif game == "laser_defense":
-            self.state.message = "Point to fire · open hand shields"
+            self.state.message = "Pointez pour tirer · ouvrez la main pour vous protéger"
         elif game == "arpeggiator":
-            self.state.message = "Move your hand across the notes"
+            self.state.message = "Déplacez la main sur les notes"
         elif game == "orb_hunt":
-            self.state.message = "Point at the orb · hit 5 to level up"
+            self.state.message = "Visez l’orbe · touchez-la 5 fois pour monter de niveau"
         return self.state
 
     def stop(self) -> ArcadeState:
-        self.state = ArcadeState(message="Arcade paused")
+        self.state = ArcadeState(message="Jeux en pause")
         return self.state
 
     def on_gesture(self, gesture: str, x: float = 0.5) -> ArcadeState:
@@ -90,13 +90,13 @@ class VisionArcade:
                 if abs(self.state.hand_x - self.state.target_x) <= 0.35:
                     self.state.score += 1
                     self.state.target_x = self._rng.random()
-                    self.state.message = "PADDLE HIT · NEW TARGET"
+                    self.state.message = "RAQUETTE TOUCHÉE · NOUVELLE CIBLE"
                 else:
                     self.state.lives = max(0, self.state.lives - 1)
-                    self.state.message = "MISS · FOLLOW THE TARGET"
+                    self.state.message = "MANQUÉ · SUIVEZ LA CIBLE"
             elif gesture == "fist":
                 self.state.lives = max(0, self.state.lives - 1)
-                self.state.message = "MISS"
+                self.state.message = "MANQUÉ"
         elif self.state.game == "orb_hunt":
             if gesture in {"pointing", "one finger (index)"}:
                 window = max(0.08, 0.24 - self.state.level * 0.015)
@@ -105,49 +105,50 @@ class VisionArcade:
                     self.state.combo += 1
                     self.state.level = 1 + self.state.score // 5
                     self.state.target_x = self._rng.random()
-                    self.state.message = f"ORB HIT · COMBO x{self.state.combo}"
+                    self.state.message = f"ORBE TOUCHÉE · COMBO x{self.state.combo}"
                 else:
                     self.state.lives = max(0, self.state.lives - 1)
                     self.state.combo = 0
-                    self.state.message = "MISS · TRACK THE ORB"
+                    self.state.message = "MANQUÉ · SUIVEZ L’ORBE"
         elif self.state.game == "shape_creator":
             if gesture == "open hand":
                 self.state.shape = {"circle": "square", "square": "triangle", "triangle": "circle"}[self.state.shape]
-                self.state.message = f"SHAPE: {self.state.shape.upper()}"
+                shapes = {"circle": "CERCLE", "square": "CARRÉ", "triangle": "TRIANGLE"}
+                self.state.message = f"FORME : {shapes[self.state.shape]}"
         elif self.state.game == "planet_explorer":
             self.state.planet_x = self.state.hand_x
-            self.state.message = f"EXPLORING {int(self.state.hand_x * 360)}°"
+            self.state.message = f"EXPLORATION : {int(self.state.hand_x * 360)}°"
         elif self.state.game == "whirlpool":
             self.state.score += 1 if gesture in {"open hand", "pointing"} else 0
-            self.state.message = "WAVE FIELD ACTIVE"
+            self.state.message = "CHAMP D’ONDES ACTIF"
         elif self.state.game == "laser_defense":
             if gesture == "pointing":
                 self.state.score += 1
-                self.state.message = "LASER FIRED"
+                self.state.message = "LASER TIRÉ"
             elif gesture == "open hand":
-                self.state.message = "SHIELD UP"
+                self.state.message = "BOUCLIER ACTIVÉ"
         elif self.state.game == "arpeggiator":
             notes = ["C", "D", "E", "G", "A"]
             self.state.note = notes[min(len(notes) - 1, int(self.state.hand_x * len(notes)))]
             self.state.score += 1
-            self.state.message = f"NOTE {self.state.note}"
+            self.state.message = f"NOTE : {self.state.note}"
         elif self.state.game == "rps" and gesture in RPS_MAP:
             self.state.player_choice = RPS_MAP[gesture]
             self.state.cpu_choice = self._rng.choice(["rock", "paper", "scissors"])
             self.state.rounds += 1
             if self.state.player_choice == self.state.cpu_choice:
                 self.state.streak = 0
-                self.state.message = "DRAW"
+                self.state.message = "ÉGALITÉ"
             elif (self.state.player_choice, self.state.cpu_choice) in {
                 ("rock", "scissors"), ("paper", "rock"), ("scissors", "paper")
             }:
                 self.state.score += 1
                 self.state.streak += 1
-                self.state.message = "YOU WIN"
+                self.state.message = "VOUS GAGNEZ"
             else:
                 self.state.lives = max(0, self.state.lives - 1)
                 self.state.streak = 0
-                self.state.message = "KAIZUMI WINS"
+                self.state.message = "NIANG IA GAGNE"
         return self.state
 
     def on_pose(self, arms_raised: bool, lean: float = 0.0) -> ArcadeState:
@@ -155,8 +156,8 @@ class VisionArcade:
         if self.state.game == "floor_lava":
             if arms_raised and not self._last_pose:
                 self.state.score += 1
-                self.state.message = "JUMP — SAFE!"
+                self.state.message = "SAUT — EN SÉCURITÉ !"
             elif not arms_raised:
-                self.state.message = "LAVA RISING — RAISE ARMS"
+                self.state.message = "LA LAVE MONTE — LEVEZ LES BRAS"
         self._last_pose = bool(arms_raised)
         return self.state
