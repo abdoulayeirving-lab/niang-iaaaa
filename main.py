@@ -4491,13 +4491,8 @@ def _acquire_single_instance_mutex() -> bool:
         return True
 
 
-def kaizumi_visibility_pref() -> bool:
-    """Persisted 'start hidden in tray' preference (app_settings.json)."""
-    try:
-        from voice_activation import load_settings
-        return bool(load_settings().get("start_hidden", False))
-    except Exception:
-        return False
+def _starts_in_background(arguments) -> bool:
+    return any(flag in arguments for flag in ("--background", "--hidden", "--minimized"))
 
 
 BACKGROUND_START = False
@@ -4517,9 +4512,7 @@ def main():
 
     enable_bluetooth = "--remote" in sys.argv[1:]
     global BACKGROUND_START
-    BACKGROUND_START = any(
-        flag in sys.argv[1:] for flag in ("--background", "--hidden", "--minimized")
-    )
+    BACKGROUND_START = _starts_in_background(sys.argv[1:])
     global WAKE_ON_START
     WAKE_ON_START = "--wake" in sys.argv[1:]
 
@@ -4550,7 +4543,7 @@ def main():
             kaizumi.visibility.show(
                 animate=True,
                 reason="Activation vocale détectée — NIANG IA se lance.")
-        elif BACKGROUND_START or kaizumi_visibility_pref():
+        elif BACKGROUND_START:
             kaizumi.visibility.hide(
                 animate=False,
                 reason="Démarrage en arrière-plan — icône dans la zone de notification, "

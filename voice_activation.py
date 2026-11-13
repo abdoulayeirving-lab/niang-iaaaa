@@ -36,7 +36,6 @@ CUSTOM_MODEL_CANDIDATES = ("hey_niang_v0.1.onnx", "hey_kaizumi_v0.1.onnx")
 
 DEFAULT_SETTINGS = {
     "wake_word_enabled": True,     # permanent listening can be disabled here
-    "start_hidden": False,         # start minimized to tray on launch
     "wake_threshold": 0.6,         # openWakeWord score threshold
     "refractory_seconds": 3.0,     # min delay between two activations
     "background_alpha": 1.0,       # 1.0 = opaque, 0.88 = semi-transparent

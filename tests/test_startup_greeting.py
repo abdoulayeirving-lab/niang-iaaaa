@@ -6,7 +6,19 @@ from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from main import KaizumiLive
+from main import KaizumiLive, _starts_in_background
+
+
+class StartupVisibilityTests(unittest.TestCase):
+    def test_normal_and_wake_startup_are_visible_by_default(self):
+        self.assertFalse(_starts_in_background([]))
+        self.assertFalse(_starts_in_background(["--wake"]))
+        self.assertFalse(_starts_in_background(["--remote"]))
+
+    def test_explicit_background_flags_still_start_hidden(self):
+        for flag in ("--background", "--hidden", "--minimized"):
+            with self.subTest(flag=flag):
+                self.assertTrue(_starts_in_background([flag]))
 
 
 class StartupGreetingTests(unittest.IsolatedAsyncioTestCase):

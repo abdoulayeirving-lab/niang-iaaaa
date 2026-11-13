@@ -92,6 +92,9 @@ headset is connected or removed, NIANG IA resolves the Windows default device
 before comparing it to the active stream, and reopens audio only when the
 resolved device changes. Voice playback uses a dedicated output thread and the
 audio driver's preferred buffer size to reduce stuttering.
+Normal launches show the animated interface; use the window close button or the
+system-tray menu to hide it when you want NIANG IA to keep running in the
+background.
 The Windows installer also offers an optional
 personalization page for the name NIANG IA should use and its default response
 language. A following setup page links directly to Google AI Studio to create a

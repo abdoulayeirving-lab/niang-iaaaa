@@ -6,7 +6,6 @@
 #   · left-click on the icon  -> show the interface (default item)
 #   · "Dors (masquer)"        -> hide to tray, keep listening
 #   · wake-word toggle        -> enable/disable permanent listening
-#   · "Démarrage en arrière-plan" toggle (persisted, applied at next start)
 #   · "Quitter…"              -> confirmation, then a clean shutdown
 # The window never opens a second instance: the mutex in main.py still runs.
 
@@ -94,16 +93,6 @@ def attach(kaizumi, visibility, voice) -> bool:
                 hide_window()
         _ui_call(ui, action)
 
-    def toggle_start_hidden():
-        try:
-            from voice_activation import load_settings, update_setting
-            current = load_settings().get("start_hidden", False)
-            update_setting("start_hidden", not current)
-            state = "activé" if not current else "désactivé"
-            ui.write_log(f"SYS: Démarrage en arrière-plan {state} (appliqué au prochain lancement).")
-        except Exception as exc:
-            print(f"[Tray] ⚠️ {exc}")
-
     def toggle_transparency():
         try:
             from voice_activation import load_settings, update_setting
@@ -127,13 +116,6 @@ def attach(kaizumi, visibility, voice) -> bool:
         _ui_call(ui, visibility.confirm_quit, "Fermeture demandée depuis la zone de notification.")
 
     def menu_factory():
-        start_hidden = False
-        try:
-            from voice_activation import load_settings
-            start_hidden = load_settings().get("start_hidden", False)
-        except Exception:
-            pass
-
         def _alpha() -> float:
             try:
                 from voice_activation import load_settings
@@ -158,11 +140,6 @@ def attach(kaizumi, visibility, voice) -> bool:
                 lambda item: ("🛑  Arrêter l'écoute vocale" if wake_running()
                               else "🎤  Activer l'écoute vocale"),
                 toggle_wake,
-            ),
-            pystray.MenuItem(
-                lambda item: ("✅  Démarrage en arrière-plan" if start_hidden
-                              else "⬜  Démarrage en arrière-plan"),
-                toggle_start_hidden,
             ),
             pystray.MenuItem(
                 lambda item: ("🪟  Fond semi-transparent" if _alpha() < 1.0
