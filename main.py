@@ -1187,10 +1187,11 @@ TOOL_DECLARATIONS = [
     {
         "name": "recall_memory",
         "description": (
-            "Search long-term memory for a stored fact about the user. "
-            "Use when the user asks 'do you remember...', 'what do you know about...', "
-            "'what's my favorite...', or when you need a saved detail mid-conversation "
-            "(name, preferences, projects, people). Returns what you know."
+            "Search long-term memory and the local full-text archive of past conversations. "
+            "Use whenever the user asks about an earlier conversation, a specific detail "
+            "they shared, or asks 'do you remember...', 'what do you know about...', "
+            "'what's my favorite...', including health, finances, relationships, projects, "
+            "and preferences. The archive is local and can contain exact past wording."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -1204,7 +1205,8 @@ TOOL_DECLARATIONS = [
     {
         "name": "forget_memory",
         "description": (
-            "Delete a specific fact from long-term memory. "
+            "Delete a specific fact from long-term memory and redact its exact value "
+            "from saved transcript conversations and backups. "
             "Use when the user asks to forget/remove something they told you, "
             "e.g. 'forget that I like X', 'remove my name from memory'."
         ),
@@ -1220,13 +1222,15 @@ TOOL_DECLARATIONS = [
     {
         "name": "clear_memory",
         "description": (
-            "Clear all long-term memory, or just one category. "
-            "Use when the user asks to clear/reset memory, e.g. 'forget everything'."
+            "Clear all long-term memory and the local conversation archive, or clear a "
+            "specific saved-fact category. Use category='conversations' to clear only the "
+            "transcript archive. Use when the user asks to clear/reset memory, "
+            "e.g. 'forget everything'."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "category": {"type": "STRING", "description": "Optional: only clear this category (identity | preferences | projects | relationships | wishes | notes). Empty = clear everything."}
+                "category": {"type": "STRING", "description": "Optional: identity | preferences | projects | relationships | wishes | notes | conversations (transcripts only). Leave empty to clear everything."}
             },
             "required": []
         }
@@ -2011,6 +2015,8 @@ class KaizumiLive:
         self._last_screen_vision_at = 0.0
         self._phase         = PHASE_IDLE
         self._phase_lock    = threading.Lock()
+        self._pending_text_inputs = []
+        self._pending_text_inputs_lock = threading.Lock()
         self._rolling_parts = []
         self._rolling_len   = 0
         self._roll_turns    = 0
@@ -2334,7 +2340,22 @@ class KaizumiLive:
         async def _send():
             async with self._send_lock:
                 await self.session.send_realtime_input(text=text)
+            with self._pending_text_inputs_lock:
+                self._pending_text_inputs.append(text)
         asyncio.run_coroutine_threadsafe(_send(), self._loop)
+
+    def _consume_text_input(self, transcribed_text: str) -> str:
+        import re
+
+        with self._pending_text_inputs_lock:
+            if not self._pending_text_inputs:
+                return transcribed_text
+            if transcribed_text:
+                normalize = lambda value: re.sub(r"\W+", "", value).casefold()
+                if normalize(transcribed_text) == normalize(self._pending_text_inputs[0]):
+                    self._pending_text_inputs.pop(0)
+                return transcribed_text
+            return self._pending_text_inputs.pop(0)
 
     def _start_agent_task(self, goal: str) -> str:
         from agent.task_queue import get_queue
@@ -4154,7 +4175,7 @@ class KaizumiLive:
                         if getattr(sc, "turn_complete", False):
                             self._turn_complete = True
 
-                            full_in = " ".join(in_buf).strip()
+                            full_in = self._consume_text_input(" ".join(in_buf).strip())
                             full_out = " ".join(out_buf).strip()
 
                             if full_in:
@@ -4176,6 +4197,13 @@ class KaizumiLive:
                                     print(f"[Bluetooth] forward: {e}")
 
                             self._update_rolling(full_in, full_out)
+
+                            if full_in:
+                                try:
+                                    from memory.memory_manager import archive_conversation
+                                    archive_conversation(full_in, full_out)
+                                except Exception as e:
+                                    print(f"[Memory] ⚠️ Conversation archive failed: {e}")
 
                             if full_in and len(full_in) > 5:
                                 threading.Thread(

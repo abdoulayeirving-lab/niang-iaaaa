@@ -23,6 +23,8 @@ logs/
 
 # Personal / user data — never share this project with these files
 memory/*.json
+memory/*.sqlite3
+memory/*.sqlite3-*
 models/hey_jarvis*
 models/hey_kaizumi*
 models/training/

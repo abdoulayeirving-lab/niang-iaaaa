@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -25,6 +26,8 @@ class StartupGreetingTests(unittest.IsolatedAsyncioTestCase):
     def make_assistant(self, silent_mode=False):
         assistant = object.__new__(KaizumiLive)
         assistant._startup_greeting_sent = False
+        assistant._pending_text_inputs = []
+        assistant._pending_text_inputs_lock = threading.Lock()
         assistant.session = SimpleNamespace(send_realtime_input=AsyncMock())
         assistant.ui = SimpleNamespace(
             silent_mode=silent_mode,
@@ -74,6 +77,34 @@ class StartupGreetingTests(unittest.IsolatedAsyncioTestCase):
         assistant.session.send_realtime_input.assert_not_awaited()
         self.assertTrue(assistant._startup_greeting_sent)
         assistant.ui.write_log.assert_not_called()
+
+
+class TextInputMemoryTests(unittest.TestCase):
+    def make_assistant(self):
+        assistant = object.__new__(KaizumiLive)
+        assistant._pending_text_inputs = []
+        assistant._pending_text_inputs_lock = threading.Lock()
+        return assistant
+
+    def test_consumes_typed_input_when_server_does_not_transcribe_it(self):
+        assistant = self.make_assistant()
+        assistant._pending_text_inputs.append("Remember that I prefer quiet mornings.")
+
+        captured = assistant._consume_text_input("")
+
+        self.assertEqual(captured, "Remember that I prefer quiet mornings.")
+        self.assertEqual(assistant._pending_text_inputs, [])
+
+    def test_avoids_duplicate_when_server_transcribes_typed_input(self):
+        assistant = self.make_assistant()
+        assistant._pending_text_inputs.append("Remember that I prefer quiet mornings.")
+
+        captured = assistant._consume_text_input(
+            "Remember that I prefer quiet mornings!"
+        )
+
+        self.assertEqual(captured, "Remember that I prefer quiet mornings!")
+        self.assertEqual(assistant._pending_text_inputs, [])
 
 
 if __name__ == "__main__":

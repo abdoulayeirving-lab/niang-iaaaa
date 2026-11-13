@@ -104,6 +104,17 @@ locally as a separate configuration file. Both pages can be skipped. You can
 also configure a Gemini API key later in `config/api_keys.json`.
 On updates, the installer skips personalization and API-key pages when it finds
 existing profile or key data, and it does not overwrite that saved information.
+NIANG IA also keeps a durable, searchable local archive of completed voice and
+typed conversation turns in `memory/conversations.sqlite3`, with no automatic
+age or entry limit. The archive stays on this PC; conversations from before this
+feature was installed are not imported. When NIANG IA searches it to answer a
+recall request, only the matching excerpts are sent to Gemini as part of the
+live conversation. Recognizable passwords, API keys, and access tokens are
+redacted before archiving. Say “clear conversations” to erase the transcript
+archive, “forget [detail]” to remove a saved fact and redact its matching value
+from transcripts and backups, or “forget everything” to erase the archive and
+saved memory. A local archive is not a substitute for backing up the PC; disk
+failure or deletion of the application data can still cause data loss.
 For Serper web search, copy `.env.example` to `.env` in the NIANG IA application
 folder (the folder containing `START_NIANG_IA.bat`) and set `SERPER_API_KEY`.
 Keep `.env` private; NIANG IA uses Serper first when that key is configured,

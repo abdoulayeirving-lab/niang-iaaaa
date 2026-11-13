@@ -32,16 +32,24 @@ class MemoryTest(unittest.TestCase):
             json.dump({}, f)
         mm.MEMORY_PATH = mm.Path(self.tmp)
         mm.INSTALLER_PROFILE_PATH = mm.Path(self.tmp + ".installer_profile.json")
+        mm.CONVERSATION_DB_PATH = mm.Path(self.tmp + ".conversations.sqlite3")
+        mm.ARCHIVE_PATH = mm.Path(self.tmp + ".archive.json")
+        mm.BACKUP_DIR = mm.Path(self.tmp + ".backups")
 
     def tearDown(self):
-        try:
-            mm.Path(self.tmp).unlink()
-        except Exception:
-            pass
-        try:
-            mm.INSTALLER_PROFILE_PATH.unlink()
-        except Exception:
-            pass
+        for path in (
+            mm.MEMORY_PATH,
+            mm.INSTALLER_PROFILE_PATH,
+            mm.CONVERSATION_DB_PATH,
+            mm.Path(f"{mm.CONVERSATION_DB_PATH}-wal"),
+            mm.Path(f"{mm.CONVERSATION_DB_PATH}-shm"),
+            mm.ARCHIVE_PATH,
+            mm.Path(self.tmp + ".conversations.sqlite3.tmp"),
+        ):
+            path.unlink(missing_ok=True)
+        if mm.BACKUP_DIR.exists():
+            import shutil
+            shutil.rmtree(mm.BACKUP_DIR)
 
     def test_remember_and_search(self):
         mm.remember("favorite_food", "pizza", "preferences")
@@ -116,6 +124,109 @@ class MemoryTest(unittest.TestCase):
 
         self.assertEqual(memory["identity"], {})
         self.assertTrue(mm.INSTALLER_PROFILE_PATH.exists())
+
+    def test_conversation_archive_is_persistent_and_searchable(self):
+        mm.archive_conversation(
+            "My sister Amira starts her architecture course in September.",
+            "I will remember that Amira starts architecture in September.",
+        )
+
+        result = mm.search_memory("sister Amira architecture")
+
+        self.assertIn("Relevant past conversations", result)
+        self.assertIn("architecture course in September", result)
+        self.assertIn("I will remember", result)
+
+    def test_transcript_archive_redacts_secrets(self):
+        mm.archive_conversation(
+            "My password is Hunter2! and my favorite color is green.",
+            "Your API key is AIza123456789012345678901234.",
+        )
+
+        result = mm.search_memory("favorite color green")
+
+        self.assertIn("favorite color is green", result)
+        self.assertNotIn("Hunter2!", result)
+        self.assertNotIn("AIza123456789012345678901234", result)
+
+    def test_forget_redacts_matching_transcripts(self):
+        mm.remember("favorite_color", "teal", "preferences")
+        mm.archive_conversation(
+            "I love teal and prefer quiet mornings.",
+            "I will remember that you love teal.",
+        )
+
+        mm.forget("favorite_color", "preferences")
+
+        result = mm.search_memory("teal")
+        self.assertNotIn("Relevant past conversations", result)
+        self.assertIn("quiet mornings", mm.search_memory("quiet mornings"))
+
+    def test_forget_redacts_accented_details_case_insensitively(self):
+        mm.remember("friend_name", "Élodie", "relationships")
+        mm.archive_conversation(
+            "My friend élodie visited last weekend.",
+            "I will remember your friend Élodie.",
+        )
+
+        mm.forget("friend_name", "relationships")
+
+        self.assertNotIn("Relevant past conversations", mm.search_memory("élodie"))
+
+    def test_forget_removes_archived_facts_and_backups(self):
+        mm.remember("favorite_color", "teal", "preferences")
+        mm.ARCHIVE_PATH.write_text(
+            json.dumps({"preferences": {"favorite_color": {"value": "teal"}}}),
+            encoding="utf-8",
+        )
+
+        mm.forget("favorite_color", "preferences")
+
+        self.assertNotIn("favorite_color", mm.load_memory()["preferences"])
+        self.assertNotIn("preferences/favorite_color", mm.search_memory("teal"))
+        for backup in mm.BACKUP_DIR.glob("long_term_*.json"):
+            saved = json.loads(backup.read_text(encoding="utf-8"))
+            self.assertNotIn("favorite_color", saved.get("preferences", {}))
+        archived = json.loads(mm.ARCHIVE_PATH.read_text(encoding="utf-8"))
+        self.assertNotIn("favorite_color", archived.get("preferences", {}))
+
+    def test_clear_category_removes_archived_facts_and_backups(self):
+        mm.remember("favorite_color", "teal", "preferences")
+        mm.ARCHIVE_PATH.write_text(
+            json.dumps({"preferences": {"favorite_food": {"value": "pizza"}}}),
+            encoding="utf-8",
+        )
+
+        mm.clear_memory("preferences")
+
+        self.assertNotIn("preferences/favorite_color", mm.search_memory("teal"))
+        self.assertNotIn("preferences/favorite_food", mm.search_memory("pizza"))
+        for backup in mm.BACKUP_DIR.glob("long_term_*.json"):
+            saved = json.loads(backup.read_text(encoding="utf-8"))
+            self.assertNotIn("preferences", saved)
+        archived = json.loads(mm.ARCHIVE_PATH.read_text(encoding="utf-8"))
+        self.assertNotIn("preferences", archived)
+
+    def test_clear_all_memory_removes_transcripts_and_backups(self):
+        mm.remember("favorite_food", "pizza", "preferences")
+        mm.archive_conversation("I like pizza.", "I will remember that.")
+        mm.BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        (mm.BACKUP_DIR / "long_term_test.json").write_text("{}", encoding="utf-8")
+
+        result = mm.clear_memory()
+
+        self.assertIn("All memory cleared", result)
+        self.assertEqual(mm.search_memory("pizza"), "I don't have anything saved matching 'pizza', sir.")
+        self.assertFalse(any(mm.BACKUP_DIR.glob("long_term_*.json")))
+
+    def test_clear_conversations_keeps_structured_facts(self):
+        mm.remember("favorite_food", "pizza", "preferences")
+        mm.archive_conversation("I like pizza.", "I will remember that.")
+
+        mm.clear_memory("conversations")
+
+        self.assertIn("preferences/favorite_food: pizza", mm.search_memory("pizza"))
+        self.assertNotIn("Relevant past conversations", mm.search_memory("pizza"))
 
 
 if __name__ == "__main__":
