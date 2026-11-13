@@ -305,6 +305,19 @@ class TaskQueue:
         self._persist_task(task)
         return True
 
+    def cancel_all_active(self) -> list[str]:
+        with self._lock:
+            active_ids = [
+                task.task_id
+                for task in self._tasks.values()
+                if task.status in (
+                    TaskStatus.PENDING,
+                    TaskStatus.RUNNING,
+                    TaskStatus.STOP_REQUESTED,
+                )
+            ]
+        return [task_id for task_id in active_ids if self.cancel(task_id)]
+
     def latest_interrupted(self) -> dict | None:
         with self._lock:
             candidates = [

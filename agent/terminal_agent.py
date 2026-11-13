@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import threading
 import time
@@ -389,13 +390,29 @@ class TerminalAgent:
             pids = {record.process.pid}
             pids.update(child.pid for child in process.children(recursive=True))
             return any(
-                connection.status == psutil.CONN_LISTEN
+                connection.type == socket.SOCK_STREAM
                 and connection.laddr
                 and connection.laddr.port == port
                 and connection.pid in pids
+                and (
+                    connection.status == psutil.CONN_LISTEN
+                    or (
+                        os.name == "nt"
+                        and connection.status == psutil.CONN_NONE
+                        and self._tcp_port_is_open(port)
+                    )
+                )
                 for connection in psutil.net_connections(kind="inet")
             )
         except (OSError, psutil.Error):
+            return False
+
+    @staticmethod
+    def _tcp_port_is_open(port: int) -> bool:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.25):
+                return True
+        except OSError:
             return False
 
     def _get_record(self, process_id: str) -> _ManagedProcess:

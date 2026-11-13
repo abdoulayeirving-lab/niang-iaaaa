@@ -41,7 +41,7 @@ class VisionContinuityPromptTests(unittest.TestCase):
     def test_read_screen_button_requests_visual_description(self):
         source = (ROOT / "ui.py").read_text(encoding="utf-8")
 
-        self.assertIn('"READ SCREEN"', source)
+        self.assertIn("DÉCRIRE L’ÉCRAN", source)
         self.assertIn("describe the windows, icons, buttons, images", source)
 
 

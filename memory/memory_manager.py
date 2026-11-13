@@ -11,6 +11,7 @@ Düzeltmeler:
 import json
 import os
 import re
+import shutil
 from datetime import datetime
 from threading import Lock
 from pathlib import Path
@@ -26,6 +27,9 @@ def get_base_dir() -> Path:
 BASE_DIR         = get_base_dir()
 MEMORY_PATH      = BASE_DIR / "memory" / "long_term.json"
 INSTALLER_PROFILE_PATH = BASE_DIR / "memory" / "installer_profile.json"
+BACKUP_DIR       = BASE_DIR / "memory" / "backups"
+ARCHIVE_PATH     = BASE_DIR / "memory" / "long_term_archive.json"
+MAX_BACKUPS      = 20
 _lock            = Lock()
 MAX_VALUE_LENGTH = 400
 
@@ -59,6 +63,50 @@ def _empty_memory() -> dict:
     }
 
 
+def _valid_memory(path: Path) -> dict | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def _newest_backup() -> Path | None:
+    try:
+        backups = sorted(
+            BACKUP_DIR.glob("long_term_*.json"),
+            key=lambda p: p.name,
+            reverse=True,
+        )
+    except OSError:
+        return None
+    for candidate in backups:
+        if _valid_memory(candidate) is not None:
+            return candidate
+    return None
+
+
+def _write_backup() -> None:
+    """Copy the current long_term.json into memory/backups (keep last MAX_BACKUPS)."""
+    if not MEMORY_PATH.exists():
+        return
+    try:
+        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup = BACKUP_DIR / f"long_term_{stamp}.json"
+        shutil.copy2(MEMORY_PATH, backup)
+        backups = sorted(BACKUP_DIR.glob("long_term_*.json"), key=lambda p: p.name, reverse=True)
+        for old in backups[MAX_BACKUPS:]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+    except OSError as e:
+        print(f"[Memory] Backup failed (non-fatal): {e}")
+
+
 def load_memory() -> dict:
     if not MEMORY_PATH.exists() and not INSTALLER_PROFILE_PATH.exists():
         return _empty_memory()
@@ -66,17 +114,27 @@ def load_memory() -> dict:
     with _lock:
         data = _empty_memory()
         if MEMORY_PATH.exists():
-            try:
-                loaded = json.loads(MEMORY_PATH.read_text(encoding="utf-8"))
-                if not isinstance(loaded, dict):
-                    return data
-                data.update(loaded)
-                for key in _empty_memory():
-                    if key not in data:
-                        data[key] = {}
-            except (OSError, json.JSONDecodeError) as e:
-                print(f"[Memory] ⚠️ Load error: {e}")
+            loaded = _valid_memory(MEMORY_PATH)
+            if loaded is None:
+                backup = _newest_backup()
+                if backup is not None:
+                    loaded = _valid_memory(backup)
+                    print(f"[Memory] long_term.json unreadable - restoring from {backup.name}")
+                if loaded is not None:
+                    try:
+                        MEMORY_PATH.write_text(
+                            json.dumps(loaded, indent=2, ensure_ascii=False),
+                            encoding="utf-8",
+                        )
+                    except OSError:
+                        pass
+            if loaded is None:
+                print("[Memory] Load error: no valid memory file and no valid backup.")
                 return data
+            data.update(loaded)
+            for key in _empty_memory():
+                if key not in data:
+                    data[key] = {}
 
         if not INSTALLER_PROFILE_PATH.exists():
             return data
@@ -92,6 +150,7 @@ def load_memory() -> dict:
                 encoding="utf-8",
             )
             os.replace(tmp, MEMORY_PATH)
+            _write_backup()
             INSTALLER_PROFILE_PATH.unlink()
         except (OSError, json.JSONDecodeError, ValueError, TypeError) as e:
             print(f"[Memory] ⚠️ Could not import installer profile: {e}")
@@ -103,12 +162,14 @@ def save_memory(memory: dict) -> None:
         return
     MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _lock:
+        _write_backup()
         tmp = MEMORY_PATH.with_suffix(MEMORY_PATH.suffix + ".tmp")
         tmp.write_text(
             json.dumps(memory, indent=2, ensure_ascii=False),
             encoding="utf-8"
         )
         os.replace(tmp, MEMORY_PATH)
+        _write_backup()
 
 
 def _truncate_value(val: str) -> str:
@@ -161,23 +222,52 @@ def update_memory(memory_update: dict) -> dict:
     return memory
 
 
-def prune_memory(memory: dict, cap: int = 40) -> None:
-    """Keep long_term.json from growing unboundedly — cap entries per category,
-    keeping the most recently updated ones."""
+def prune_memory(memory: dict, cap: int = 500) -> None:
+    """Safety valve only — never silently lose memories.
+
+    Categories grow up to `cap` entries; anything older/overflow is APPENDED
+    to long_term_archive.json instead of being deleted. Backups are kept in
+    memory/backups on every save.
+    """
     if not isinstance(memory, dict):
         return
+    archive: dict[str, dict] = {}
     for cat_name, cat in memory.items():
         if not isinstance(cat, dict):
             continue
         if len(cat) <= cap:
             continue
-        newest = sorted(
+        ordered = sorted(
             cat.items(),
             key=lambda kv: str(kv[1].get("updated", "")) if isinstance(kv[1], dict) else "",
             reverse=True,
-        )[:cap]
-        memory[cat_name] = dict(newest)
-        print(f"[Memory] ✂️ Pruned {cat_name}: kept {cap} most recent entries")
+        )
+        memory[cat_name] = dict(ordered[:cap])
+        overflow = dict(ordered[cap:])
+        if overflow:
+            archive[cat_name] = overflow
+        print(f"[Memory] Archived {len(overflow)} older {cat_name} entries (nothing deleted)")
+
+    if not archive:
+        return
+    try:
+        existing: dict = {}
+        if ARCHIVE_PATH.exists():
+            try:
+                existing = json.loads(ARCHIVE_PATH.read_text(encoding="utf-8"))
+                if not isinstance(existing, dict):
+                    existing = {}
+            except (OSError, json.JSONDecodeError):
+                existing = {}
+        for cat_name, entries in archive.items():
+            bucket = existing.setdefault(cat_name, {})
+            bucket.update(entries)
+        ARCHIVE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = ARCHIVE_PATH.with_suffix(ARCHIVE_PATH.suffix + ".tmp")
+        tmp.write_text(json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, ARCHIVE_PATH)
+    except OSError as e:
+        print(f"[Memory] Could not write archive (entries kept in memory): {e}")
 
 
 def should_extract_memory(user_text: str, assistant_text: str, api_key: str) -> bool:
@@ -301,7 +391,7 @@ def format_memory_for_prompt(memory: dict | None) -> str:
     if prefs:
         lines.append("")
         lines.append("Preferences:")
-        for key, entry in list(prefs.items())[:15]:
+        for key, entry in list(prefs.items())[:25]:
             val = entry.get("value") if isinstance(entry, dict) else entry
             if val:
                 lines.append(f"  - {key.replace('_', ' ').title()}: {val}")
@@ -310,7 +400,7 @@ def format_memory_for_prompt(memory: dict | None) -> str:
     if projects:
         lines.append("")
         lines.append("Active Projects / Goals:")
-        for key, entry in list(projects.items())[:8]:
+        for key, entry in list(projects.items())[:12]:
             val = entry.get("value") if isinstance(entry, dict) else entry
             if val:
                 lines.append(f"  - {key.replace('_', ' ').title()}: {val}")
@@ -319,7 +409,7 @@ def format_memory_for_prompt(memory: dict | None) -> str:
     if rels:
         lines.append("")
         lines.append("People in their life:")
-        for key, entry in list(rels.items())[:10]:
+        for key, entry in list(rels.items())[:15]:
             val = entry.get("value") if isinstance(entry, dict) else entry
             if val:
                 lines.append(f"  - {key.replace('_', ' ').title()}: {val}")
@@ -328,7 +418,7 @@ def format_memory_for_prompt(memory: dict | None) -> str:
     if wishes:
         lines.append("")
         lines.append("Wishes / Plans / Wants:")
-        for key, entry in list(wishes.items())[:8]:
+        for key, entry in list(wishes.items())[:12]:
             val = entry.get("value") if isinstance(entry, dict) else entry
             if val:
                 lines.append(f"  - {key.replace('_', ' ').title()}: {val}")
@@ -337,7 +427,7 @@ def format_memory_for_prompt(memory: dict | None) -> str:
     if notes:
         lines.append("")
         lines.append("Other notes:")
-        for key, entry in list(notes.items())[:8]:
+        for key, entry in list(notes.items())[:12]:
             val = entry.get("value") if isinstance(entry, dict) else entry
             if val:
                 lines.append(f"  - {key}: {val}")
@@ -347,8 +437,8 @@ def format_memory_for_prompt(memory: dict | None) -> str:
 
     header = "[WHAT YOU KNOW ABOUT THIS PERSON — use naturally, never recite like a list]\n"
     result = header + "\n".join(lines)
-    if len(result) > 2000:
-        result = result[:1997] + "…"
+    if len(result) > 3200:
+        result = result[:3197] + "…"
 
     return result + "\n"
 
@@ -374,15 +464,8 @@ def forget(key: str, category: str = "notes") -> str:
     return f"Not found: {category}/{key}"
 
 
-def search_memory(query: str, category: str = "") -> str:
-    """Search stored long-term facts. Returns a short readable summary.
-    `category` optionally narrows to identity|preferences|projects|relationships|wishes|notes."""
-    if not query or not query.strip():
-        return ""
-    q = query.lower().strip()
-    memory   = load_memory()
+def _search_dict(memory: dict, q: str, category: str = "") -> list[str]:
     findings = []
-
     for cat_name, cat in memory.items():
         if category and cat_name != category:
             continue
@@ -396,11 +479,30 @@ def search_memory(query: str, category: str = "") -> str:
             key_s = str(key).replace("_", " ")
             if q in key_s.lower() or q in val_s.lower():
                 findings.append(f"{cat_name}/{key}: {val_s}")
+    return findings
 
+
+def search_memory(query: str, category: str = "") -> str:
+    """Search stored long-term facts, including the archive of older memories."""
+    if not query or not query.strip():
+        return ""
+    q = query.lower().strip()
+    memory   = load_memory()
+    findings = _search_dict(memory, q, category)
+
+    try:
+        if ARCHIVE_PATH.exists():
+            archive = json.loads(ARCHIVE_PATH.read_text(encoding="utf-8"))
+            if isinstance(archive, dict):
+                findings += _search_dict(archive, q, category)
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    findings = list(dict.fromkeys(findings))
     if not findings:
         return f"I don't have anything saved matching '{query}', sir."
-    if len(findings) > 6:
-        findings = findings[:6]
+    if len(findings) > 8:
+        findings = findings[:8]
     return "I remember: " + "; ".join(findings)
 
 

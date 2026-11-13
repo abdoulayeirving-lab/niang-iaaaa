@@ -1,11 +1,18 @@
 #define AppName "NIANG IA"
-#define AppVersion "1.0.24"
+#define AppVersion "1.0.28"
 #define SourceDir AddBackslash(SourcePath) + "dist\NIANG_IA_" + AppVersion
 
 [Setup]
 AppId={{AC51AB64-08DA-4BC6-9CE1-1D5D0AD4B304}
 AppName={#AppName}
 AppVersion={#AppVersion}
+AppPublisher=NIANG IA
+AppPublisherURL=https://github.com/niang-ia
+VersionInfoVersion={#AppVersion}
+VersionInfoDescription=NIANG IA — Assistant vocal intelligent
+VersionInfoProductName=NIANG IA
+VersionInfoProductVersion={#AppVersion}
+VersionInfoCompany=NIANG IA
 DefaultDirName={localappdata}\Programs\NIANG IA
 DefaultGroupName=NIANG IA
 OutputDir=dist

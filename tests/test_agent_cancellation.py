@@ -165,6 +165,62 @@ class AgentCancellationTests(unittest.TestCase):
         self.assertEqual(task.error, "")
         self.assertEqual(queue._active_count, 0)
 
+    def test_cancel_all_active_stops_running_and_queued_tasks(self):
+        queue = TaskQueue()
+        running = Task(
+            priority=2,
+            created_at=1.0,
+            task_id="running-task",
+            goal="Run a desktop action",
+            status=TaskStatus.RUNNING,
+        )
+        queued = Task(
+            priority=2,
+            created_at=2.0,
+            task_id="queued-task",
+            goal="Run another action",
+            status=TaskStatus.PENDING,
+        )
+        completed = Task(
+            priority=2,
+            created_at=3.0,
+            task_id="completed-task",
+            goal="Already completed",
+            status=TaskStatus.COMPLETED,
+        )
+        queue._tasks = {
+            task.task_id: task
+            for task in (running, queued, completed)
+        }
+        queue._queue = [queued]
+
+        with (
+            patch("actions.computer_control.computer_control") as stop_computer,
+            patch("actions.playwright_mcp.cancel_playwright_mcp_action") as stop_browser,
+        ):
+            cancelled = queue.cancel_all_active()
+
+        self.assertCountEqual(cancelled, ["running-task", "queued-task"])
+        self.assertEqual(running.status, TaskStatus.STOP_REQUESTED)
+        self.assertEqual(queued.status, TaskStatus.CANCELLED)
+        self.assertEqual(completed.status, TaskStatus.COMPLETED)
+        self.assertTrue(running.cancel_flag.is_set())
+        self.assertTrue(queued.cancel_flag.is_set())
+        stop_computer.assert_called_once_with({"action": "stop"})
+        stop_browser.assert_called_once_with("running-task")
+
+    def test_voice_stop_without_task_id_cancels_all_active_missions(self):
+        from actions.task_manager import task_manager
+
+        queue = unittest.mock.Mock()
+        queue.cancel_all_active.return_value = ["mission-1", "mission-2"]
+        with patch("actions.task_manager.get_queue", return_value=queue):
+            result = task_manager({"action": "cancel"})
+
+        self.assertIn("Arrêt demandé pour 2 mission(s)", result)
+        self.assertIn("mission-1, mission-2", result)
+        queue.cancel_all_active.assert_called_once_with()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import sys
 import time
@@ -105,12 +106,42 @@ def _get_default_browser_display_name() -> str:
     return "Google Chrome"
 
 
+def _chrome_app_path() -> str | None:
+    """Locate chrome.exe for app-mode windows."""
+    import shutil
+
+    candidates = [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), r"Google\Chrome\Application\chrome.exe"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), r"Google\Chrome\Application\chrome.exe"),
+    ]
+    which = shutil.which("chrome")
+    if which:
+        candidates.insert(0, which)
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    return None
+
+
+def open_youtube_app(url: str = "https://www.youtube.com") -> bool:
+    """Open YouTube as a Chrome --app window (app-like, no tabs)."""
+    chrome = _chrome_app_path()
+    if not chrome:
+        return False
+    try:
+        subprocess.Popen([chrome, f"--app={url}"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(2.0)
+        print(f"[YouTube] Opened app window: {url}")
+        return True
+    except Exception as e:
+        print(f"[YouTube] App-mode launch failed: {e}")
+        return False
+
+
 def open_browser():
-    """
-    Varsayılan tarayıcıyı açar.
-    Yöntem 1: subprocess ile direkt exe bul ve çalıştır (en hızlı).
-    Yöntem 2: Windows Search'te gerçek tarayıcı adını yaz.
-    """
+    """Backwards-compatible fallback: open the default browser."""
     import shutil
 
     browser_exe = _get_default_browser_name()
@@ -121,10 +152,10 @@ def open_browser():
             try:
                 subprocess.Popen([exe_path])
                 time.sleep(2.5)
-                print(f"[YouTube] ✅ Opened browser via exe: {exe_path}")
+                print(f"[YouTube] Opened browser via exe: {exe_path}")
                 return
             except Exception as e:
-                print(f"[YouTube] ⚠️ Direct exe failed: {e}")
+                print(f"[YouTube] Direct exe failed: {e}")
 
     display_name = _get_default_browser_display_name()
     print(f"[YouTube] 🔍 Opening via Windows Search: '{display_name}'")
@@ -382,26 +413,34 @@ def _handle_play(parameters: dict, player) -> str:
     if player:
         player.write_log(f"[YouTube] Searching: {query}")
 
-    open_browser()
-
     search_query = query.replace(" ", "+")
     url = f"https://www.youtube.com/results?search_query={search_query}"
 
-    import pyautogui
-    pyautogui.hotkey("ctrl", "l")
-    time.sleep(0.3)
-    pyautogui.write(url, interval=0.02)
-    pyautogui.press("enter")
-    time.sleep(3.5)
+    if not open_youtube_app(url):
+        # Fallback: default browser with direct URL (no address-bar typing).
+        open_browser()
+        try:
+            import webbrowser
+            webbrowser.open(url)
+        except Exception:
+            pass
+        time.sleep(2.5)
+
+    try:
+        import pyautogui
+    except ImportError:
+        return "Opened YouTube search results, but pyautogui is not installed to click the video automatically, sir."
 
     thumbnails = find_video_thumbnails()
 
     if len(thumbnails) >= 2:
         x, y = thumbnails[1]
         pyautogui.click(x, y)
+        return f"Playing YouTube video for: {query}"
     elif len(thumbnails) == 1:
         x, y = thumbnails[0]
         pyautogui.click(x, y)
+        return f"Playing YouTube video for: {query}"
     else:
         screen_w, screen_h = pyautogui.size()
         pyautogui.click(screen_w // 2, int(screen_h * 0.45))

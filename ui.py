@@ -227,6 +227,11 @@ class PillButton(tk.Canvas):
             elif self._style == "solid":
                 fill = col["text"] if hov else col["pri"]
                 border, fg = fill, "#001a20"
+            elif self._style == "danger":
+                danger = col.get("mutcol", "#ff3b55")
+                fill = _blend(col["input"], danger, .30) if hov else col["input"]
+                border = danger if hov else _blend(col["mid"], danger, .55)
+                fg = "#ffffff" if hov else danger
             else:
                 fill = _blend(col["input"], col["pri"], .22) if hov else col["input"]
                 border = col["pri"] if hov else col["mid"]
@@ -277,6 +282,9 @@ class KaizumiUI:
         # ── State ────────────────────────────────────────────────────────────
         self.speaking     = False
         self.muted        = False          # Mute flag — main.py reads it
+        self._mic_listening = False        # permanent mic indicator (wake word)
+        self._mic_level   = None           # live mic RMS 0..1 from the listener
+        self._base_alpha  = 1.0            # 1.0 = opaque, < 1.0 = semi-transparent
         self.silent_mode  = False          # Text-only mode: keep transcript, suppress TTS
         self.scale        = 1.0
         self.target_scale = 1.0
@@ -390,6 +398,12 @@ class KaizumiUI:
         self.bg = tk.Canvas(self.root, width=W, height=H,
                             bg=self.col["bg"], highlightthickness=0)
         self.bg.place(x=0, y=0)
+        # ── Drag the holographic sphere with the mouse ───────────────────────
+        self._drag_active = False
+        self._drag_off = (0, 0)
+        self.bg.bind("<ButtonPress-1>", self._on_orb_press)
+        self.bg.bind("<B1-Motion>", self._on_orb_drag)
+        self.bg.bind("<ButtonRelease-1>", self._on_orb_release)
 
         # ── JARVIS command deck ────────────────────────────────────────────
         # This is intentionally built from native Tk widgets so it remains
@@ -459,7 +473,7 @@ class KaizumiUI:
             self._show_setup_ui()
 
         self._animate()
-        self.root.protocol("WM_DELETE_WINDOW", self._close_application)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close_request)
 
     # ── Theme ────────────────────────────────────────────────────────────────
 
@@ -2424,6 +2438,54 @@ class KaizumiUI:
         except OSError as exc:
             self.write_log(f"ERR: Enregistrement audio impossible : {exc}")
 
+    def _on_stop_pressed(self):
+        """Stop button: ask for confirmation, then shut NIANG IA down."""
+        import tkinter.messagebox as mb
+        try:
+            answer = mb.askyesno(
+                "Arrêter NIANG IA",
+                "Voulez-vous vraiment arrêter NIANG IA ?\n\n"
+                "L'écoute vocale, l'icône de la zone de notification et la "
+                "session vocale seront fermées.",
+                parent=self.root,
+            )
+        except Exception:
+            answer = False
+        if answer:
+            self.write_log("SYS: Arrêt de NIANG IA demandé depuis l'interface.")
+            self._close_application()
+
+    def _on_close_request(self):
+        """Window X button: hide to tray instead of quitting — NIANG IA keeps
+        listening for the wake word. Real quit stays available via the tray
+        menu, the Ctrl+Alt+Q hotkey or the 'Ferme NIANG IA' voice command."""
+        if not self._api_key_ready:
+            self._close_application()      # setup not done: exit for real
+            return
+        self.write_log(
+            "SYS: Fenêtre masquée — NIANG IA reste actif en arrière-plan "
+            "(icône dans la zone de notification). Dites « Réveille-toi » "
+            "ou cliquez sur l'icône pour le rappeler.")
+        visibility = getattr(self, "assistant_visibility", None)
+        if visibility is not None:
+            visibility.hide(animate=True, reason="")
+            return
+        self._safe_ui(self._hide_to_tray)
+
+    def _hide_to_tray(self, step: int = 0):
+        root = self.root
+        value = 1.0 - (step + 1) / 10.0
+        try:
+            if value <= 0.02:
+                root.attributes("-alpha", 1.0)
+                root.withdraw()
+                return
+            root.attributes("-alpha", value)
+        except Exception:
+            root.withdraw()
+            return
+        root.after(18, lambda: self._hide_to_tray(step + 1))
+
     def _close_application(self):
         if self.on_application_close:
             try:
@@ -2481,6 +2543,14 @@ class KaizumiUI:
             font=("Segoe UI", 8, "bold"), height=32,
         )
         self._update_button.place(x=min(294, max(180, self.W - 210)), y=BTN_Y, width=140, height=32)
+
+        # ── Stop button (visible way to shut NIANG IA down) ──────────────────
+        self._stop_button = PillButton(
+            self.root, self, text=tr("⏹ ARRÊTER"),
+            command=self._on_stop_pressed,
+            style="danger", font=("Segoe UI", 8, "bold"), height=32,
+        )
+        self._stop_button.place(x=max(18, self.W - 138), y=BTN_Y, width=120, height=32)
 
     def _draw_silent_button(self):
         c = getattr(self, "_silent_canvas", None)
@@ -2583,7 +2653,7 @@ class KaizumiUI:
     def _hide_main_widgets(self):
         for w in (self._left_deck, self._right_deck, self.log_frame, self._input_text,
                   self._clear_btn, self._send_btn, self._mute_canvas,
-                  self._silent_canvas, self._update_button):
+                  self._silent_canvas, self._update_button, self._stop_button):
             w.place_forget()
 
     def _finish_intro(self, event=None):
@@ -2628,6 +2698,8 @@ class KaizumiUI:
         if getattr(self, "_silent_canvas", None) is not None:
             self._silent_canvas.place(x=136, y=footer_y)
         self._update_button.place(x=min(294, max(180, W - 210)), y=footer_y, width=126 if is_compact else 140, height=32)
+        if getattr(self, "_stop_button", None) is not None:
+            self._stop_button.place(x=max(18, W - 132), y=footer_y, width=114 if is_compact else 120, height=32)
         if W >= 900 and not is_compact:
             self._left_deck.place(x=16, y=96, width=184, height=max(260, H - 210))
             self._right_deck.place(x=W - 216, y=96, width=200, height=max(260, H - 210))
@@ -2723,12 +2795,67 @@ class KaizumiUI:
         self._ui_deferred.append((fn, args))
 
     def set_state(self, state: str):
+        hook = getattr(self, "on_state_change", None)
+        if hook:
+            try:
+                hook(state)
+            except Exception:
+                pass
         self._safe_ui(self._set_state, state)
+
+    # ── Semi-transparent background ──────────────────────────────────────────
+
+    def set_background_alpha(self, value: float):
+        """Window opacity (1.0 = opaque, 0.9 = semi-transparent hologram)."""
+        try:
+            alpha = max(0.55, min(1.0, float(value)))
+        except (TypeError, ValueError):
+            alpha = 1.0
+        self._base_alpha = alpha
+        self._safe_ui(self._apply_background_alpha, alpha)
+
+    def _apply_background_alpha(self, alpha: float):
+        try:
+            self.root.attributes("-alpha", alpha)
+        except Exception:
+            pass
+
+    # ── Voice-activation feedback (called from main.py / tray) ───────────────
+
+    def wake_flash(self):
+        """Visual burst when 'Hey Niang' / 'Niang IA' is heard."""
+        self._safe_ui(self._wake_flash)
+
+    def _wake_flash(self):
+        try:
+            self.pulse_r = [0.0, 0.0]      # two shockwave rings
+            self.target_halo = 200.0
+            self.halo_a      = 200.0
+        except Exception:
+            pass
+        self.write_log("SYS: 🎤 Mot d’activation détecté — je vous écoute !")
+
+    def set_mic_level(self, level: float):
+        """Live microphone level (0..1) — drives the sound waves."""
+        try:
+            self._mic_level = max(0.0, min(1.0, float(level)))
+        except (TypeError, ValueError):
+            pass
+
+    def set_mic_listening(self, on: bool):
+        """Show/hide the permanent-microphone indicator."""
+        self._safe_ui(self._set_mic_listening, bool(on))
+
+    def _set_mic_listening(self, on: bool):
+        self._mic_listening = bool(on)
+        if (on and self._state not in ("LISTENING", "SPEAKING", "THINKING",
+                                       "PROCESSING", "SLEEPING") and not self.muted):
+            self._set_state("LISTENING")
 
     def _set_state(self, state: str):
         """
         Called from main.py.
-        state: LISTENING | SPEAKING | THINKING | MUTED | ONLINE | PROCESSING
+        state: LISTENING | SPEAKING | THINKING | MUTED | ONLINE | PROCESSING | SLEEPING
         """
         self._state = state
         if state == "MUTED":
@@ -2745,6 +2872,9 @@ class KaizumiUI:
             self.speaking    = False
         elif state == "PROCESSING":
             self.status_text = "TRAITEMENT"
+            self.speaking    = False
+        elif state == "SLEEPING":
+            self.status_text = "VEILLE"
             self.speaking    = False
         else:
             self.status_text = "EN LIGNE"
@@ -2786,6 +2916,11 @@ class KaizumiUI:
             if self.speaking:
                 self.target_scale = random.uniform(1.05, 1.11)
                 self.target_halo  = random.uniform(138, 182)
+            elif self._state == "SLEEPING":
+                # Slow breathing while dozing in the tray
+                ph = (now - self._t_start) * 1.2
+                self.target_scale = 1.0 + 0.014 * math.sin(ph)
+                self.target_halo  = 26 + 16 * max(0.0, math.sin(ph))
             elif self.muted:
                 self.target_scale = random.uniform(0.998, 1.001)
                 self.target_halo  = random.uniform(20, 32)
@@ -2826,6 +2961,9 @@ class KaizumiUI:
             tgt = 0.04
         elif self.speaking:
             tgt = 0.5 + 0.45 * abs(math.sin(T * 5.0)) + random.uniform(-0.08, 0.08)
+        elif self._mic_level is not None and self._state == "LISTENING":
+            # Real microphone level from the wake-word listener
+            tgt = 0.15 + 0.75 * self._mic_level
         elif self._state in ("THINKING", "PROCESSING"):
             tgt = 0.35 + 0.12 * math.sin(T * 4.0)
         else:
@@ -2890,6 +3028,8 @@ class KaizumiUI:
     def _ensure_backdrop(self):
         """Radial gradient + vignette + scanlines (pre-rendered, like the video's bg())."""
         col = self.col
+        if self._drag_active:
+            return          # keep the current backdrop while the orb is dragged
         key = (self.W, self.H, self.FCX, self.FCY, col["pri"])
         if key == self._bd_key or self.W < 4 or self.H < 4:
             return
@@ -2925,6 +3065,37 @@ class KaizumiUI:
         self.bg.delete("bgimg")
         self.bg.create_image(0, 0, image=self._bd_tk, anchor="nw", tags=("bgimg",))
         self.bg.tag_lower("bgimg")
+
+    # ── Dragging the holographic sphere ─────────────────────────────────────
+
+    def _orb_hit(self, x: int, y: int) -> bool:
+        """True when the pointer is on the orb (it can be dragged)."""
+        radius = self.FACE_SZ * 0.48
+        dx = x - self.FCX
+        dy = y - self.FCY
+        return (dx * dx + dy * dy) <= radius * radius
+
+    def _on_orb_press(self, event):
+        if not self._orb_hit(event.x, event.y):
+            return
+        self._drag_active = True
+        self._drag_off = (event.x - self.FCX, event.y - self.FCY)
+        self.bg.configure(cursor="fleur")
+
+    def _on_orb_drag(self, event):
+        if not self._drag_active:
+            return
+        margin = max(40, self.FACE_SZ // 3)
+        self.FCX = max(margin, min(self.W - margin, event.x - self._drag_off[0]))
+        self.FCY = max(margin, min(self.H - margin, event.y - self._drag_off[1]))
+        self._draw()
+
+    def _on_orb_release(self, event):
+        if not self._drag_active:
+            return
+        self._drag_active = False
+        self.bg.configure(cursor="")
+        self._bd_key = None      # re-render the backdrop around the new position
 
     # ── Drawing ──────────────────────────────────────────────────────────────
 
@@ -3154,6 +3325,13 @@ class KaizumiUI:
             stat, sc = ("●" if self.status_blink else "○") + f" {self.status_text}", col["pri"]
         self._cached("status", (stat, sc, W, sy), lambda: self._spaced(
             stat, W / 2, sy, 13, sc, 6, weight="bold", tag="status"))
+
+        # ── Mic-active indicator (permanent listening) ───────────────────────
+        if self._mic_listening:
+            mic_col = col["green"] if self.status_blink else col["acc2"]
+            mic_txt = "🎤 micro actif — dites « Hey Niang »"
+            c.create_text(W - 24, 60, text=mic_txt, fill=mic_col,
+                          font=("Segoe UI", 8, "bold"), anchor="e", tags=D)
 
         for _name in ("logo", "hud_tl", "status"):
             c.tag_raise(_name)

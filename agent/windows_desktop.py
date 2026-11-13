@@ -655,10 +655,37 @@ class WindowsDesktopAgent:
         if x is not None:
             self._validate_point(window, x, y)
             pyautogui.moveTo(int(x), int(y))
-        pyautogui.scroll(amount)
+        else:
+            bounds = window.get("bounds")
+            if bounds:
+                center_x = int(bounds["left"] + bounds["width"] / 2)
+                center_y = int(bounds["top"] + bounds["height"] / 2)
+                pyautogui.moveTo(center_x, center_y)
+        # Scroll in repeated notches; a single pyautogui.scroll(1) moves
+        # almost nothing in most apps.
+        notches = max(1, min(10, abs(int(amount))))
+        direction = 1 if int(amount) >= 0 else -1
+        amount_value = int(amount)
+        for _ in range(notches):
+            pyautogui.scroll(direction * max(1, abs(amount_value) // notches))
+            time.sleep(0.05)
         time.sleep(0.2)
+        method = "wheel"
         after, _ = self._capture(window)
-        return {"amount": amount, "verified": _images_changed(before, after)}
+        changed = _images_changed(before, after)
+        if not changed:
+            # Some windows ignore the mouse wheel; fall back to Page keys.
+            fallback_key = "pagedown" if amount_value < 0 else "pageup"
+            steps = max(1, min(5, abs(amount_value)))
+            for _ in range(steps):
+                pyautogui.press(fallback_key)
+                time.sleep(0.1)
+            time.sleep(0.2)
+            after, _ = self._capture(window)
+            changed = _images_changed(before, after)
+            if changed:
+                method = "keyboard"
+        return {"amount": amount, "verified": changed, "method": method}
 
     def verify_text(self, hwnd: int | str, expected: str) -> dict:
         if not isinstance(expected, str) or not expected.strip():

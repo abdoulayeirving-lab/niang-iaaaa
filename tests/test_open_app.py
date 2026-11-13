@@ -5,24 +5,29 @@ from actions import open_app
 
 
 class WindowsAppLaunchTests(unittest.TestCase):
-    @patch("actions.open_app.subprocess.Popen")
-    def test_youtube_opens_fixed_url_through_hidden_cmd(self, popen):
+    @patch("actions.open_app._open_chrome_app", return_value=True)
+    def test_youtube_opens_as_chrome_app_window(self, chrome_app):
         self.assertTrue(open_app._launch_windows("YouTube"))
 
-        args, kwargs = popen.call_args
-        self.assertEqual(args[0], ["cmd.exe", "/c", "start", "", "https://www.youtube.com"])
-        self.assertIn("creationflags", kwargs)
-        self.assertIs(kwargs["stdout"], open_app.subprocess.DEVNULL)
+        chrome_app.assert_called_once_with("https://www.youtube.com")
 
     @patch("actions.open_app.subprocess.Popen")
-    def test_recognized_app_uses_cmd_start_without_waiting(self, popen):
+    @patch("actions.open_app._app_paths_exists", return_value=True)
+    @patch("actions.open_app.shutil.which", return_value=None)
+    @patch("actions.open_app._find_registry_exe", return_value=None)
+    @patch("actions.open_app._launch_start_menu", return_value=False)
+    def test_recognized_app_uses_cmd_start_without_waiting(self, _menu, _reg, _which, _paths, popen):
         self.assertTrue(open_app._launch_windows("chrome"))
 
         args, _ = popen.call_args
         self.assertEqual(args[0], ["cmd.exe", "/c", "start", "", "chrome"])
 
     @patch("actions.open_app.subprocess.Popen")
-    def test_application_names_with_spaces_are_passed_as_single_argument(self, popen):
+    @patch("actions.open_app._app_paths_exists", return_value=True)
+    @patch("actions.open_app.shutil.which", return_value=None)
+    @patch("actions.open_app._find_registry_exe", return_value=None)
+    @patch("actions.open_app._launch_start_menu", return_value=False)
+    def test_application_names_with_spaces_are_passed_as_single_argument(self, _menu, _reg, _which, _paths, popen):
         self.assertTrue(open_app._launch_windows("Adobe Premiere Pro"))
 
         args, _ = popen.call_args

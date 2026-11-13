@@ -8,6 +8,15 @@ import os
 import sys
 from pathlib import Path
 
+# Windows consoles often default to cp1252, which cannot encode emojis
+# printed in this module and would crash the search. Never let printing
+# break search: use UTF-8 with replacement.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 
 def get_base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -138,19 +147,36 @@ def _compare(items: list, aspect: str) -> str:
         return _gemini_search(query)
     except Exception as e:
         print(f"[WebSearch] ⚠️ Gemini compare failed: {e}")
-        all_results = {}
-        for item in items:
-            try:
-                all_results[item] = _ddg_search(f"{item} {aspect}", max_results=3)
-            except Exception:
-                all_results[item] = []
-        lines = [f"Comparison — {aspect.upper()}\n{'─'*40}"]
-        for item in items:
-            lines.append(f"\n▸ {item}")
-            for r in all_results.get(item, [])[:2]:
-                if r.get("snippet"):
-                    lines.append(f"  • {r['snippet']}")
-        return "\n".join(lines)
+
+    import os
+    try:
+        from api_keys import load_env_file
+        load_env_file()
+    except Exception:
+        pass
+    if os.environ.get("SERPER_API_KEY", "").strip():
+        try:
+            return _serper_search(query)
+        except Exception as serper_error:
+            print(f"[WebSearch] ⚠️ Serper compare failed: {serper_error}")
+
+    all_results = {}
+    for item in items:
+        try:
+            all_results[item] = _ddg_search(f"{item} {aspect}", max_results=3)
+        except Exception as ddg_error:
+            print(f"[WebSearch] ⚠️ DDG compare failed for {item!r}: {ddg_error}")
+            all_results[item] = []
+    lines = [f"Comparison — {aspect.upper()}\n{'─'*40}"]
+    for item in items:
+        lines.append(f"\n▸ {item}")
+        snippets = [r["snippet"] for r in all_results.get(item, [])[:2] if r.get("snippet")]
+        if snippets:
+            for s in snippets:
+                lines.append(f"  • {s}")
+        else:
+            lines.append("  (aucune donnée trouvée — vérifie ta connexion ou tes clés API)")
+    return "\n".join(lines)
 
 
 def web_search(

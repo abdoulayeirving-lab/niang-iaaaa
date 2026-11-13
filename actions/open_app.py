@@ -4,10 +4,17 @@
 import time
 import os
 import re
+import sys
 import subprocess
 import platform
 import shutil
 from pathlib import Path
+
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 try:
     import psutil
@@ -156,39 +163,135 @@ def _launch_start_menu(app_name: str) -> bool:
                 continue
     return False
 
-def _launch_windows(app_name: str) -> bool:
-    requested = app_name.strip()
-    if requested.casefold() in {"youtube", "youtube.com", "www.youtube.com"}:
-        target = "https://www.youtube.com"
-    else:
-        target = requested
+def _app_paths_exists(app_name: str) -> bool:
+    """Check the Windows 'App Paths' registry keys (how `start` resolves apps)."""
+    try:
+        import winreg
+    except ImportError:
+        return False
+    base_name = app_name.lower().replace(" ", "")
+    candidates = [base_name + ".exe", base_name]
+    keys = [
+        (winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows\CurrentVersion\App Paths"),
+        (winreg.HKEY_LOCAL_MACHINE, r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths"),
+        (winreg.HKEY_CURRENT_USER,  r"Software\Microsoft\Windows\CurrentVersion\App Paths"),
+    ]
+    for hive, base in keys:
+        for name in candidates:
+            try:
+                with winreg.OpenKey(hive, base + "\\" + name):
+                    return True
+            except OSError:
+                continue
+    return False
 
-    # Keep cmd /c start limited to a single app name or the fixed YouTube URL.
-    # In particular, never pass shell syntax or user-provided arguments to CMD.
-    if target not in {"https://www.youtube.com", "ms-settings:"} and not re.fullmatch(
-        r"[A-Za-z0-9 ._-]+", target
-    ):
-        print(f"[open_app] Refused unsafe launch name: {requested!r}")
+
+# Sites sans app Windows officielle : ouverts comme fenêtres Chrome --app.
+_CHROME_APP_SITES = {
+    "youtube":     "https://www.youtube.com",
+    "youtube.com": "https://www.youtube.com",
+    "www.youtube.com": "https://www.youtube.com",
+    "tiktok":      "https://www.tiktok.com",
+    "tiktok.com":  "https://www.tiktok.com",
+    "www.tiktok.com": "https://www.tiktok.com",
+}
+
+
+def _open_chrome_app(url: str) -> bool:
+    chrome_candidates = [
+        Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+        Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / r"Google\Chrome\Application\chrome.exe",
+        Path(os.environ.get("LOCALAPPDATA", "")) / r"Google\Chrome\Application\chrome.exe",
+    ]
+    which_chrome = shutil.which("chrome")
+    if which_chrome:
+        chrome_candidates.insert(0, Path(which_chrome))
+    for chrome in chrome_candidates:
+        if chrome.is_file():
+            try:
+                subprocess.Popen(
+                    [str(chrome), f"--app={url}"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                return True
+            except Exception:
+                pass
+    return False
+
+
+def _popen_app(path: str) -> bool:
+    try:
+        subprocess.Popen([path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except Exception:
         return False
 
-    try:
+
+def _launch_windows(app_name: str) -> bool:
+    requested = app_name.strip()
+
+    # Fixed URL/protocol targets: trusted, always allowed.
+    app_url = _CHROME_APP_SITES.get(requested.casefold())
+    if app_url:
+        # No Windows app exists: open as a Chrome --app window
+        # (app-like, no tabs) instead of the default browser.
+        if _open_chrome_app(app_url):
+            return True
         subprocess.Popen(
-            ["cmd.exe", "/c", "start", "", target],
+            ["cmd.exe", "/c", "start", "", app_url],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         return True
-    except Exception:
-        pass
+    if requested.endswith(":"):
+        target = requested
+        if re.fullmatch(r"[A-Za-z0-9 ._:-]+", target):
+            try:
+                subprocess.Popen(
+                    ["cmd.exe", "/c", "start", "", target],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                return True
+            except Exception:
+                pass
 
+    # Never pass URLs or shell syntax here.
+    if not re.fullmatch(r"[A-Za-z0-9 ._-]+", requested):
+        print(f"[open_app] Refused unsafe launch name: {requested!r}")
+        return False
+
+    # 1) Start Menu shortcut — most reliable for installed apps (classic + Store).
     if _launch_start_menu(requested):
         return True
 
+    # 2) Exe inside the registry InstallLocation.
     exe = _find_registry_exe(requested)
-    if exe:
+    if exe and _popen_app(exe):
+        return True
+
+    # 3) Executable on PATH.
+    binary = (
+        shutil.which(requested)
+        or shutil.which(requested.lower())
+        or shutil.which(requested.lower().replace(" ", ""))
+    )
+    if binary and _popen_app(binary):
+        return True
+
+    # 4) `cmd /c start` only when Windows can actually resolve the app
+    #    (App Paths registry). Otherwise it opens the default browser — avoid.
+    if _app_paths_exists(requested):
         try:
-            subprocess.Popen([exe], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.Popen(
+                ["cmd.exe", "/c", "start", "", requested],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
             return True
         except Exception:
             pass

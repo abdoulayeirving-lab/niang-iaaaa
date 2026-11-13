@@ -3,7 +3,7 @@ google-genai>=2.25.0
 pillow
 requests
 beautifulsoup4
-duckduckgo-search
+ddgs
 playwright          
 mcp>=1.13,<2
 pyautogui
@@ -25,6 +25,7 @@ pytesseract
 PyMuPDF
 tkinterdnd2
 openwakeword
+vosk
 winotify
 pystray
 keyboard

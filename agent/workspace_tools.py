@@ -41,10 +41,14 @@ class WorkspaceError(ValueError):
 def _workspace_root() -> Path:
     configured = os.environ.get("NIANG_IA_WORKSPACE_ROOT", "").strip()
     if not configured:
-        raise WorkspaceError(
-            "Workspace tools are disabled. Set NIANG_IA_WORKSPACE_ROOT to the "
-            "project folder you explicitly authorize, then restart NIANG IA."
-        )
+        # Default workspace: created automatically, still fully confined.
+        # Override with NIANG_IA_WORKSPACE_ROOT for a specific project.
+        default = Path.home() / "NIANG_IA_Workspace"
+        try:
+            default.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise WorkspaceError(f"Cannot create the default workspace {default}: {exc}") from exc
+        return default.resolve()
     try:
         root = Path(configured).expanduser().resolve(strict=True)
     except OSError as exc:

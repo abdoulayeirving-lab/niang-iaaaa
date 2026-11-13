@@ -44,10 +44,17 @@ def task_manager(
     if action in ("cancel", "stop", "abort"):
         task_id = str(params.get("task_id", "")).strip()
         if not task_id:
-            return "Please provide a task_id to cancel, sir."
+            cancelled = queue.cancel_all_active()
+            if not cancelled:
+                return "Aucune mission autonome n’est en cours ou en attente."
+            return (
+                f"Arrêt demandé pour {len(cancelled)} mission(s) autonome(s) : "
+                + ", ".join(cancelled)
+                + ". Les actions actives sont en cours d’interruption."
+            )
         if queue.cancel(task_id):
-            return f"Task {task_id} cancelled."
-        return f"Could not cancel task {task_id}. It may be already finished."
+            return f"Arrêt demandé pour la mission {task_id}."
+        return f"Impossible d’arrêter la mission {task_id} ; elle est peut-être déjà terminée."
 
     if action in ("list", "all", "tasks"):
         tasks = queue.get_all_statuses()

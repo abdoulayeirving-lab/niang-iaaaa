@@ -3,6 +3,8 @@ from pathlib import Path
 
 from PIL import Image
 
+from build_release import collect_files, should_include
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -11,7 +13,7 @@ class InstallerPersonalizationTests(unittest.TestCase):
     def test_installer_asks_only_for_preferred_name_and_default_language(self):
         source = (ROOT / "NIANG_IA.iss").read_text(encoding="utf-8")
 
-        self.assertIn("CreateCustomPage(wpWelcome, '', '')", source)
+        self.assertIn("CreateCustomPage(wpSelectDir, '', '')", source)
         self.assertIn("Comment veux-tu que NIANG IA t''appelle ?", source)
         self.assertIn("Langue par défaut de NIANG IA", source)
         self.assertIn("UserNameEdit.Text", source)
@@ -39,7 +41,8 @@ class InstallerPersonalizationTests(unittest.TestCase):
     def test_updates_skip_saved_profile_and_api_key_pages_without_overwriting_data(self):
         source = (ROOT / "NIANG_IA.iss").read_text(encoding="utf-8")
 
-        self.assertIn('#define AppVersion "1.0.21"', source)
+        version = (ROOT / "VERSION.txt").read_text(encoding="ascii").strip()
+        self.assertIn(f'#define AppVersion "{version}"', source)
         self.assertIn("memory\\long_term.json", source)
         self.assertIn("memory\\installer_profile.json", source)
         self.assertIn("config\\installer_gemini_key.txt", source)
@@ -64,6 +67,26 @@ class InstallerPersonalizationTests(unittest.TestCase):
         self.assertIn("Get-FileHash", setup_script)
         self.assertIn("127.0.0.1:11434", setup_script)
         self.assertIn("MessageBox]::Show", setup_script)
+
+    def test_release_excludes_backup_files(self):
+        test_backups = (
+            ROOT / "tests" / "test_safety.py.audit_backup_20261103_010410.py",
+            ROOT / "actions" / "calendar.py.backup_20261016_132605",
+            ROOT / "actions" / "autostart.py.avant_niang_suite.bak",
+        )
+
+        for backup in test_backups:
+            with self.subTest(backup=backup.name):
+                self.assertFalse(should_include(backup, backup.parent))
+
+    def test_release_includes_cline_integration(self):
+        release_files = {
+            path.relative_to(ROOT).as_posix()
+            for path in collect_files()
+        }
+
+        self.assertIn("write_cline.py", release_files)
+        self.assertIn("niang_ia/integrations/cline/cline_manager.py", release_files)
 
     def test_windows_icon_fills_canvas_and_has_transparent_rounded_corners(self):
         with Image.open(ROOT / "assets" / "niang_ia.ico") as source:

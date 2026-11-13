@@ -20,10 +20,12 @@ class WorkspaceToolTests(unittest.TestCase):
         self.addCleanup(self.environment.stop)
         self.addCleanup(self.temp.cleanup)
 
-    def test_workspace_must_be_explicitly_configured(self):
-        with patch.dict(os.environ, {"NIANG_IA_WORKSPACE_ROOT": ""}):
-            with self.assertRaisesRegex(workspace_tools.WorkspaceError, "disabled"):
-                workspace_tools.list_files()
+    def test_workspace_defaults_to_home_workspace_when_not_configured(self):
+        with tempfile.TemporaryDirectory() as home:
+            with patch.dict(os.environ, {"NIANG_IA_WORKSPACE_ROOT": ""}, clear=False):
+                with patch.object(Path, "home", return_value=Path(home)):
+                    workspace_tools.list_files()
+                    self.assertTrue((Path(home) / "NIANG_IA_Workspace").is_dir())
 
     def test_read_write_search_and_listing_stay_within_workspace(self):
         workspace_tools.write_file("src/hello.py", "print('hello')\n")

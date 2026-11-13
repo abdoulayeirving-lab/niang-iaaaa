@@ -58,6 +58,7 @@ from actions.file_controller   import file_controller
 from actions.code_helper       import code_helper
 from actions.dev_agent         import dev_agent
 from actions.web_search        import web_search as web_search_action
+from actions.web_fetch         import web_fetch as web_fetch_action
 from actions.computer_control  import computer_control
 from actions.game_updater      import game_updater
 from actions.system_status     import system_status
@@ -481,6 +482,21 @@ TOOL_DECLARATIONS = [
         }
     },
     {
+        "name": "web_fetch",
+        "description": (
+            "Fetches a public web page (article, documentation, result page) and returns "
+            "its readable text. Use after web_search when the user needs details from a "
+            "specific page, not just snippets."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "url": {"type": "STRING", "description": "Public http(s) URL of the page to read"}
+            },
+            "required": ["url"]
+        }
+    },
+    {
         "name": "weather_report",
         "description": "Gets real-time weather information for a city.",
         "parameters": {
@@ -685,10 +701,10 @@ TOOL_DECLARATIONS = [
     {
         "name": "workspace_list_files",
         "description": (
-            "Lists files inside the exact folder configured in "
-            "NIANG_IA_WORKSPACE_ROOT. Use relative paths only; credentials, "
-            "environment files, version-control metadata, and dependency caches "
-            "are hidden. Returns an explicit setup error if no workspace is configured."
+            "Lists files inside the authorized workspace (defaults to "
+            "~/NIANG_IA_Workspace, or NIANG_IA_WORKSPACE_ROOT if set). Use "
+            "relative paths only; credentials, environment files, "
+            "version-control metadata, and dependency caches are hidden."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -717,10 +733,11 @@ TOOL_DECLARATIONS = [
     {
         "name": "workspace_write_file",
         "description": (
-            "Creates or replaces a UTF-8 text file only inside the exact "
-            "NIANG_IA_WORKSPACE_ROOT directory configured by the user. Paths "
-            "must be relative; credential/environment files, symlinks, and "
-            "content over 1 MB are rejected. Requires explicit confirmation."
+            "Creates or replaces a UTF-8 text file inside the authorized "
+            "workspace (defaults to ~/NIANG_IA_Workspace, or "
+            "NIANG_IA_WORKSPACE_ROOT if set). Paths must be relative; "
+            "credential/environment files, symlinks, and content over 1 MB "
+            "are rejected. Requires explicit confirmation."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -1219,14 +1236,19 @@ TOOL_DECLARATIONS = [
         "description": (
             "Check or control background agent tasks started via agent_task. "
             "Reports the current phase, completed step count, and active step. "
-            "Use for: 'how is my task going?', 'status of my task', 'cancel that task', "
-            "'what tasks are running?'. You get a task_id when you start agent_task."
+            "Use for: 'how is my task going?', 'status of my task', 'what tasks are running?', "
+            "and especially French voice commands such as 'arrête', 'arrête la mission', "
+            "'arrête l’agent' or English 'stop' while an autonomous task is running. "
+            "For a stop request without a task_id, call action='cancel' immediately with no "
+            "task_id; this stops all running and queued autonomous tasks and interrupts active "
+            "desktop/browser actions. Do not confuse this with closing NIANG IA: only use "
+            "assistant_visibility action='quit' when the user explicitly asks to close NIANG IA."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
                 "action":  {"type": "STRING", "description": "status | list | cancel"},
-                "task_id": {"type": "STRING", "description": "Task ID for status/cancel"}
+                "task_id": {"type": "STRING", "description": "Optional task ID; omit it to stop all active autonomous tasks"}
             },
             "required": ["action"]
         }
@@ -1359,6 +1381,30 @@ TOOL_DECLARATIONS = [
             "properties": {
                 "action": {"type": "STRING", "description": "start | stop | status | record (default: status)"},
                 "clips":  {"type": "INTEGER", "description": "Number of clips to record for 'record' (default: 5)"}
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "assistant_visibility",
+        "description": (
+            "Shows, hides or closes the NIANG IA interface. "
+            "Actions: show | hide | sleep | quit | stop | status. "
+            "Use 'show' for 'réveille-toi'/'montre-toi', 'sleep' for "
+            "'dors niang'/'réduis-toi' (hide to tray, keep listening), "
+            "'stop' for 'arrête'/'arrête-toi'/'arrête NIANG IA'/'éteins NIANG IA'/'stoppe' "
+            "(stops NIANG IA completely and immediately: the wake-word listener, "
+            "the tray icon and the voice session are all closed — the user "
+            "explicitly asked for a full stop, so do not ask again), "
+            "'quit' only when the user says 'ferme NIANG IA' (asks the user for "
+            "confirmation first), 'status' reports presence. To cancel only a "
+            "running task without stopping NIANG IA, use task_manager cancel "
+            "('annule la tâche')."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "show | hide | sleep | quit | stop | status (default: status)"}
             },
             "required": []
         }
@@ -1575,15 +1621,22 @@ TOOL_DECLARATIONS = [
         "name": "autostart",
         "description": (
             "Controls whether NIANG IA starts automatically at Windows login. "
-            "Actions: status | enable | disable. 'enable' registers NIANG IA in "
+            "Actions: status | enable | disable | launcher_status | "
+            "enable_launcher | disable_launcher. 'enable' registers NIANG IA in "
             "the startup list (optionally with the Bluetooth phone transport via "
-            "'remote'). Use for 'start at login', 'run on startup', 'open automatically'."
+            "'remote', optionally hidden in the tray via 'background', and "
+            "optionally with the voice launcher via 'launcher'). The voice "
+            "launcher starts NIANG IA when the user says 'Hey Niang' even if "
+            "the assistant is not running. Use for 'start at login', 'run on "
+            "startup', 'open automatically', 'start NIANG IA with my voice'."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action": {"type": "STRING", "description": "status | enable | disable (default: status)"},
-                "remote": {"type": "BOOLEAN", "description": "For 'enable': also start the Bluetooth transport (default true)"}
+                "action": {"type": "STRING", "description": "status | enable | disable | launcher_status | enable_launcher | disable_launcher (default: status)"},
+                "remote": {"type": "BOOLEAN", "description": "For 'enable': also start the Bluetooth transport (default true)"},
+                "background": {"type": "BOOLEAN", "description": "For 'enable': start hidden in the tray, wake-word only (default false)"},
+                "launcher": {"type": "BOOLEAN", "description": "For 'enable'/'disable': also manage the voice launcher that starts NIANG IA on 'Hey Niang' (default false)"},
             },
             "required": []
         }
@@ -1955,6 +2008,7 @@ class KaizumiLive:
         self._turn_complete = False
         self._ready         = False
         self._startup_greeting_sent = False
+        self._last_screen_vision_at = 0.0
         self._phase         = PHASE_IDLE
         self._phase_lock    = threading.Lock()
         self._rolling_parts = []
@@ -2008,101 +2062,79 @@ class KaizumiLive:
             wake_service.configure(on_detect=self._on_wake_detect)
         except Exception:
             pass
+        # Assistant presence + background voice activation ('Hey Niang').
+        from assistant_visibility import AssistantVisibility
+        from voice_activation import voice_activation as _voice_activation
+        self.visibility = AssistantVisibility(ui)
+        self.voice = _voice_activation
+        self.voice._on_detect = self._on_wake_detect
+        # Mic indicator + live sound waves in the UI
+        self.voice._on_state_change = ui.set_mic_listening
+        self.voice._on_level = ui.set_mic_level
+        # Lets the window close button hide-to-tray through the same path
+        ui.assistant_visibility = self.visibility
+        # Blue screen-edge activation effect (wake word)
+        try:
+            from screen_edge_effect import ScreenEdgeEffect
+            self.screen_effect = ScreenEdgeEffect(
+                ui.root, dispatch=ui._safe_ui,
+                on_error=lambda exc: print(f"[ScreenEdge] warn: {exc}"))
+            ui.on_state_change = self.screen_effect.on_state
+        except Exception as exc:
+            print(f"[ScreenEdge] indisponible: {exc}")
+            self.screen_effect = None
 
     def _on_wake_detect(self):
-        """Excited when the wake word is heard â€” un-mute and listen (barge-in)."""
+        """Fired when 'Hey Niang' / 'Niang IA' is heard — show the
+        interface and enter voice-conversation mode instantly.
+
+        The wake word always wins: even if NIANG IA was muted (F4) or in
+        "text only" mode, it un-mutes and comes back to full voice mode."""
         try:
-            if not self._ready or not self.session:
-                print("[WakeWord] âš ï¸ Ignored â€” session not ready.")
-                return
-            if getattr(self, "_bt_bridge", None) is not None and self._bt_bridge.connected_count() > 0:
-                print("[WakeWord] ðŸš« Ignored â€” phone remote active via Bluetooth.")
-                return
-            self.ui.muted = False
-            self.set_speaking(False)
-            self.ui.write_log("SYS: Wake word heard â€” listening.")
+            # Bring the interface up even if the Gemini session is still
+            # connecting: the user called, the UI must answer.
+            woke_up = False
+            if self.ui.muted:
+                self.ui.muted = False
+                try:
+                    self.ui._draw_mute_button()
+                    self.ui.set_state("LISTENING")
+                except Exception:
+                    pass
+                woke_up = True
+            if getattr(self.ui, "silent_mode", False):
+                try:
+                    self.ui.silent_mode = False
+                    self.ui._draw_silent_button()
+                except Exception:
+                    pass
+                woke_up = True
+            if self._ready and self.session:
+                self.set_speaking(False)
+                reason = ("Mot d’activation entendu — "
+                          "NIANG IA à l’écoute.")
+            else:
+                reason = ("Mot d’activation entendu — interface affichée "
+                          "(session Gemini en cours).")
+            if woke_up:
+                reason += " (micro et mode vocal réactivés)"
+            self.ui.wake_flash()
+            # Blue neon frame around the screen, then the sphere appears.
+            if getattr(self, "screen_effect", None) is not None:
+                self.screen_effect.show_activation_effect()
+            self.visibility.show(on_top=True, reason=reason)
+            self.ui.set_state("LISTENING" if self._ready else "ONLINE")
+            print("[WakeWord] OK interface activée par la voix")
         except Exception as e:
-            print(f"[WakeWord] âš ï¸ {e}")
+            print(f"[WakeWord] warn: {e}")
 
     def attach_tray(self):
-        """Background tray icon + global hotkeys (optional deps)."""
+        """Tray icon + global hotkeys, built by tray_manager."""
         try:
-            from actions import system_tray
-
-            def _on_ui(cb):
-                return lambda: self.ui.root.after(0, cb)
-
-            def _wake_active():
-                from actions.wake_word import _pick_engine
-                return _pick_engine()[1]._running
-
-            def _toggle_wake():
-                try:
-                    from actions.wake_word import _pick_engine
-                    from actions.kaizumi_wake import _matcher as kw_matcher
-                    name, eng = _pick_engine()
-                    if not eng.available:
-                        print("[Tray] âš ï¸ Wake word engine not ready:", name)
-                        return
-                    if eng._running:
-                        r = eng.stop()
-                    else:
-                        eng.configure(on_detect=self._on_wake_detect)
-                        r = eng.start()
-                    print(f"[Tray] {r}")
-                    self.ui.write_log(f"SYS: {r}")
-                except Exception as e:
-                    print(f"[Tray] âš ï¸ {e}")
-
-            def _hide_show():
-                state = self.ui.root.state()
-                if state in ("normal", "iconic"):
-                    self.ui.root.withdraw()
-                else:
-                    self.ui.root.deiconify()
-                    self.ui.root.lift()
-
-            def _brief():
-                if self._loop and self.session:
-                    self.speak("Give me today's morning briefing.")
-                print("[Tray] Briefing requested")
-
-            def _quit():
-                try:
-                    self.ui.root.after(0, self.ui.root.destroy)
-                except Exception:
-                    os._exit(0)
-
-            callbacks = {
-                "toggle_mute": _on_ui(self.ui._toggle_mute),
-                "toggle_wake": _toggle_wake,
-                "hide_show":   _hide_show,
-                "briefing":    _brief,
-                "quit":        _quit,
-            }
-
-            def menu_factory():
-                import pystray
-                return pystray.Menu(
-                    pystray.MenuItem(
-                        lambda item: "ðŸ”‡ Unmute" if self.ui.muted else "ðŸ”Š Mute (F4)",
-                        _on_ui(self.ui._toggle_mute),
-                    ),
-                    pystray.MenuItem(
-                        lambda item: "ðŸ˜´ Stop Wake Word" if _wake_active() else "ðŸ’¤ Activate Wake Word",
-                        _toggle_wake,
-                    ),
-                    pystray.MenuItem("ðŸ“‹ Daily Briefing", _brief),
-                    pystray.MenuItem("ðŸ‘ Hide/Show Window", _hide_show),
-                    pystray.Menu.SEPARATOR,
-                    pystray.MenuItem("ðŸšª Quit NIANG IA", _quit, default=True),
-                )
-
-            tray_ok   = system_tray.configure_icon(menu_factory)
-            hot_ok    = system_tray.register_hotkeys(callbacks)
-            print(f"[Tray] ðŸ–¥ Tray: {'on' if tray_ok else 'off'} | Hotkeys: {hot_ok} registered ({system_tray.available()})")
+            from tray_manager import attach as attach_tray_menu
+            attach_tray_menu(self, self.visibility, self.voice)
         except Exception as e:
-            print(f"[Tray] âš ï¸ Could not attach tray: {e}")
+            print(f"[Tray] ⚠️ Could not attach tray: {e}")
             import traceback; traceback.print_exc()
 
     def _clear_analysis_sources(self):
@@ -2319,6 +2351,10 @@ class KaizumiLive:
 
     def _shutdown_agent_services(self) -> None:
         try:
+            self.voice.stop()
+        except Exception:
+            pass
+        try:
             from agent.task_queue import shutdown_queue_if_started
             shutdown_queue_if_started()
         finally:
@@ -2507,7 +2543,9 @@ class KaizumiLive:
         def _wake(args):
             from actions.wake_word import wake_word as wake_word_action
             return wake_word_action(parameters=args, player=ui)
-
+        def _assistant_visibility(args):
+            from assistant_visibility import handle_visibility_command
+            return handle_visibility_command(args, self, self.voice)
         def _save_memory(args):
             category = args.get("category", "notes")
             key      = args.get("key", "")
@@ -2788,7 +2826,7 @@ class KaizumiLive:
             "send_message":      (lambda a: send_message(parameters=a, response=None, player=ui, session_memory=None), 60),
             "reminder":          (lambda a: reminder(parameters=a, response=None, player=ui), 30),
             "youtube_video":     (lambda a: youtube_video(parameters=a, response=None, player=ui), 90),
-            "screen_process":    (lambda a: screen_process(parameters=a, player=ui), 120),
+            "screen_process":    (lambda a: screen_process(parameters=a, player=ui), 600),
             "computer_settings": (lambda a: computer_settings(parameters=a, response=None, player=ui), 120),
             "cmd_control":       (lambda a: cmd_control(parameters=a, player=ui), 120),
             "desktop_control":   (lambda a: desktop_control(parameters=a, player=ui), 60),
@@ -2796,6 +2834,7 @@ class KaizumiLive:
             "dev_agent":         (lambda a: dev_agent(parameters=a, player=ui, speak=speak), 180),
             "agent_task":        (_agent_task, 15),
             "web_search":        (lambda a: web_search_action(parameters=a, player=ui), 90),
+            "web_fetch":         (lambda a: web_fetch_action(parameters=a, player=ui), 60),
             "computer_control":  (lambda a: computer_control(parameters=a, player=ui), 120),
             "system_status":     (lambda a: system_status(parameters=a, player=ui), 45),
             "windows_diagnostics": (_windows_diagnostics, windows_timeout),
@@ -2811,6 +2850,7 @@ class KaizumiLive:
             "notify":            (lambda a: notify(parameters=a, player=ui), 30),
             "daily_briefing":    (lambda a: daily_briefing(parameters=a, player=ui), 120),
             "wake_word":         (_wake, 45),
+            "assistant_visibility": (_assistant_visibility, 10),
             "save_memory":       (_save_memory, 10),
             "set_mode":          (_set_mode, 10),
             "set_voice":         (_set_voice, 10),
@@ -2946,6 +2986,62 @@ class KaizumiLive:
         if tool is None or tool.handler is None:
             return ToolResult(ok=False, content=f"Unknown tool: {name}", error_kind="fatal")
 
+        # ── Vision gate: never act on the screen blind ─────────────────────
+        # Desktop-affecting tools require a fresh local vision observation.
+        # If the model skipped screen_process, capture one now and make the
+        # model re-issue the action with eyes open; if capture fails, block.
+        screen_action_tools = {"computer_control", "computer_settings", "vision_click"}
+        vision_fresh = (time.time() - self._last_screen_vision_at) < 45.0
+        if name in screen_action_tools and not vision_fresh:
+            print(f"[NIANG IA] {name} blocked: no fresh screen observation")
+            observation = await run_sync_tool(
+                lambda: screen_process(
+                    parameters={
+                        "angle": "local_vision",
+                        "text": (
+                            "Describe the current screen: open windows, visible "
+                            "controls, buttons, fields and any state relevant to "
+                            "the user's pending desktop request."
+                        ),
+                    },
+                    player=self.ui,
+                ),
+                "auto_screen_vision",
+                timeout=600,
+            )
+            observed = (observation.content or "").strip()
+            vision_ok = (
+                observation.ok
+                and observed
+                and not observed.startswith("Local screen vision failed")
+            )
+            if not vision_ok:
+                return ToolResult(
+                    ok=False,
+                    content=(
+                        "VISION GATE: the screen could not be observed, so the "
+                        "action was NOT executed. Tell the user you cannot see "
+                        "the screen right now (check that Ollama is running and "
+                        "qwen3-vl:2b is installed) and do not attempt the action "
+                        "blind."
+                    ),
+                    error_kind="vision",
+                )
+            self._last_screen_vision_at = time.time()
+            return ToolResult(
+                ok=True,
+                content=(
+                    "VISION GATE: you tried to act without looking at the "
+                    "screen. A fresh local screenshot was captured for you "
+                    "instead; the action was NOT executed yet.\n\n"
+                    f"{observed}\n\n"
+                    "Now decide using this observation and re-issue the same "
+                    "action (it will run because the observation is fresh), or "
+                    "adjust coordinates/targets to what is actually visible."
+                ),
+                error_kind="vision_required",
+            )
+
         if name == "browser_control":
             print("[Telegram] browser_control [details omitted]")
         else:
@@ -2957,6 +3053,49 @@ class KaizumiLive:
         )
         if result.ok:
             _record_proactive_usage(name)
+        if name == "screen_process" and result.ok:
+            _angle = str(args.get("angle", "")).lower().strip()
+            _content = str(result.content or "")
+            if _angle == "local_vision" and not _content.startswith("Local screen vision failed"):
+                self._last_screen_vision_at = time.time()
+        if name in {"computer_control", "computer_settings", "vision_click"} and result.ok:
+            observation = await run_sync_tool(
+                lambda: screen_process(
+                    parameters={
+                        "angle": "local_vision",
+                        "text": (
+                            "Describe the current state of the screen after the "
+                            "last action: what changed, what is visible now, and "
+                            "whether the action appears to have succeeded."
+                        ),
+                    },
+                    player=self.ui,
+                ),
+                "post_action_vision",
+                timeout=600,
+            )
+            obs_content = (observation.content or "").strip()
+            obs_ok = (
+                observation.ok
+                and obs_content
+                and not obs_content.startswith("Local screen vision failed")
+            )
+            if obs_ok:
+                self._last_screen_vision_at = time.time()
+                return ToolResult(
+                    ok=True,
+                    content=f"{result.content}\n\nPOST-ACTION SCREEN OBSERVATION:\n{obs_content}",
+                    error_kind=result.error_kind,
+                )
+            return ToolResult(
+                ok=result.ok,
+                content=(
+                    f"{result.content}\n\nPOST-ACTION SCREEN OBSERVATION FAILED: "
+                    "the screen could not be verified. Do not claim success "
+                    "without verification."
+                ),
+                error_kind=result.error_kind,
+            )
         return result
 
     def _build_config(self) -> types.LiveConnectConfig:
@@ -3002,6 +3141,12 @@ class KaizumiLive:
         parts.append(style_ctx)
         parts.append(
             "[WINDOWS COMPUTER-USE PROTOCOL]\n"
+            "HARD RULE: NEVER call computer_control, computer_settings or "
+            "vision_click without a successful screen_process angle='local_vision' "
+            "for the CURRENT screen first, in this exchange. If local vision "
+            "fails, stop and tell the user you cannot see the screen; do NOT act "
+            "anyway. The system enforces this gate: blind calls are intercepted "
+            "and you will receive a fresh observation instead of execution. "
             "For a multi-step desktop task, observe visual details with "
             "screen_process angle='local_vision' and identify accessible controls "
             "through UI Automation when available. Act on one "
@@ -3156,6 +3301,57 @@ class KaizumiLive:
                     + (f"\n[token: {token}]" if token else "")}
             )
 
+        # ── Vision gate: never act on the screen blind ─────────────────────
+        screen_action_tools = {"computer_control", "computer_settings", "vision_click"}
+        vision_fresh = (time.time() - self._last_screen_vision_at) < 45.0
+        if name in screen_action_tools and not vision_fresh:
+            from agent.resilience import run_sync_tool as _rst
+            print(f"[NIANG IA] {name} blocked: no fresh screen observation")
+            observation = await _rst(
+                lambda: screen_process(
+                    parameters={
+                        "angle": "local_vision",
+                        "text": (
+                            "Describe the current screen: open windows, visible "
+                            "controls, buttons, fields and any state relevant to "
+                            "the user's pending desktop request."
+                        ),
+                    },
+                    player=self.ui,
+                ),
+                "auto_screen_vision",
+                timeout=600,
+            )
+            observed = (observation.content or "").strip()
+            vision_ok = (
+                observation.ok
+                and observed
+                and not observed.startswith("Local screen vision failed")
+            )
+            if not vision_ok:
+                gate_msg = (
+                    "VISION GATE: the screen could not be observed, so the "
+                    "action was NOT executed. Tell the user you cannot see "
+                    "the screen right now (Ollama must be running with "
+                    "qwen3-vl:2b installed) and do not attempt the action blind."
+                )
+            else:
+                self._last_screen_vision_at = time.time()
+                gate_msg = (
+                    "VISION GATE: you tried to act without looking at the "
+                    "screen. A fresh local screenshot was captured for you "
+                    "instead; the action was NOT executed yet.\n\n"
+                    f"{observed}\n\n"
+                    "Now decide using this observation and re-issue the same "
+                    "action (it will run because the observation is fresh), or "
+                    "adjust coordinates/targets to what is actually visible."
+                )
+            if not self.ui.muted:
+                self.ui.set_state("LISTENING")
+            return types.FunctionResponse(
+                id=fc.id, name=name, response={"result": gate_msg}
+            )
+
         self.broadcast_remote({"type": "tool", "name": name, "status": "start",
                                "summary": " ".join(
                                    str(v) for v in sanitize(name, args).values()
@@ -3175,6 +3371,11 @@ class KaizumiLive:
                 result = r.content or f"{name} done."
                 if r.ok:
                     _record_proactive_usage(name)
+                if name == "screen_process" and r.ok:
+                    _angle = str(args.get("angle", "")).lower().strip()
+                    _content = str(r.content or "")
+                    if _angle == "local_vision" and not _content.startswith("Local screen vision failed"):
+                        self._last_screen_vision_at = time.time()
             else:
                 result = f"Unknown tool: {name}"
 
@@ -3221,6 +3422,51 @@ class KaizumiLive:
                     else str(e)[:120]
                 ),
             })
+
+        # ── Post-action vision: always see what was done ───────────────────
+        post_action_tools = {"computer_control", "computer_settings", "vision_click"}
+        if name in post_action_tools and not str(result).startswith("Tool '"):
+            try:
+                from agent.resilience import run_sync_tool as _rst_obs
+                observation = await _rst_obs(
+                    lambda: screen_process(
+                        parameters={
+                            "angle": "local_vision",
+                            "text": (
+                                "Describe the current state of the screen after "
+                                "the last action: what changed, what is visible "
+                                "now, and whether the action appears to have "
+                                "succeeded."
+                            ),
+                        },
+                        player=self.ui,
+                    ),
+                    "post_action_vision",
+                    timeout=600,
+                )
+                obs_content = (observation.content or "").strip()
+                obs_ok = (
+                    observation.ok
+                    and obs_content
+                    and not obs_content.startswith("Local screen vision failed")
+                )
+                if obs_ok:
+                    self._last_screen_vision_at = time.time()
+                    result = (
+                        f"{result}\n\nPOST-ACTION SCREEN OBSERVATION:\n{obs_content}"
+                    )
+                else:
+                    result = (
+                        f"{result}\n\nPOST-ACTION SCREEN OBSERVATION FAILED: the "
+                        "screen could not be verified (check Ollama/qwen3-vl:2b). "
+                        "Do not claim success without verification."
+                    )
+            except Exception:
+                result = (
+                    f"{result}\n\nPOST-ACTION SCREEN OBSERVATION FAILED: the "
+                    "screen could not be verified. Do not claim success without "
+                    "verification."
+                )
 
         self.broadcast_remote({
             "type": "tool",
@@ -4219,16 +4465,45 @@ def _acquire_single_instance_mutex() -> bool:
         return True
     try:
         import ctypes
-        mutex = ctypes.windll.kernel32.CreateMutexW(
+        # use_last_error=True + set_last_error(0): without it, GetLastError()
+        # can return a stale value (183 = ERROR_ALREADY_EXISTS) left over by
+        # an earlier Win32 call, and the app would refuse to start even when
+        # no other instance exists.
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool,
+                                          ctypes.c_wchar_p]
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+        ctypes.set_last_error(0)
+        mutex = kernel32.CreateMutexW(
             None, True, "Local\\NIANG_IA_SINGLE_INSTANCE_MUTEX"
         )
-        last_error = ctypes.windll.kernel32.GetLastError()
-        if not mutex or last_error == 183:
+        last_error = ctypes.get_last_error()
+        if not mutex or last_error == 183:      # 183 = ERROR_ALREADY_EXISTS
+            if mutex:
+                try:
+                    kernel32.CloseHandle(mutex)
+                except Exception:
+                    pass
             return False
         _NIANG_INSTANCE_MUTEX = mutex
         return True
     except Exception:
         return True
+
+
+def kaizumi_visibility_pref() -> bool:
+    """Persisted 'start hidden in tray' preference (app_settings.json)."""
+    try:
+        from voice_activation import load_settings
+        return bool(load_settings().get("start_hidden", False))
+    except Exception:
+        return False
+
+
+BACKGROUND_START = False
+
+
+WAKE_ON_START = False
 
 
 def main():
@@ -4241,15 +4516,50 @@ def main():
     ui = KaizumiUI("face.png")
 
     enable_bluetooth = "--remote" in sys.argv[1:]
+    global BACKGROUND_START
+    BACKGROUND_START = any(
+        flag in sys.argv[1:] for flag in ("--background", "--hidden", "--minimized")
+    )
+    global WAKE_ON_START
+    WAKE_ON_START = "--wake" in sys.argv[1:]
 
     def runner():
         ui.wait_for_api_key()
         kaizumi = KaizumiLive(ui, enable_bluetooth=enable_bluetooth)
         kaizumi.attach_tray()
+        # Background voice activation ('Hey Niang') — starts here so the
+        # listener is up even before the Gemini session connects.
+        try:
+            kaizumi.voice.auto_start()
+        except Exception as exc:
+            print(f"[VoiceActivation] auto_start: {exc}")
+        # Apply the saved background opacity (semi-transparent hologram)
+        try:
+            from voice_activation import load_settings
+            ui.set_background_alpha(load_settings().get("background_alpha", 1.0))
+        except Exception as exc:
+            print(f"[VoiceActivation] background alpha: {exc}")
+        if WAKE_ON_START:
+            # The voice launcher woke us up: show the interface at once and
+            # play the blue screen-edge effect.
+            try:
+                if getattr(self, "screen_effect", None) is not None:
+                    self.screen_effect.show_activation_effect()
+            except Exception as exc:
+                print(f"[ScreenEdge] warn: {exc}")
+            kaizumi.visibility.show(
+                animate=True,
+                reason="Activation vocale détectée — NIANG IA se lance.")
+        elif BACKGROUND_START or kaizumi_visibility_pref():
+            kaizumi.visibility.hide(
+                animate=False,
+                reason="Démarrage en arrière-plan — icône dans la zone de notification, "
+                       "dites « Hey Niang » pour afficher l'interface.",
+            )
         try:
             asyncio.run(kaizumi.run())
         except KeyboardInterrupt:
-            print("\nðŸ”´ Shutting down...")
+            print("\n[NIANG IA] Shutting down...")
 
     threading.Thread(target=runner, daemon=True).start()
     ui.root.report_callback_exception = _tk_exception_handler

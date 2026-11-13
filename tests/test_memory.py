@@ -9,6 +9,8 @@ import json
 import sys
 import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -71,6 +73,13 @@ class MemoryTest(unittest.TestCase):
         for i in range(50):
             mm.remember(f"key_{i}", f"value_{i}", "notes")
         mem = mm.load_memory()
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
+            archive_path = Path(tmp.name)
+        try:
+            with patch.object(mm, "ARCHIVE_PATH", archive_path):
+                mm.prune_memory(mem, cap=40)
+        finally:
+            archive_path.unlink(missing_ok=True)
         self.assertLessEqual(len(mem["notes"]), 40)
 
     def test_truncate_long_values(self):

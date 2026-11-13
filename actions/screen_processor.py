@@ -99,7 +99,7 @@ def _capture_screen_frame():
 
 def _encode_local_vision_frame(frame) -> bytes:
     height, width = frame.shape[:2]
-    scale = min(1.0, 1280 / width, 1280 / height)
+    scale = min(1.0, 768 / width, 768 / height)
     if scale < 1:
         frame = cv2.resize(
             frame,
@@ -107,7 +107,7 @@ def _encode_local_vision_frame(frame) -> bytes:
             interpolation=cv2.INTER_AREA,
         )
     encoded, buffer = cv2.imencode(
-        ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 82]
+        ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70]
     )
     if not encoded:
         raise RuntimeError("Could not encode the captured screen for local vision.")

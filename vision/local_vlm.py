@@ -45,7 +45,7 @@ def describe_image(
                     "images": [base64.b64encode(image).decode("ascii")],
                 }],
                 "stream": False,
-                "options": {"temperature": 0.2},
+                "options": {"temperature": 0.2, "num_predict": 256, "num_ctx": 2048},
             },
             timeout=(CONNECT_TIMEOUT_SECONDS, READ_TIMEOUT_SECONDS),
         )

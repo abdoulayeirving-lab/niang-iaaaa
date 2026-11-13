@@ -30,6 +30,7 @@ SOURCE_DIRS = (
     "desktop",
     "memory",
     "models",
+    "niang_ia",
     "remote",
     "runtime",
     "tests",
@@ -52,7 +53,14 @@ ROOT_FILES = (
     "safety.py",
     "telegram_bot.py",
     "ui.py",
+    "i18n.py",
+    "assistant_visibility.py",
+    "voice_activation.py",
+    "tray_manager.py",
+    "screen_edge_effect.py",
+    "voice_launcher.py",
     "app_update.py",
+    "write_cline.py",
     "VERSION.txt",
 )
 EXCLUDED_DIRS = {
@@ -70,6 +78,7 @@ EXCLUDED_DIRS = {
     "venv",
 }
 EXCLUDED_SUFFIXES = {".bak", ".log", ".pyc"}
+BACKUP_MARKERS = (".backup", ".audit_backup_", ".avant_")
 SECRET_FILENAMES = {
     "api_keys.json",
     "bridge_token.txt",
@@ -83,7 +92,11 @@ def should_include(path: Path, source_root: Path) -> bool:
     relative = path.relative_to(source_root)
     if any(part in EXCLUDED_DIRS for part in relative.parts):
         return False
-    if path.name in SECRET_FILENAMES or path.suffix.lower() in EXCLUDED_SUFFIXES:
+    if (
+        path.name in SECRET_FILENAMES
+        or path.suffix.lower() in EXCLUDED_SUFFIXES
+        or any(marker in path.name.lower() for marker in BACKUP_MARKERS)
+    ):
         return False
     if path.name.startswith(".env"):
         return False
@@ -91,6 +104,8 @@ def should_include(path: Path, source_root: Path) -> bool:
         return path.name.endswith(".example.json") or path.name == "__init__.py"
     if source_root.name == "memory":
         return path.suffix.lower() in {".py", ".md"}
+    if source_root.name == "models" and "vosk" in relative.parts:
+        return False   # wake-word model downloads itself at first run
     return path.is_file()
 
 
