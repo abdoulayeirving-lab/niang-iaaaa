@@ -65,7 +65,11 @@ echo.
 where pythonw >nul 2>&1 && (
     %APPDATA%\\..\\Local\\Programs\\Python\\Python312\\pythonw.exe main.py
 ) || (
+    where pythonw >nul 2>&1 && (
+    %APPDATA%\..\Local\Programs\Python\Python312\\pythonw.exe main.py
+) || (
     "%PYTHON_EXE%" main.py
+)
 )
 set "EXIT_CODE=%ERRORLEVEL%"
 if not "%EXIT_CODE%"=="0" (
