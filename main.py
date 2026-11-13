@@ -1,3 +1,33 @@
+import os
+
+# Create logs directory if it doesn't exist
+os.makedirs("logs", exist_ok=True)
+
+# Rediriger stdout et stderr vers des fichiers AVANT toute autre sortie
+import atexit
+
+class LogFile:
+    def __init__(self, filename):
+        self.file = open(filename, 'a', encoding='utf-8')
+    def write(self, message):
+        self.file.write(message)
+    def flush(self):
+        self.file.flush()
+
+# Rediriger stdout et stderr
+sys.stdout = LogFile("logs/niang_ia_stdout.log")
+sys.stderr = LogFile("logs/niang_ia_stderr.log")
+
+# S'assurer que les fichiers de log sont fermés à la fin
+atexit.register(lambda: (stdout_logger.file.close(), stderr_logger.file.close()))
+
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+from logger import setup_logger, log, log_tool, is_private_tool_data
 ﻿import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import threading
@@ -72,6 +102,7 @@ from actions.gmail             import gmail_action
 from actions.pdf_reader        import read_pdf as read_pdf_action, pdf_qa
 from actions.autostart         import autostart_action
 from actions.vision_click      import vision_click_action
+from actions.vision_observe    import vision_observe
 from actions.document_qa import (
     read_document as read_document_action,
     document_qa as document_qa_action,
@@ -1664,6 +1695,37 @@ TOOL_DECLARATIONS = [
         }
     },
     {
+        "name": "vision_observe",
+        "description": (
+            "Continuous local screen vision. NIANG IA keeps watching the Windows "
+            "desktop in the background and reports what it sees: the active "
+            "application, the focused window, the buttons, menus, fields and "
+            "icons on screen, the visible text, and any error or warning that "
+            "just appeared. Actions: status | observe | start | stop | privacy | "
+            "history | decide | verify. "
+            "Use 'observe' before acting on the desktop to know exactly what is "
+            "on screen, and 'verify' after acting to confirm the result. "
+            "Everything is analysed on this computer; no screenshot is sent "
+            "anywhere and nothing is written to disk."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "status | observe | start | stop | privacy | history | decide | verify (default: status)"},
+                "deep": {"type": "BOOLEAN", "description": "For 'observe'/'verify': also read the text displayed on the screen with local OCR. Requires the user's explicit approval."},
+                "enabled": {"type": "BOOLEAN", "description": "For 'privacy': true enables privacy mode (no capture at all), false disables it"},
+                "limit": {"type": "INTEGER", "description": "For 'history': number of events to show (default 20)"},
+                "tool": {"type": "STRING", "description": "For 'decide': the tool about to be called"},
+                "parameters": {"type": "OBJECT", "description": "For 'decide': the parameters of the action about to be run"},
+                "mission_goal": {"type": "STRING", "description": "For 'decide': the current mission goal"},
+                "mission_id": {"type": "STRING", "description": "For 'decide': the current mission identifier"},
+                "expected": {"type": "STRING", "description": "For 'verify': the text expected on the screen after the action"},
+                "expected_app": {"type": "STRING", "description": "For 'verify': the application expected in the foreground"},
+            },
+            "required": []
+        }
+    },
+    {
         "name": "monitor_alerts",
         "description": (
             "Sets PC monitoring alerts: warn when CPU, RAM, disk or battery "
@@ -1977,6 +2039,7 @@ for _decl in TOOL_DECLARATIONS:
         "screen_process",
         "windows_diagnostics",
         "windows_repair",
+        "vision_observe",
     }:
         _decl.setdefault("parameters", {}).setdefault("properties", {})[
             "confirm"
@@ -2046,6 +2109,12 @@ class KaizumiLive:
             model=LIVE_MODEL,
         )
         self.ui.on_whatsapp_call_control = self._whatsapp_call_control
+        # ── Permanent screen vision ─────────────────────────────────────────
+        self._vision_engine = None
+        self._vision_poller = None
+        self._vision_poller_stop = threading.Event()
+        self.ui.on_vision_control = self._on_vision_control
+        self._start_vision_engine()
 
         self.telegram_token = None
         self.telegram_chat  = None
@@ -2521,6 +2590,139 @@ class KaizumiLive:
         if tr.error_kind == "fatal":
             self.speak(f"Sir, {tool_name} encountered an error. {short}")
 
+    # ── Permanent screen vision ─────────────────────────────────────────────
+    async def _observe_screen_for_gate(self):
+        """Observe the screen for the vision gate.
+
+        The background vision engine is preferred: it is always available
+        while it runs, it costs nothing extra and it returns the structured
+        state of the desktop.  The local multimodal description is used as a
+        fallback when the engine is not running.
+        """
+        engine = self._vision_engine
+        if engine is not None:
+            try:
+                observation = engine.observe_now(deep=False)
+                if observation is not None and observation.foreground:
+                    buttons = observation.element_names("button")[:10]
+                    fields = observation.element_names("field")[:10]
+                    lines = [
+                        "LOCAL SCREEN OBSERVATION (structure only, no OCR, "
+                        "nothing left this computer).",
+                        f"Active application: {observation.app_name or 'unknown'}",
+                        f"Active window: {observation.window_title or 'unknown'}",
+                        f"Interactive elements: {len(observation.elements)}",
+                    ]
+                    if buttons:
+                        lines.append("Buttons: " + ", ".join(buttons))
+                    if fields:
+                        lines.append("Fields: " + ", ".join(fields))
+                    if observation.problems:
+                        lines.append(
+                            "Problems on screen: "
+                            + ", ".join(
+                                str(item.get("message", ""))[:80]
+                                for item in observation.problems[:3]
+                            )
+                        )
+                    return ToolResult(ok=True, content="\n".join(lines))
+            except Exception as exc:
+                print(f"[VisionGate] engine observation failed: {exc}")
+        return await run_sync_tool(
+            lambda: screen_process(
+                parameters={
+                    "angle": "local_vision",
+                    "text": (
+                        "Describe the current screen: open windows, visible "
+                        "controls, buttons, fields and any state relevant to "
+                        "the user's pending desktop request."
+                    ),
+                },
+                player=self.ui,
+            ),
+            "auto_screen_vision",
+            timeout=600,
+        )
+
+    def _start_vision_engine(self):
+        """Start the background screen-vision engine and its UI poller.
+
+        The engine only captures a small signature at rest (a few percent of
+        one CPU core) and never writes a screenshot to disk.  It keeps running
+        when NIANG IA is minimised in the tray.
+        """
+        try:
+            from actions.vision_observe import get_engine
+
+            self._vision_engine = get_engine()
+            self._vision_engine.start()
+        except Exception as exc:
+            print(f"[VisionEngine] start failed: {exc}")
+            self._vision_engine = None
+            return
+        self._vision_poller_stop.clear()
+        self._vision_poller = threading.Thread(
+            target=self._vision_status_poller,
+            name="NIANG-VisionStatus",
+            daemon=True,
+        )
+        self._vision_poller.start()
+
+    def _vision_status_poller(self):
+        """Push the engine state to the command deck (works in the tray)."""
+        while not self._vision_poller_stop.is_set():
+            try:
+                engine = self._vision_engine
+                if engine is not None:
+                    status = engine.status()
+                    self.ui.set_vision_engine_status(status)
+                    events = engine.bus.history(3)
+                    self.ui.set_vision_engine_log(
+                        [f"{event['type']}" for event in events]
+                    )
+            except Exception:
+                pass
+            self._vision_poller_stop.wait(2.0)
+
+    def _stop_vision_engine(self):
+        self._vision_poller_stop.set()
+        engine = self._vision_engine
+        if engine is not None:
+            try:
+                engine.stop()
+            except Exception:
+                pass
+
+    def _on_vision_control(self, command: str):
+        """Handle the VISION PERMANENTE buttons of the command deck."""
+        engine = self._vision_engine
+        if engine is None:
+            self.ui.write_log("ERR: Le moteur de vision n'est pas disponible.")
+            return
+        try:
+            if command == "__vision_toggle__":
+                if engine.is_running:
+                    engine.stop()
+                    self.ui.write_log("SYS: Vision permanente désactivée.")
+                else:
+                    engine.start()
+                    self.ui.write_log("SYS: Vision permanente activée.")
+            elif command == "__vision_privacy__":
+                enabled = not engine.privacy.enabled
+                engine.set_privacy_mode(enabled)
+                self.ui.write_log(
+                    "SYS: Mode confidentialité "
+                    + ("ACTIVÉ — aucune capture de l'écran." if enabled
+                       else "désactivé.")
+                )
+            elif command == "__vision_emergency__":
+                engine.emergency_stop()
+                self.ui.write_log(
+                    "SYS: ARRÊT D'URGENCE — la capture d'écran est coupée."
+                )
+        except Exception as exc:
+            self.ui.write_log(f"ERR: Commande de vision impossible : {exc}")
+
     def _build_tool_handlers(self):
         """name -> (handler(args)->str, timeout_seconds)."""
         ui    = self.ui
@@ -2886,6 +3088,7 @@ class KaizumiLive:
             "pdf_qa":            (lambda a: pdf_qa(parameters=a, response=None, player=ui), 90),
             "autostart":         (lambda a: autostart_action(parameters=a, response=None, player=ui), 20),
             "vision_click":      (lambda a: vision_click_action(parameters=a, response=None, player=ui), 90),
+            "vision_observe":    (lambda a: vision_observe(parameters=a, response=None, player=ui), 90),
             "monitor_alerts":    (lambda a: monitor_action(parameters=a, response=None, player=ui), 15),
             "pc_health":         (lambda a: guardian_action(parameters=a, response=None, player=ui), 15),
             "email_watch":       (lambda a: email_watch_action(parameters=a, response=None, player=ui), 15),
@@ -3015,21 +3218,7 @@ class KaizumiLive:
         vision_fresh = (time.time() - self._last_screen_vision_at) < 45.0
         if name in screen_action_tools and not vision_fresh:
             print(f"[NIANG IA] {name} blocked: no fresh screen observation")
-            observation = await run_sync_tool(
-                lambda: screen_process(
-                    parameters={
-                        "angle": "local_vision",
-                        "text": (
-                            "Describe the current screen: open windows, visible "
-                            "controls, buttons, fields and any state relevant to "
-                            "the user's pending desktop request."
-                        ),
-                    },
-                    player=self.ui,
-                ),
-                "auto_screen_vision",
-                timeout=600,
-            )
+            observation = await self._observe_screen_for_gate()
             observed = (observation.content or "").strip()
             vision_ok = (
                 observation.ok
@@ -3326,23 +3515,8 @@ class KaizumiLive:
         screen_action_tools = {"computer_control", "computer_settings", "vision_click"}
         vision_fresh = (time.time() - self._last_screen_vision_at) < 45.0
         if name in screen_action_tools and not vision_fresh:
-            from agent.resilience import run_sync_tool as _rst
             print(f"[NIANG IA] {name} blocked: no fresh screen observation")
-            observation = await _rst(
-                lambda: screen_process(
-                    parameters={
-                        "angle": "local_vision",
-                        "text": (
-                            "Describe the current screen: open windows, visible "
-                            "controls, buttons, fields and any state relevant to "
-                            "the user's pending desktop request."
-                        ),
-                    },
-                    player=self.ui,
-                ),
-                "auto_screen_vision",
-                timeout=600,
-            )
+            observation = await self._observe_screen_for_gate()
             observed = (observation.content or "").strip()
             vision_ok = (
                 observation.ok
