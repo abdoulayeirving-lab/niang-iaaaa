@@ -8,11 +8,13 @@ if exist ".venv\Scripts\pythonw.exe" (
   exit /b 0
 )
 
-where pythonw.exe >nul 2>&1
-if not errorlevel 1 (
-  start "" pythonw.exe -u "%~dp0main.py" --remote
-  exit /b 0
-)
+if not exist "%~dp0START_NIANG_IA.bat" goto missing_environment
+call "%~dp0START_NIANG_IA.bat" --remote
+if errorlevel 1 exit /b 1
+exit /b 0
 
-echo [ERREUR] pythonw.exe introuvable. Installe Python ou relance START_NIANG_IA.bat pour reparer l'environnement.
+:missing_environment
+echo [ERREUR] L'environnement NIANG IA est absent ou incomplet.
+echo Lancez START_NIANG_IA.bat depuis le dossier d'installation pour reparer l'application.
+pause
 exit /b 1

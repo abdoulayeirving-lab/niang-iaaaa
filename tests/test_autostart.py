@@ -25,14 +25,22 @@ class AutostartLauncherTests(unittest.TestCase):
 
         self.assertEqual(command, f'wscript.exe "{base / "START_NIANG_IA.vbs"}" --voice')
 
-    def test_remote_cmd_uses_windowless_python(self):
+    def test_remote_cmd_uses_local_python_or_visible_repair(self):
         source = (ROOT / "start_remote.cmd").read_text(encoding="utf-8")
 
         self.assertIn(".venv\\Scripts\\pythonw.exe", source)
         self.assertIn('start ""', source)
         self.assertIn("--remote", source)
-        self.assertNotIn('python.exe" -u', source)
-        self.assertNotIn("python -u", source)
+        self.assertIn('call "%~dp0START_NIANG_IA.bat" --remote', source)
+        self.assertNotIn("where pythonw.exe", source)
+        self.assertNotIn('start "" pythonw.exe', source)
+
+    def test_repair_launcher_preserves_remote_flag_without_global_python_fallback(self):
+        source = (ROOT / "START_NIANG_IA.bat").read_text(encoding="utf-8")
+
+        self.assertIn('"%~dp0.venv\\Scripts\\pythonw.exe" -u "%~dp0main.py" %*', source)
+        self.assertIn('"%PYTHON_EXE%" -u "%~dp0main.py" %*', source)
+        self.assertNotIn("where pythonw.exe", source)
 
 
 if __name__ == "__main__":

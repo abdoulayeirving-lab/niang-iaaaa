@@ -63,7 +63,7 @@ class InstallerPersonalizationTests(unittest.TestCase):
 
         run_section = installer.split("[Run]", 1)[1].split("[Code]", 1)[0]
         self.assertIn(r'\install_screen_vision.ps1', run_section)
-        self.assertLess(run_section.index("install_screen_vision.ps1"), run_section.index("START_NIANG_IA.bat"))
+        self.assertLess(run_section.index("install_screen_vision.ps1"), run_section.index("START_NIANG_IA.vbs"))
         self.assertIn("install_screen_vision.ps1", build)
         self.assertIn("qwen3-vl:2b", setup_script)
         self.assertIn('[version]"0.12.7"', setup_script)
@@ -90,6 +90,16 @@ class InstallerPersonalizationTests(unittest.TestCase):
 
         self.assertIn("write_cline.py", release_files)
         self.assertIn("niang_ia/integrations/cline/cline_manager.py", release_files)
+
+    def test_release_includes_continuous_vision_runtime(self):
+        release_files = {
+            path.relative_to(ROOT).as_posix()
+            for path in collect_files()
+        }
+
+        self.assertIn("actions/vision_observe.py", release_files)
+        self.assertIn("vision_engine/__init__.py", release_files)
+        self.assertIn("vision_engine/engine.py", release_files)
 
     def test_windows_icon_fills_canvas_and_has_transparent_rounded_corners(self):
         with Image.open(ROOT / "assets" / "niang_ia.ico") as source:

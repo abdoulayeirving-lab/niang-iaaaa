@@ -35,6 +35,7 @@ SOURCE_DIRS = (
     "runtime",
     "tests",
     "vision",
+    "vision_engine",
 )
 ROOT_FILES = (
     ".env.example",
