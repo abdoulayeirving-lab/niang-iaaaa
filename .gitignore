@@ -13,9 +13,18 @@ venv/
 # Local backups and packaged copies
 *.bak*
 *.backup*
+*.audit_backup_*
 *.avant*
 *.zip
 NIANG_IA_A_TESTER/
+NIANG_VISION_24_7_REPORT.md
+actions/vision_observe.py
+replace_version.py
+memory/backups/
+models/vosk/
+vision_engine/
+tests/test_vision_engine_*.py
+tests/vision_fakes.py
 
 # Logs
 *.log
