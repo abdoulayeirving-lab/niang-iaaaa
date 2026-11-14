@@ -18,6 +18,13 @@ class OCRConfig:
     languages: str = "eng"
     min_confidence: float = 35.0
     scale: float = 1.5
+    # Tesseract page-segmentation mode. 3 = full automatic layout analysis
+    # (accurate but slow). 6 = a single uniform block, 11 = sparse text.
+    # Sparse text is much faster on a busy desktop screen.
+    psm: int = 3
+    # Downscale the frame so its width never exceeds this many pixels.
+    # 0 disables the clamp.
+    max_width: int = 0
 
 
 def _tesseract_candidates() -> tuple[Path, ...]:
@@ -68,18 +75,21 @@ class OCREngine:
     def load(self) -> bool:
         if self._loaded:
             return self.is_ready
-        self._loaded = True
         try:
             import pytesseract
             _configure_tesseract_path(pytesseract)
             self._pytesseract = pytesseract
             # This also checks that the native Tesseract executable is present.
             pytesseract.get_tesseract_version()
-            return True
         except Exception as exc:
+            # Stay unloaded so a later call can retry: the native binary may
+            # simply not be installed yet.
             self._pytesseract = None
             self._error = f"OCR unavailable: {exc}"
             return False
+        self._loaded = True
+        self._error = None
+        return True
 
     def extract(self, frame: Any) -> list[VisionEvent]:
         if frame is None or not self.load():
@@ -90,12 +100,22 @@ class OCREngine:
             if self.config.scale != 1.0:
                 image = cv2.resize(image, None, fx=self.config.scale, fy=self.config.scale,
                                    interpolation=cv2.INTER_CUBIC)
+            max_width = int(self.config.max_width or 0)
+            if max_width > 0 and image.shape[1] > max_width:
+                ratio = max_width / float(image.shape[1])
+                image = cv2.resize(
+                    image,
+                    (max_width, max(1, int(image.shape[0] * ratio))),
+                    interpolation=cv2.INTER_AREA,
+                )
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             gray = cv2.GaussianBlur(gray, (3, 3), 0)
             processed = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+            tesseract_config = f"--psm {int(self.config.psm)}" if self.config.psm else ""
             data = self._pytesseract.image_to_data(
                 processed, lang=self.config.languages,
                 output_type=self._pytesseract.Output.DICT,
+                config=tesseract_config,
             )
             events: list[VisionEvent] = []
             for i, raw_text in enumerate(data.get("text", [])):
@@ -113,6 +133,8 @@ class OCREngine:
                     confidence=confidence / 100.0, bbox=(x, y, w, h),
                     metadata={"language": self.config.languages},
                 ))
+            # A successful run clears any previous transient failure.
+            self._error = None
             return events
         except Exception as exc:
             self._error = f"OCR inference failed: {exc}"

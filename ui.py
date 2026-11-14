@@ -370,6 +370,7 @@ class KaizumiUI:
         self._analysis_report = ""
         self._update_check_in_progress = False
         self.on_whatsapp_call_control = None
+        self.on_vision_control = None
         self.vision_mode = "STANDBY"
         self.vision_signal = "En attente de la caméra"
         self.live_camera_active = False
@@ -576,6 +577,53 @@ class KaizumiUI:
         ]:
             self._call_deck_button(self._left_deck, label, action)
 
+        self._deck_label(self._right_deck, "VISION PERMANENTE")
+        self._vision_engine_status = tk.Label(
+            self._right_deck,
+            text="● VISION INACTIVE",
+            anchor="w",
+            bg=self.col["panel"],
+            fg=self.col["dim"],
+            font=("Consolas", 9, "bold"),
+        )
+        self._vision_engine_status.pack(fill="x", padx=12, pady=(0, 2))
+        self._vision_engine_app = tk.Label(
+            self._right_deck,
+            text="Application : —",
+            anchor="w",
+            justify="left",
+            wraplength=170,
+            bg=self.col["panel"],
+            fg=self.col["text"],
+            font=("Consolas", 8),
+        )
+        self._vision_engine_app.pack(fill="x", padx=12, pady=(0, 2))
+        self._vision_engine_last = tk.Label(
+            self._right_deck,
+            text="Dernière observation : —",
+            anchor="w",
+            justify="left",
+            wraplength=170,
+            bg=self.col["panel"],
+            fg=self.col["dim"],
+            font=("Consolas", 8),
+        )
+        self._vision_engine_last.pack(fill="x", padx=12, pady=(0, 2))
+        self._vision_engine_log = tk.Label(
+            self._right_deck,
+            text="Journal : —",
+            anchor="w",
+            justify="left",
+            wraplength=170,
+            bg=self.col["panel"],
+            fg=self.col["dim"],
+            font=("Consolas", 8),
+        )
+        self._vision_engine_log.pack(fill="x", padx=12, pady=(0, 6))
+        self._deck_button(self._right_deck, "ACTIVER / DÉSACTIVER LA VISION", "__vision_toggle__")
+        self._deck_button(self._right_deck, "MODE CONFIDENTIEL", "__vision_privacy__")
+        self._deck_button(self._right_deck, "ARRÊT D’URGENCE DE LA VISION", "__vision_emergency__")
+
         self._deck_label(self._right_deck, "CONTRÔLE DE LA CAMÉRA")
         self._deck_button(self._right_deck, "APERÇU DE LA CAMÉRA", "__open_preview__")
         for label, mode in [("CONTRÔLE PAR GESTES", "gesture"), ("DÉTECTION D’OBJETS", "objects"),
@@ -669,6 +717,18 @@ class KaizumiUI:
             return
         if command == "__open_arcade__":
             self.open_vision_arcade()
+            return
+        if command in ("__vision_toggle__", "__vision_privacy__", "__vision_emergency__"):
+            labels = {
+                "__vision_toggle__": "Activation/désactivation de la vision permanente.",
+                "__vision_privacy__": "Bascule du mode confidentialité de la vision.",
+                "__vision_emergency__": "ARRÊT D’URGENCE de la vision permanente.",
+            }
+            self.write_log("SYS: " + labels[command])
+            if self.on_vision_control:
+                threading.Thread(
+                    target=self.on_vision_control, args=(command,), daemon=True
+                ).start()
             return
         if command in ("__record_start__", "__record_stop__"):
             self.write_log(
@@ -1549,6 +1609,72 @@ class KaizumiUI:
         """Show whether webcam frames are currently being sent to Gemini."""
         self.live_camera_active = bool(active)
         self._safe_ui(self._refresh_deck_status)
+
+    # ── Permanent screen vision (vision_engine) ───────────────────────────
+    def set_vision_engine_status(self, status: dict):
+        """Update the 'VISION PERMANENTE' block of the command deck.
+
+        Called from a background thread; the mutation is marshalled onto the
+        Tk main thread so the UI stays responsive while NIANG IA is in the
+        tray.
+        """
+        self._safe_ui(self._apply_vision_engine_status, dict(status or {}))
+
+    def _apply_vision_engine_status(self, status: dict):
+        state = str(status.get("state", "stopped"))
+        privacy = bool(status.get("privacy_mode"))
+        emergency = bool(status.get("emergency_stopped"))
+        running = bool(status.get("running"))
+
+        if emergency:
+            badge, colour = "● VISION ARRÊTÉE (URGENCE)", self.col["red"]
+        elif privacy:
+            badge, colour = "● MODE CONFIDENTIEL", self.col["acc"]
+        elif running:
+            badge, colour = "● VISION ACTIVE", self.col["green"]
+        else:
+            badge, colour = "● VISION INACTIVE", self.col["dim"]
+        self._vision_engine_status.configure(text=badge, fg=colour)
+
+        app = status.get("app_name") or "—"
+        title = status.get("window_title") or ""
+        detail = f"{app}"
+        if title:
+            detail += f" — {title}"
+        self._vision_engine_app.configure(
+            text="Application : " + detail[:120],
+            fg=self.col["text"] if app != "—" else self.col["dim"],
+        )
+
+        last = status.get("last_observation_at")
+        if last:
+            try:
+                stamp = time.strftime("%H:%M:%S", time.localtime(float(last)))
+            except (TypeError, ValueError):
+                stamp = "—"
+            elements = status.get("element_count", 0)
+            problems = status.get("problem_count", 0)
+            self._vision_engine_last.configure(
+                text=(
+                    f"Dernière observation : {stamp} — "
+                    f"{elements} élément(s), {problems} problème(s)"
+                ),
+                fg=self.col["dim"],
+            )
+        else:
+            self._vision_engine_last.configure(
+                text="Dernière observation : —", fg=self.col["dim"]
+            )
+
+    def set_vision_engine_log(self, lines):
+        """Show the last vision events in the command deck."""
+        if isinstance(lines, str):
+            lines = [lines]
+        text = "Journal : " + (" / ".join(str(line) for line in list(lines)[:3]) or "—")
+        self._safe_ui(self._apply_vision_engine_log, text[:220])
+
+    def _apply_vision_engine_log(self, text: str):
+        self._vision_engine_log.configure(text=text, fg=self.col["dim"])
 
     def set_whatsapp_call_status(self, state: str, detail: str):
         """Display NIANG IA's audio state without implying WhatsApp call state."""
@@ -2972,6 +3098,18 @@ class KaizumiUI:
 
         if not self._intro_done and T >= INTRO_END:
             self._finish_intro()
+        # Hidden in the tray: nothing to draw, the loop only keeps the
+        # deferred UI queue alive (the hologram is redrawn on wake-up).
+        # The real window state is used, not the business state: the Gemini
+        # session keeps switching between LISTENING / SPEAKING in the
+        # background.
+        try:
+            hidden = self.root.state() == "withdrawn"
+        except Exception:
+            hidden = False
+        if hidden:
+            self.root.after(200, self._animate)
+            return
         self._draw()
         self.root.after(16, self._animate)
 

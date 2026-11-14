@@ -27,8 +27,9 @@ class MultimodalVision:
             return False
 
     def ask(self, frame: Any, question: str = "Describe this image in detail.") -> str:
+        """Return the model answer, or an explicit error string (never confuse them)."""
         if frame is None or not self._load():
-            return self.error or "Multimodal provider unavailable."
+            return f"Multimodal provider unavailable: {self.error or 'unknown error'}"
         try:
             import cv2
             from google.genai import types
@@ -39,7 +40,13 @@ class MultimodalVision:
                 model=self.model,
                 contents=[types.Part.from_bytes(data=encoded.tobytes(), mime_type="image/jpeg"), question],
             )
-            return (response.text or "No visual answer returned.").strip()
+            answer = (response.text or "").strip()
+            self.error = None
+            if not answer:
+                return "The multimodal model returned an empty answer."
+            return answer
         except Exception as exc:
             self.error = f"Multimodal inference failed: {exc}"
-            return self.error
+            # Distinguish an error from a model answer: the error is returned as
+            # an error string, never as if it were the model's response.
+            return f"Multimodal inference failed: {exc}"

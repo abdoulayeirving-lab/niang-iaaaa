@@ -986,10 +986,16 @@ class AgentExecutor:
                                 try:
                                     action_limit = max_actions_per_mission()
                                     if action_count >= action_limit:
-                                        return (
+                                        msg = (
                                             "Task stopped because it reached the "
                                             f"{action_limit}-action mission limit."
                                         )
+                                        if speak:
+                                            speak(msg)
+                                        # Return a proper result object: reporting a
+                                        # bare string here made the mission look
+                                        # "completed" even after the action limit.
+                                        return MissionExecutionResult(msg, status="partial")
                                     fixed_step = generate_fix(step, error_msg, fix_suggestion)
                                     if speak: speak("Trying an alternative approach, sir.")
                                     action_count += 1

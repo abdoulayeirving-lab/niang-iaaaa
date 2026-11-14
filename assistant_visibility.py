@@ -45,6 +45,9 @@ class AssistantVisibility:
         try:
             if getattr(self.ui, "_mic_listening", False):
                 self.ui.set_state("LISTENING")
+            else:
+                # never stay in SLEEPING: the interface is visible again
+                self.ui.set_state("ONLINE")
         except Exception:
             pass
         try:

@@ -72,9 +72,11 @@ class CameraManager:
     def stop(self, timeout: float = 2.0) -> None:
         self._stop.set()
         thread = self._thread
-        if thread and thread.is_alive():
+        if thread is not None and thread is not threading.current_thread() and thread.is_alive():
             thread.join(timeout=timeout)
-        self._thread = None
+        with self._lock:
+            self._thread = None
+            self._latest = None
         self._release_capture()
 
     def latest(self) -> FramePacket | None:
@@ -88,19 +90,19 @@ class CameraManager:
             backend = self.config.backend
             if backend is None and hasattr(cv2, "CAP_DSHOW"):
                 backend = cv2.CAP_DSHOW
-            self._capture = (cv2.VideoCapture(self.config.index, backend)
-                             if backend is not None else cv2.VideoCapture(self.config.index))
-            self._capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.width)
-            self._capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.height)
-            self._capture.set(cv2.CAP_PROP_FPS, self.config.fps)
-            if not self._capture.isOpened():
+            capture = (cv2.VideoCapture(self.config.index, backend)
+                       if backend is not None else cv2.VideoCapture(self.config.index))
+            capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.width)
+            capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.height)
+            capture.set(cv2.CAP_PROP_FPS, self.config.fps)
+            if not capture.isOpened():
                 self._error = f"Camera {self.config.index} could not be opened"
                 self._ready.set()
                 return
 
             self._ready.set()
             while not self._stop.is_set():
-                ok, frame = self._capture.read()
+                ok, frame = capture.read()
                 if not ok:
                     time.sleep(0.02)
                     continue
@@ -118,11 +120,19 @@ class CameraManager:
             self._error = str(exc)
             self._ready.set()
         finally:
-            self._release_capture()
+            with self._lock:
+                capture = self._capture
+                self._capture = None
+            if capture is not None:
+                try:
+                    capture.release()
+                except Exception:
+                    pass
 
     def _release_capture(self) -> None:
-        capture = self._capture
-        self._capture = None
+        with self._lock:
+            capture = self._capture
+            self._capture = None
         if capture is not None:
             try:
                 capture.release()

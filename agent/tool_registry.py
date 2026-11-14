@@ -24,7 +24,7 @@ AGENT_ENABLED_TOOLS = frozenset({
     "create_document", "analyze_data", "workspace_list_files",
     "workspace_read_file", "workspace_write_file", "workspace_edit_file",
     "workspace_apply_patch", "workspace_search", "workspace_run_check",
-    "terminal_control", "project_execution",
+    "terminal_control", "project_execution", "vision_observe", "screen_process",
 })
 
 

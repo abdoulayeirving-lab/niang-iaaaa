@@ -91,6 +91,7 @@ TOOL_RISK = {
     "vision_gesture":    Risk.MEDIUM,
     "live_camera":       Risk.MEDIUM,
     "vision_click":      Risk.MEDIUM,
+    "vision_observe":    Risk.LOW,
     "screen_process":    Risk.LOW,
     "smart_home_control": Risk.MEDIUM,
     "api_add_key":       Risk.MEDIUM,
@@ -153,6 +154,17 @@ _ACTION_RISK = {
         "windows": Risk.HIGH,
         "what_is_open": Risk.HIGH,
         None: Risk.HIGH,
+    },
+    "vision_observe": {
+        "status": Risk.LOW,
+        "history": Risk.LOW,
+        "observe": Risk.LOW,
+        "start": Risk.MEDIUM,
+        "stop": Risk.LOW,
+        "privacy": Risk.MEDIUM,
+        "decide": Risk.LOW,
+        "verify": Risk.LOW,
+        None: Risk.LOW,
     },
     "live_camera": {
         "start": Risk.HIGH,
@@ -274,6 +286,13 @@ _FILE_ACCESS_TOOLS = {
 }
 
 
+def _truthy(value) -> bool:
+    """Interpret a tool argument that may arrive as a bool or a string."""
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes", "on"}
+    return bool(value)
+
+
 def _contains_sensitive_file_path(name: str, args: dict) -> bool:
     if name not in _FILE_ACCESS_TOOLS:
         return False
@@ -340,6 +359,16 @@ def _grant_screen_ocr_consent() -> None:
         _screen_ocr_consent_granted = True
 
 
+def screen_ocr_consent_granted() -> bool:
+    """True when the user allowed NIANG IA to read the text on the screen.
+
+    The continuous vision engine uses this to decide whether its automatic
+    deep analysis may run OCR.
+    """
+    with _token_lock:
+        return _screen_ocr_consent_granted
+
+
 def _fingerprint(name: str, args: dict | None) -> str:
     """Canonical fingerprint of a blocked call, so a token can't be replayed
     against a different tool or different arguments."""
@@ -399,6 +428,17 @@ def classify(name: str, args: dict | None) -> Risk:
         if str(args.get("angle", "screen")).lower().strip() == "local_vision":
             return Risk.LOW
         return Risk.HIGH
+    if name == "vision_observe":
+        action = str(args.get("action", "status")).lower().strip()
+        if action in {"observe", "verify"} and _truthy(args.get("deep")):
+            # A deep observation reads the text displayed on the screen: it
+            # needs the same explicit consent as the screen OCR tool.
+            return Risk.HIGH
+        if action == "start":
+            return Risk.MEDIUM
+        if action == "privacy":
+            return Risk.MEDIUM
+        return Risk.LOW
     if name == "computer_settings":
         action = action.replace(" ", "_").replace("-", "_")
         if not action and args.get("description"):
@@ -480,6 +520,10 @@ def needs_confirmation(name: str, args: dict | None, confirm: bool = False,
     screen_ocr = (
         name == "screen_process"
         and str(args.get("angle", "screen")).lower().strip() == "screen"
+    ) or (
+        name == "vision_observe"
+        and str(args.get("action", "")).lower().strip() in {"observe", "verify"}
+        and _truthy(args.get("deep"))
     )
     if screen_ocr:
         with _token_lock:
@@ -676,6 +720,25 @@ def describe(name: str, args: dict | None) -> str:
         target = args.get("area") or args.get("device", "smart home device")
         return f"{action} {target}"
 
+    if name == "vision_observe":
+        vision_action = str(args.get("action", "status")).lower().strip()
+        if vision_action == "observe":
+            if _truthy(args.get("deep")):
+                return (
+                    "read the text displayed on the screen with local OCR "
+                    "(nothing leaves this computer)"
+                )
+            return "observe the screen structure: windows, buttons, fields and menus"
+        if vision_action == "start":
+            return "start the continuous local screen monitoring"
+        if vision_action == "stop":
+            return "stop the continuous local screen monitoring"
+        if vision_action == "privacy":
+            return "enable or disable privacy mode (no screen capture at all)"
+        if vision_action == "verify":
+            return "re-observe the screen and compare it with the expected result"
+        return f"{vision_action} the continuous vision engine"
+
     # Fallback: tool name + first couple of args
     brief = " ".join(str(v) for v in args.values())[:60]
     return f"{name} ({brief})" if brief else name
@@ -709,7 +772,10 @@ def sanitize(name: str, args: dict | None) -> dict:
         ):
             safe[k] = "[command omitted]" if lk == "command" else "[source content redacted]"
         elif (
-            name in {"computer_control", "computer_settings", "screen_process"}
+            name in {
+                "computer_control", "computer_settings", "screen_process",
+                "vision_observe",
+            }
             and lk in {"text", "value", "description", "expected", "path", "image", "title"}
         ):
             safe[k] = "[private]"
