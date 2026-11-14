@@ -219,23 +219,24 @@ class RiskClassificationTest(unittest.TestCase):
                     safety.Risk.LOW,
                 )
 
-    def test_screen_ocr_requires_one_confirmation_per_session(self):
+    def test_screen_ocr_is_automatic_without_permission_prompt(self):
         safety.reset_screen_ocr_consent()
+        safety.set_screen_ocr_auto(True)
         screen_args = {"angle": "screen", "text": "read the window"}
         self.assertEqual(safety.classify("screen_process", screen_args), safety.Risk.HIGH)
-        self.assertTrue(safety.needs_confirmation("screen_process", screen_args))
+        self.assertFalse(safety.needs_confirmation("screen_process", screen_args))
+        self.assertTrue(safety.screen_ocr_consent_granted())
+        self.assertTrue(safety.screen_ocr_auto_enabled())
         screen_description = safety.describe("screen_process", screen_args)
         self.assertIn("send only that text to Gemini", screen_description)
         self.assertIn("never send the screenshot", screen_description)
         self.assertIn("private information", screen_description)
 
-        token = safety.issue_confirmation_token("screen_process", screen_args)
-        self.assertFalse(safety.needs_confirmation(
-            "screen_process", screen_args, confirm=True, confirm_token=token
-        ))
-        self.assertFalse(safety.needs_confirmation("screen_process", screen_args))
+        safety.set_screen_ocr_auto(False)
         safety.reset_screen_ocr_consent()
+        self.assertFalse(safety.screen_ocr_consent_granted())
         self.assertTrue(safety.needs_confirmation("screen_process", screen_args))
+        safety.set_screen_ocr_auto(True)
 
     def test_screen_ocr_consent_does_not_authorize_camera(self):
         safety.reset_screen_ocr_consent()

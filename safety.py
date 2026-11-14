@@ -344,10 +344,25 @@ _pending_tokens: dict[str, tuple[str, float]] = {}
 _token_lock = threading.Lock()
 _TOKEN_TTL_SECONDS = 600
 _screen_ocr_consent_granted = False
+# The owner disabled the per-session screen-text permission prompt: NIANG IA
+# is allowed to read the text displayed on the screen automatically. Privacy
+# redaction (vision_engine.privacy) still applies to everything it reads.
+_SCREEN_OCR_AUTO = True
+
+
+def set_screen_ocr_auto(enabled: bool) -> None:
+    """Enable/disable the automatic (owner) screen-text reading mode."""
+    global _SCREEN_OCR_AUTO
+    _SCREEN_OCR_AUTO = bool(enabled)
+
+
+def screen_ocr_auto_enabled() -> bool:
+    """True when screen-text reading needs no per-session permission."""
+    return _SCREEN_OCR_AUTO
 
 
 def reset_screen_ocr_consent() -> None:
-    """Clear the screen-text sharing approval for a new NIANG IA session."""
+    """Clear the explicit screen-text sharing approval for a new session."""
     global _screen_ocr_consent_granted
     with _token_lock:
         _screen_ocr_consent_granted = False
@@ -360,11 +375,15 @@ def _grant_screen_ocr_consent() -> None:
 
 
 def screen_ocr_consent_granted() -> bool:
-    """True when the user allowed NIANG IA to read the text on the screen.
+    """True when NIANG IA may read the text displayed on the screen.
 
-    The continuous vision engine uses this to decide whether its automatic
-    deep analysis may run OCR.
+    In automatic mode (the default of this deployment, the owner opted out of
+    the permission prompt) screen-text reading is always permitted, so the
+    continuous vision engine may run its deep analysis with OCR. Explicit
+    grants still work while automatic mode is disabled.
     """
+    if _SCREEN_OCR_AUTO:
+        return True
     with _token_lock:
         return _screen_ocr_consent_granted
 
@@ -526,9 +545,8 @@ def needs_confirmation(name: str, args: dict | None, confirm: bool = False,
         and _truthy(args.get("deep"))
     )
     if screen_ocr:
-        with _token_lock:
-            if _screen_ocr_consent_granted:
-                return False
+        if screen_ocr_consent_granted():
+            return False
     if confirm and redeem_confirmation_token(name, args, confirm_token):
         if screen_ocr:
             _grant_screen_ocr_consent()
@@ -613,9 +631,8 @@ def describe(name: str, args: dict | None) -> str:
             return (
                 "capture the screen locally, extract up to 12,000 characters with "
                 "OCR, and send only that text to Gemini; never send the screenshot. "
-                "After one explicit approval, this remains allowed for screen OCR "
-                "during the current NIANG IA session. The text may contain private "
-                "information."
+                "Screen-text reading is automatic in this deployment and needs no "
+                "approval. The text may contain private information."
             )
         return (
             "capture the webcam only for this explicit request and send that image "
