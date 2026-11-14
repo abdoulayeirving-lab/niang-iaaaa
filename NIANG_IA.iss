@@ -1,5 +1,5 @@
 #define AppName "NIANG IA"
-#define AppVersion "1.0.31"
+#define AppVersion "1.0.32"
 #define SourceDir AddBackslash(SourcePath) + "dist\NIANG_IA_" + AppVersion
 
 [Setup]
@@ -42,6 +42,7 @@ Filename: "{sys}\wscript.exe"; Parameters: """{app}\START_NIANG_IA.vbs"""; Descr
 [Code]
 const
   HexDigits = '0123456789ABCDEF';
+  GeminiApiKeyUrl = 'https://aistudio.google.com/apikey';
 
 var
   PersonalizationPage: TWizardPage;
@@ -283,7 +284,8 @@ begin
   ApiKeyInfo := TNewStaticText.Create(WizardForm);
   ApiKeyInfo.Parent := ApiKeyPage.Surface;
   ApiKeyInfo.Caption :=
-    'La clé est enregistrée localement. Tu peux aussi continuer et la configurer plus tard.';
+    'La clé est enregistrée localement. Tu peux aussi continuer et la configurer plus tard. ' +
+    'Si le navigateur ne s''ouvre pas, visite ' + GeminiApiKeyUrl + '.';
   ApiKeyInfo.Font.Name := 'Segoe UI';
   ApiKeyInfo.Font.Size := 8;
   ApiKeyInfo.Font.Color := clGray;
@@ -293,7 +295,7 @@ begin
   ApiKeyInfo.Top := GeminiKeyEdit.Top + GeminiKeyEdit.Height +
     ScaleY(10);
   ApiKeyInfo.Width := ContentWidth;
-  ApiKeyInfo.Height := ScaleY(36);
+  ApiKeyInfo.Height := ScaleY(48);
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
@@ -324,11 +326,17 @@ procedure OpenGeminiApiKeyPage(Sender: TObject);
 var
   ErrorCode: Integer;
 begin
-  if not ShellExec('open', 'https://aistudio.google.com/apikey', '', '',
+  if ShellExec('open', GeminiApiKeyUrl, '', '', SW_SHOWNORMAL, ewNoWait,
+    ErrorCode) then
+    Exit;
+
+  if Exec(ExpandConstant('{sys}\rundll32.exe'),
+    'url.dll,FileProtocolHandler "' + GeminiApiKeyUrl + '"', '',
     SW_SHOWNORMAL, ewNoWait, ErrorCode) then
-    MsgBox('Impossible d''ouvrir Google AI Studio. Va sur ' +
-      'https://aistudio.google.com/apikey pour créer ta clé Gemini.',
-      mbError, MB_OK);
+    Exit;
+
+  MsgBox('Impossible d''ouvrir Google AI Studio. Va sur ' + GeminiApiKeyUrl +
+    ' pour créer ta clé Gemini.', mbError, MB_OK);
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

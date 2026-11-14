@@ -33,6 +33,9 @@ class InstallerPersonalizationTests(unittest.TestCase):
 
         self.assertIn("https://aistudio.google.com/apikey", source)
         self.assertIn("Obtenir une clé Gemini", source)
+        self.assertIn("GetApiKeyButton.OnClick := @OpenGeminiApiKeyPage", source)
+        self.assertIn("url.dll,FileProtocolHandler", source)
+        self.assertIn("Si le navigateur ne s''ouvre pas", source)
         self.assertIn("GeminiKeyEdit.Text", source)
         self.assertIn("installer_gemini_key.txt", source)
         self.assertIn("GeminiKeyEdit.PasswordChar := '*'", source)
