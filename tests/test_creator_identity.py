@@ -39,6 +39,18 @@ class CreatorIdentityPromptTests(unittest.TestCase):
         self.assertIn("He is Senegalese, a student", source)
         self.assertIn("Do not claim he created", source)
 
+    def test_windows_prompts_do_not_attribute_niang_ia_to_google(self):
+        prompt = (ROOT / "core" / "prompt.txt").read_text(encoding="utf-8")
+        fallback = (ROOT / "main.py").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "NIANG IA n'est pas la création, le produit ou le service de Google",
+            prompt,
+        )
+        self.assertIn("You are not a Google product or a Google team creation", fallback)
+        self.assertIn("state this clearly and never", fallback)
+        self.assertIn("attribute the assistant to Google", fallback)
+
     def test_windows_prompt_includes_truth_and_transparency_rules(self):
         prompt = (ROOT / "core" / "prompt.txt").read_text(encoding="utf-8")
 
