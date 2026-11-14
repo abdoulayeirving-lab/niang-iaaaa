@@ -21,6 +21,13 @@ import sys
 import time
 from pathlib import Path
 
+from actions.hardware_temperature import (
+    POWERSHELL_TEMPERATURE_SCRIPT,
+    is_cpu_specific_temperature,
+    select_psutil_temperature_reading,
+    select_temperature_reading,
+)
+
 try:
     import psutil
     _PSUTIL = True
@@ -122,30 +129,38 @@ def _cpu_pct() -> float | None:
 
 
 def _temp_c() -> float | None:
-    """CPU/board temperature when the OS exposes it (Linux sensors or WMI)."""
+    """Return a CPU sensor reading when psutil or a Windows provider exposes one."""
     if _PSUTIL:
         try:
-            temps = psutil.sensors_temperatures()
-            for entries in temps.values():
-                for e in entries:
-                    if e.current is not None and 0 <= e.current <= 110:
-                        return float(e.current)
+            reading = select_psutil_temperature_reading(psutil.sensors_temperatures())
+            if is_cpu_specific_temperature(reading):
+                return float(reading["Celsius"])
         except Exception:
             pass
+    if sys.platform != "win32":
+        return None
     try:
-        out = subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
-             "(Get-CimInstance -Namespace root/wmi -ClassName "
-             "MSAcpi_ThermalZoneTemperature).CurrentTemperature"],
-            capture_output=True, text=True, timeout=10).stdout or ""
-        vals = re.findall(r"[-+]?\d+(?:\.\d+)?", out)
-        for v in vals:
-            try:
-                celsius = float(v) / 10.0 - 273.15
-                if 0 <= celsius <= 110:
-                    return round(celsius, 1)
-            except Exception:
-                continue
+        command = (
+            "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+            + POWERSHELL_TEMPERATURE_SCRIPT
+        )
+        options = {
+            "capture_output": True,
+            "text": True,
+            "timeout": 10,
+            "check": True,
+        }
+        if hasattr(subprocess, "CREATE_NO_WINDOW"):
+            options["creationflags"] = subprocess.CREATE_NO_WINDOW
+        result = subprocess.run(
+            ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
+             "-Command", command],
+            **options,
+        )
+        payload = json.loads(result.stdout)
+        reading = select_temperature_reading(payload.get("Sensors"))
+        if is_cpu_specific_temperature(reading):
+            return float(reading["Celsius"])
     except Exception:
         pass
     return None
@@ -314,6 +329,8 @@ def guardian_action(
         temp = _temp_c()
         if temp is not None:
             parts.append(f"Temperature {temp:.0f} degrees.")
+        else:
+            parts.append("CPU temperature unavailable (no supported CPU sensor exposed).")
         return "Health report, sir. " + " ".join(parts)
 
     if action in ("enable", "on", "start"):

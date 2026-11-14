@@ -12,6 +12,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from actions.hardware_temperature import (
+    POWERSHELL_TEMPERATURE_SCRIPT,
+    is_cpu_specific_temperature,
+    select_psutil_temperature_reading,
+    select_temperature_reading,
+)
 from actions.windows_process import WindowsProcessCancelled, run_windows_process
 
 try:
@@ -40,15 +46,7 @@ class DiagnosticCancelled(RuntimeError):
     """A diagnostic subprocess was stopped before it finished."""
 
 _POWERSHELL_SCRIPTS = {
-    "temperature": r"""
-$ErrorActionPreference = 'Stop'
-$values = @(Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction SilentlyContinue |
-    ForEach-Object { [math]::Round(($_.CurrentTemperature / 10) - 273.15, 1) } |
-    Where-Object { $_ -ge 0 -and $_ -le 120 })
-$temperature = $null
-if ($values.Count -gt 0) { $temperature = [math]::Round(($values | Measure-Object -Average).Average, 1) }
-[pscustomobject]@{ Celsius = $temperature; SensorCount = $values.Count } | ConvertTo-Json -Compress
-""",
+    "temperature": POWERSHELL_TEMPERATURE_SCRIPT,
     "windows": r"""
 $ErrorActionPreference = 'Stop'
 $os = Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version, BuildNumber, LastBootUpTime
@@ -443,38 +441,45 @@ def _collect_performance(
         return checks, findings
 
     cpu_percent = psutil.cpu_percent(interval=0.4)
-    cpu_temperature = None
+    temperature_reading = None
     try:
-        for sensors in psutil.sensors_temperatures().values():
-            for sensor in sensors:
-                if sensor.current is not None and 0 <= sensor.current <= 120:
-                    cpu_temperature = round(float(sensor.current), 1)
-                    break
-            if cpu_temperature is not None:
-                break
+        temperature_reading = select_psutil_temperature_reading(
+            psutil.sensors_temperatures()
+        )
     except (AttributeError, OSError, RuntimeError, NotImplementedError):
         pass
     temperature_source = "psutil sensor unavailable"
-    if cpu_temperature is None and platform.system() == "Windows":
+    if temperature_reading is None and platform.system() == "Windows":
         try:
             temperature_data = _powershell(
                 _POWERSHELL_SCRIPTS["temperature"],
                 timeout_seconds=15,
                 cancel_event=cancel_event,
             )
-            value = temperature_data.get("Celsius")
-            cpu_temperature = float(value) if value is not None else None
-            temperature_source = (
-                "ACPI thermal zone"
-                if cpu_temperature is not None
-                else "No supported ACPI temperature sensor was exposed."
+            temperature_reading = select_temperature_reading(
+                temperature_data.get("Sensors")
             )
+            if temperature_reading is None:
+                temperature_source = "No supported CPU temperature sensor was exposed."
         except DiagnosticCancelled:
             raise
         except (OSError, RuntimeError, subprocess.TimeoutExpired):
             temperature_source = "Windows did not expose a readable temperature sensor."
-    elif cpu_temperature is not None:
-        temperature_source = "psutil sensor"
+    if temperature_reading is not None:
+        temperature_source = (
+            f"{temperature_reading['Source']} ({temperature_reading['SensorName']})"
+        )
+    is_acpi_zone = bool(
+        temperature_reading and not is_cpu_specific_temperature(temperature_reading)
+    )
+    cpu_temperature = (
+        temperature_reading["Celsius"]
+        if temperature_reading is not None and not is_acpi_zone
+        else None
+    )
+    thermal_zone_temperature = (
+        temperature_reading["Celsius"] if is_acpi_zone else None
+    )
 
     memory = psutil.virtual_memory()
     disk_io = None
@@ -553,6 +558,7 @@ def _collect_performance(
         "cpu_percent_sample": round(float(cpu_percent), 1),
         "cpu_temperature_c": cpu_temperature,
         "cpu_temperature_source": temperature_source,
+        "thermal_zone_temperature_c": thermal_zone_temperature,
         "memory_total_bytes": int(memory.total),
         "memory_available_bytes": int(memory.available),
         "memory_used_percent": round(float(memory.percent), 1),
@@ -584,9 +590,10 @@ def _collect_performance(
         "ok" if cpu_temperature is not None else "unavailable",
         {
             "temperature_c": cpu_temperature,
+            "thermal_zone_temperature_c": thermal_zone_temperature,
             "source": temperature_source,
         },
-        "psutil / ACPI thermal zone",
+        "psutil / LibreHardwareMonitor / OpenHardwareMonitor / ACPI",
         verification_state="observed" if cpu_temperature is not None else "data_unavailable",
     ))
     return checks, findings

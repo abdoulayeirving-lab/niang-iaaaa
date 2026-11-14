@@ -83,15 +83,23 @@ external APIs. It is **free to self-host** — you only need a Gemini API key
 
 ## 🚀 Quick Start
 
-For a Windows install, run `START_NIANG_IA.bat`. It installs the bundled
+For a first Windows setup, run `START_NIANG_IA.bat`. It installs the bundled
 Python 3.12.10 automatically when Python 3.11 or 3.12 is not already available,
-then creates a virtual environment and installs app dependencies. Installing
+then creates a virtual environment and installs app dependencies. After setup,
+launch NIANG IA with `START_NIANG_IA.vbs` or the installed desktop shortcut;
+this starts the app through `pythonw.exe` without opening a command window.
+The batch file remains available for setup and troubleshooting. Installing
 Python works offline; dependency and Playwright browser installation on first
 launch requires internet. If the default microphone or speaker changes when a
 headset is connected or removed, NIANG IA resolves the Windows default device
 before comparing it to the active stream, and reopens audio only when the
 resolved device changes. Voice playback uses a dedicated output thread and the
 audio driver's preferred buffer size to reduce stuttering.
+For CPU temperature readings, NIANG IA checks psutil and the WMI sensor
+providers exposed by LibreHardwareMonitor or OpenHardwareMonitor before trying
+the Windows ACPI thermal zone. Enable WMI in the sensor provider if needed.
+ACPI readings are labeled as system thermal-zone data, not CPU temperature;
+without a CPU sensor, CPU-temperature alerts report the reading as unavailable.
 Normal launches show the animated interface; use the window close button or the
 system-tray menu to hide it when you want NIANG IA to keep running in the
 background.

@@ -62,15 +62,16 @@ if errorlevel 1 (
 
 :launch
 echo.
-where pythonw >nul 2>&1 && (
-    %APPDATA%\\..\\Local\\Programs\\Python\\Python312\\pythonw.exe main.py
-) || (
-    where pythonw >nul 2>&1 && (
-    %APPDATA%\..\Local\Programs\Python\Python312\\pythonw.exe main.py
-) || (
-    "%PYTHON_EXE%" main.py
+if exist ".venv\Scripts\pythonw.exe" (
+    start "" "%~dp0.venv\Scripts\pythonw.exe" -u "%~dp0main.py"
+    exit /b 0
 )
+where pythonw.exe >nul 2>&1
+if not errorlevel 1 (
+    start "" pythonw.exe -u "%~dp0main.py"
+    exit /b 0
 )
+"%PYTHON_EXE%" -u "%~dp0main.py"
 set "EXIT_CODE=%ERRORLEVEL%"
 if not "%EXIT_CODE%"=="0" (
     echo.

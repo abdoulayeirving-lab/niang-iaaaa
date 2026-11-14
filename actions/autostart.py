@@ -23,12 +23,8 @@ def get_base_dir() -> Path:
 
 def _launch_command(remote: bool, background: bool = False) -> str:
     base   = get_base_dir()
-    main   = base / "main.py"
-    exe    = sys.executable
-    pyw = Path(exe).with_name("pythonw.exe")
-    if not pyw.exists():
-        pyw = Path(exe)
-    cmd = f'"{pyw}" -u "{main}"'
+    script = base / "START_NIANG_IA.vbs"
+    cmd = f'wscript.exe "{script}"'
     if remote:
         cmd += " --remote"
     if background:
@@ -85,12 +81,8 @@ def _get_run() -> str | None:
 def _launcher_command() -> str:
     """Command that starts the headless voice launcher."""
     base = get_base_dir()
-    script = base / "voice_launcher.py"
-    exe = sys.executable
-    pyw = Path(exe).with_name("pythonw.exe")
-    if not pyw.exists():
-        pyw = Path(exe)
-    return f'"{pyw}" -u "{script}"'
+    script = base / "START_NIANG_IA.vbs"
+    return f'wscript.exe "{script}" --voice'
 
 
 def _set_launcher_run(cmd: str) -> None:

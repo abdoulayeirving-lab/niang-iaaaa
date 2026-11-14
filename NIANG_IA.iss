@@ -29,15 +29,15 @@ CloseApplications=no
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\NIANG IA"; Filename: "{app}\START_NIANG_IA.bat"; WorkingDir: "{app}"; IconFilename: "{app}\assets\niang_ia.ico"
-Name: "{autodesktop}\NIANG IA"; Filename: "{app}\START_NIANG_IA.bat"; WorkingDir: "{app}"; IconFilename: "{app}\assets\niang_ia.ico"; Tasks: desktopicon
+Name: "{group}\NIANG IA"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\START_NIANG_IA.vbs"""; WorkingDir: "{app}"; IconFilename: "{app}\assets\niang_ia.ico"
+Name: "{autodesktop}\NIANG IA"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\START_NIANG_IA.vbs"""; WorkingDir: "{app}"; IconFilename: "{app}\assets\niang_ia.ico"; Tasks: desktopicon
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"
 
 [Run]
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\install_screen_vision.ps1"""; StatusMsg: "Installation d'Ollama et téléchargement du modèle de vision (environ 1,9 Go)..."; Flags: waituntilterminated
-Filename: "{app}\START_NIANG_IA.bat"; Description: "Launch NIANG IA"; WorkingDir: "{app}"; Flags: postinstall nowait skipifsilent
+Filename: "{sys}\wscript.exe"; Parameters: """{app}\START_NIANG_IA.vbs"""; Description: "Launch NIANG IA"; WorkingDir: "{app}"; Flags: postinstall nowait skipifsilent
 
 [Code]
 const
