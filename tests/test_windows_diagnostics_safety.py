@@ -8,9 +8,15 @@ from agent import executor
 
 
 class WindowsDiagnosticsSafetyTests(unittest.TestCase):
-    def test_diagnostics_and_repairs_require_action_bound_confirmation(self):
+    def test_diagnostics_do_not_require_confirmation(self):
+        self.assertEqual(
+            safety.classify("windows_diagnostics", {"action": "overview"}),
+            safety.Risk.LOW,
+        )
+        self.assertFalse(safety.needs_confirmation("windows_diagnostics", {"action": "overview"}))
+
+    def test_repairs_require_action_bound_confirmation(self):
         for tool, args in (
-            ("windows_diagnostics", {"action": "overview"}),
             ("windows_repair", {"action": "sfc_scannow"}),
         ):
             with self.subTest(tool=tool):
@@ -30,7 +36,7 @@ class WindowsDiagnosticsSafetyTests(unittest.TestCase):
         self.assertIn("restore point", description)
         self.assertIn("already be elevated", description)
 
-    def test_executor_does_not_dispatch_diagnostics_without_approval(self):
+    def test_executor_dispatches_diagnostics_without_approval(self):
         approval = lambda tool, parameters, description: False
         with patch("actions.windows_diagnostics.windows_diagnostics") as diagnostics:
             result = executor._call_tool(
@@ -39,8 +45,8 @@ class WindowsDiagnosticsSafetyTests(unittest.TestCase):
                 None,
                 approval_callback=approval,
             )
-        self.assertIn("approval was denied", result)
-        diagnostics.assert_not_called()
+        self.assertNotIn("approval was denied", result)
+        diagnostics.assert_called_once()
 
     def test_executor_does_not_dispatch_repair_without_approval(self):
         approval = lambda tool, parameters, description: False

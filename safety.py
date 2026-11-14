@@ -189,7 +189,9 @@ _ACTION_RISK = {
         None: Risk.HIGH,
     },
     "windows_diagnostics": {
-        None: Risk.HIGH,
+        # Read-only local diagnostics: no system modification, so they no
+        # longer require the high-risk confirmation gate.
+        None: Risk.LOW,
     },
     "windows_repair": {
         None: Risk.HIGH,
