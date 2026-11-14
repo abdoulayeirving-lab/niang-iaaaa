@@ -69,10 +69,14 @@ class BluetoothRemoteClient(RemoteClient):
 
     def __init__(self, peer: str = "?"):
         super().__init__(peer)
+        self._write_char = None
         self._notify_char = None
         self._subscriber = None
         self.authenticated = False
         self.pending_command_id = ""   # id of the last in-flight command
+
+    def bind_write(self, write_char) -> None:
+        self._write_char = write_char
 
     def bind_notify(self, notify_char) -> None:
         self._notify_char = notify_char
@@ -170,7 +174,7 @@ class BluetoothBridge:
         client = None
         async with self._clients_lock:
             for c in self._clients:
-                if c._notify_char is characteristic:
+                if c._write_char is characteristic:
                     client = c
                     break
         if client is None:
@@ -368,6 +372,7 @@ class BluetoothBridge:
             print(f"[Bluetooth] ❌ write char error: {wc.error.value}")
             return False
         write_char = wc.characteristic
+        self._write_char = write_char
 
         # Notify characteristic (PC → phone).
         notify_params = GattLocalCharacteristicParameters()
@@ -425,6 +430,7 @@ class BluetoothBridge:
             # Add any new subscriber.
             for sub in added:
                 client = BluetoothRemoteClient("BLE")
+                client.bind_write(self._write_char)
                 client.bind_notify(notify_char)
                 client.bind_subscriber(sub)
                 client.attach_loop(getattr(self.kaizumi, "_loop", None))

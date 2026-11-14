@@ -167,9 +167,17 @@ class RemoteActivity : AppCompatActivity() {
         try {
             scanner?.startScan(null, settings, scanCallback)
         } catch (e: SecurityException) {
+            scanning = false
             setStatus("Bluetooth permission denied.")
+            log("Bluetooth scan failed: permission denied.")
         }
-        mainHandler.postDelayed({ if (scanning) stopScan() }, 15000)
+        mainHandler.postDelayed({
+            if (scanning) {
+                stopScan()
+                setStatus("No PC found. Check that NIANG IA is running with Bluetooth enabled, then tap Connect to retry.")
+                log("No Kaizumi Remote found.")
+            }
+        }, 15000)
     }
 
     @SuppressLint("MissingPermission")
@@ -181,6 +189,14 @@ class RemoteActivity : AppCompatActivity() {
     }
 
     private val scanCallback = object : ScanCallback() {
+        override fun onScanFailed(errorCode: Int) {
+            mainHandler.post {
+                stopScan()
+                setStatus("Bluetooth scan failed ($errorCode). Check Bluetooth and try again.")
+                log("Bluetooth scan failed with error $errorCode.")
+            }
+        }
+
         @SuppressLint("MissingPermission")
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             if (!hasConnectPermission()) {

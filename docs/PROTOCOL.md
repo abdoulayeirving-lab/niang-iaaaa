@@ -78,5 +78,5 @@ mirror `{"type":"tool"}`; `system` events mirror `{"type":"system"}`.
 
 - The PC keeps advertising, so the phone reconnects freely. On reconnect the
   phone must `auth` again.
-- Tracked clients are keyed by the notify characteristic instance; when the
-  phone unsubscribes, the client is dropped.
+- Incoming writes are matched to the server's write characteristic. A phone's
+  client entry is dropped when it unsubscribes.
