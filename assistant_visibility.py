@@ -17,6 +17,7 @@ from pathlib import Path
 FADE_STEPS = 10            # frames per fade
 FADE_DELAY_MS = 18         # ~180 ms total
 TOPMOST_RELEASE_MS = 1200  # keep the window on top this long after a wake
+FAREWELL_DELAY_MS = 2500
 CLOSING_ANIMATION_PATH = Path(__file__).resolve().parent / "assets" / "closing_animation.mp4"
 
 
@@ -27,8 +28,10 @@ class AssistantVisibility:
         self._fade_job = None
         self._topmost_job = None
         self._closing_window = None
+        self._closing_label = None
         self._closing_capture = None
         self._closing_photo = None
+        self._closing_window_state = None
         self._shutdown_started = False
         self._shutdown_complete = False
         # Cached presence flag: reading the Tk window state from another
@@ -217,10 +220,27 @@ class AssistantVisibility:
         """
         self.ui._safe_ui(self._shutdown_on_ui, animate)
 
-    def _shutdown_on_ui(self, animate: bool = True):
+    def _shutdown_on_ui(self, animate: bool = True, announce_farewell: bool = True):
         if self._shutdown_started or self._shutdown_complete:
             return
         self._shutdown_started = True
+        farewell = getattr(self.ui, "on_farewell", None) if announce_farewell else None
+        if farewell:
+            try:
+                if farewell():
+                    try:
+                        self.ui.root.after(
+                            FAREWELL_DELAY_MS,
+                            lambda: self._continue_shutdown(animate),
+                        )
+                        return
+                    except Exception:
+                        pass
+            except Exception as exc:
+                self.ui.write_log(f"ERR: Impossible de dire au revoir : {exc}")
+        self._continue_shutdown(animate)
+
+    def _continue_shutdown(self, animate: bool):
         self._prepare_shutdown()
         if animate and self._play_closing_animation():
             return
@@ -269,7 +289,8 @@ class AssistantVisibility:
             return False
 
         capture = None
-        window = None
+        window = self.ui.root
+        label = None
         try:
             import cv2
             import tkinter as tk
@@ -307,16 +328,27 @@ class AssistantVisibility:
             fps = float(capture.get(cv2.CAP_PROP_FPS))
             frame_delay = max(1, round(1000 / fps)) if fps > 0 else 33
 
-            window = tk.Toplevel(self.ui.root)
+            self._closing_window_state = {
+                "geometry": window.geometry(),
+                "overrideredirect": window.overrideredirect(),
+                "topmost": window.attributes("-topmost"),
+                "alpha": window.attributes("-alpha"),
+                "background": window.cget("bg"),
+            }
+            window.withdraw()
             window.overrideredirect(True)
             window.configure(bg="#000000")
-            window.attributes("-topmost", True)
             window.geometry(f"{frame_width}x{frame_height}+{x}+{y}")
+            window.attributes("-topmost", True)
+            window.attributes("-alpha", 1.0)
+            window.deiconify()
             label = tk.Label(window, bg="#000000", bd=0, highlightthickness=0)
-            label.pack(fill="both", expand=True)
+            label.place(x=0, y=0, relwidth=1, relheight=1)
+            label.lift()
 
             self._closing_capture = capture
             self._closing_window = window
+            self._closing_label = label
 
             def show_frame(frame):
                 height, width = frame.shape[:2]
@@ -352,13 +384,15 @@ class AssistantVisibility:
         except Exception as exc:
             if capture is not None:
                 capture.release()
-            if window is not None:
+            if label is not None:
                 try:
-                    window.destroy()
+                    label.destroy()
                 except Exception:
                     pass
+            self._restore_closing_window()
             self._closing_capture = None
             self._closing_window = None
+            self._closing_label = None
             self._closing_photo = None
             self.ui.write_log(
                 f"ERR: Animation de fermeture indisponible ({exc}); "
@@ -390,22 +424,41 @@ class AssistantVisibility:
             except Exception as exc:
                 self.ui.write_log(f"ERR: Libération de l’animation impossible : {exc}")
 
-        window = self._closing_window
+        label = self._closing_label
+        self._closing_label = None
         self._closing_window = None
         self._closing_photo = None
-        if window is not None:
+        if label is not None:
             try:
-                window.destroy()
+                label.destroy()
             except Exception as exc:
-                self.ui.write_log(f"ERR: Fermeture de la fenêtre d’animation impossible : {exc}")
+                self.ui.write_log(f"ERR: Nettoyage de l’animation impossible : {exc}")
+        self._closing_window_state = None
+
+    def _restore_closing_window(self):
+        state = self._closing_window_state
+        self._closing_window_state = None
+        if state is None:
+            return
+        window = self.ui.root
+        try:
+            window.withdraw()
+            window.overrideredirect(state["overrideredirect"])
+            window.configure(bg=state["background"])
+            window.geometry(state["geometry"])
+            window.attributes("-topmost", state["topmost"])
+            window.attributes("-alpha", state["alpha"])
+            window.deiconify()
+        except Exception as exc:
+            self.ui.write_log(f"ERR: Restauration de la fenêtre impossible : {exc}")
 
     # ── Immediate voice stop (no confirmation) ──────────────────────────────
 
     def stop_now(self, reason: str = "", delay_ms: int = 3000):
         """Stop NIANG IA completely and immediately (voice command).
 
-        The delay lets Gemini finish the farewell sentence before the
-        process exits, so the assistant is not cut off mid-word.
+        The voice command's farewell reply gets a short playback window before
+        shutdown starts.
         """
         self.ui._safe_ui(self._stop_now_on_ui, reason, delay_ms)
 
@@ -418,11 +471,11 @@ class AssistantVisibility:
                 pass
 
         def finish():
-            self._shutdown_on_ui(animate=True)
+            self._shutdown_on_ui(animate=True, announce_farewell=False)
 
-        try:
-            root.after(max(0, int(delay_ms)), finish)
-        except Exception:
+        if delay_ms > 0:
+            root.after(int(delay_ms), finish)
+        else:
             finish()
 
 
@@ -444,7 +497,7 @@ def handle_visibility_command(args, kaizumi, voice) -> str:
                   "stoppe"):
         # Immediate and complete: the voice command alone stops NIANG IA.
         visibility.stop_now("Arrêt complet demandé par commande vocale.")
-        return "D'accord, j'arrête. Bonne soirée !"
+        return "À plus !"
     if action in ("quit", "quitte", "ferme niang ia", "ferme niang",
                   "ferme niang ia"):
         visibility.confirm_quit("Fermeture demandée par commande vocale.")

@@ -2112,6 +2112,7 @@ class KaizumiLive:
         self.ui.on_agent_start = self._start_agent_task
         self.ui.on_agent_cancel = self._cancel_agent_task
         self.ui.on_application_close = self._shutdown_agent_services
+        self.ui.on_farewell = self._speak_farewell
         self.ui.on_files_selected = self._on_files_selected
         self.ui.on_clear_documents = self._clear_analysis_sources
         self.ui.on_voiceover_requested = self._on_voiceover_requested
@@ -2600,6 +2601,12 @@ class KaizumiLive:
             async with self._send_lock:
                 await self.session.send_realtime_input(text=text)
         asyncio.run_coroutine_threadsafe(_send(), self._loop)
+
+    def _speak_farewell(self) -> bool:
+        if not self._loop or not self.session or not self._send_lock:
+            return False
+        self.speak('Dis exactement « À plus ! », puis termine ta réponse immédiatement.')
+        return True
 
     def _log_tool_error(self, tool_name: str, tr: ToolResult):
         short = str(tr.content)[:120]
