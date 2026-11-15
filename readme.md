@@ -587,14 +587,14 @@ turn a configured area on/off. Area ids are Home Assistant area ids.
 
 ## 📱 Remote Control
 
-The Android app provides its own Gemini assistant and an optional Bluetooth
-remote for the Windows app. Telegram commands, in contrast, run through the
-Windows assistant's Gemini Live session.
+The Android app provides its own Gemini assistant and a Bluetooth remote for
+the Windows app. Telegram commands, in contrast, run through the Windows
+assistant's Gemini Live session.
 
-### 1. Android app and optional Bluetooth PC remote
+### 1. Android app and Bluetooth PC remote
 
 ```bash
-python main.py --remote
+python main.py
 ```
 
 - The Android app supports standalone text/voice chat, optional Gemini Web
@@ -602,8 +602,10 @@ python main.py --remote
   (apps/settings, calendar reminders, alarms, and public links).
 - It requires internet and a user-provided Gemini API key; it does not offer
   offline operation or Windows-only automation features.
-- Run `--remote` to additionally start the BLE GATT peripheral advertising as
-  **"Kaizumi Remote"**.
+- The BLE GATT peripheral starts automatically when NIANG IA launches and
+  advertises while the app is running. It stops when NIANG IA exits. The PC
+  must be awake with Bluetooth enabled; Windows sleep, shutdown, or disabling
+  the Bluetooth adapter interrupts the connection.
 - Build and install the Android app from `android/` (see
   [`android/README.md`](android/README.md)). The bridge token is automatically
   generated in `config/bridge_token.txt` on first run.

@@ -2079,7 +2079,7 @@ for _decl in TOOL_DECLARATIONS:
 
 class KaizumiLive:
 
-    def __init__(self, ui: KaizumiUI, enable_bluetooth: bool = False):
+    def __init__(self, ui: KaizumiUI, enable_bluetooth: bool = True):
         self.ui             = ui
         self.session        = None
         self.audio_in_queue = None
@@ -4752,7 +4752,7 @@ def main():
     log(f"Base dir: {BASE_DIR}\nLog file: {log_file}")
     ui = KaizumiUI("face.png")
 
-    enable_bluetooth = "--remote" in sys.argv[1:]
+    enable_bluetooth = True
     global BACKGROUND_START
     BACKGROUND_START = _starts_in_background(sys.argv[1:])
     global WAKE_ON_START
