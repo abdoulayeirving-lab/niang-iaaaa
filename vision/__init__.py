@@ -1,4 +1,4 @@
-"""Shared computer-vision primitives for Kaizumi."""
+"""Shared computer-vision primitives for NIANG IA."""
 
 from .camera_manager import CameraManager, CameraConfig, FramePacket
 from .vision_events import VisionEvent

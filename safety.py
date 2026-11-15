@@ -346,16 +346,19 @@ _pending_tokens: dict[str, tuple[str, float]] = {}
 _token_lock = threading.Lock()
 _TOKEN_TTL_SECONDS = 600
 _screen_ocr_consent_granted = False
-# The owner disabled the per-session screen-text permission prompt: NIANG IA
-# is allowed to read the text displayed on the screen automatically. Privacy
-# redaction (vision_engine.privacy) still applies to everything it reads.
-_SCREEN_OCR_AUTO = True
+# Default behavior: require one explicit permission per session before NIANG IA
+# may read the text displayed on the screen. The owner may opt into an
+# automatic mode for deployments that want to allow OCR without prompting.
+# Privacy redaction (vision_engine.privacy) still applies to everything it reads.
+_SCREEN_OCR_AUTO = False
 
 
 def set_screen_ocr_auto(enabled: bool) -> None:
     """Enable/disable the automatic (owner) screen-text reading mode."""
-    global _SCREEN_OCR_AUTO
+    global _SCREEN_OCR_AUTO, _screen_ocr_consent_granted
     _SCREEN_OCR_AUTO = bool(enabled)
+    if _SCREEN_OCR_AUTO:
+        _screen_ocr_consent_granted = True
 
 
 def screen_ocr_auto_enabled() -> bool:
@@ -365,9 +368,10 @@ def screen_ocr_auto_enabled() -> bool:
 
 def reset_screen_ocr_consent() -> None:
     """Clear the explicit screen-text sharing approval for a new session."""
-    global _screen_ocr_consent_granted
+    global _screen_ocr_consent_granted, _SCREEN_OCR_AUTO
     with _token_lock:
         _screen_ocr_consent_granted = False
+        _SCREEN_OCR_AUTO = False
 
 
 def _grant_screen_ocr_consent() -> None:
@@ -538,13 +542,16 @@ def needs_confirmation(name: str, args: dict | None, confirm: bool = False,
     args = args or {}
     if classify(name, args) != Risk.HIGH:
         return False
-    screen_ocr = (
-        name == "screen_process"
-        and str(args.get("angle", "screen")).lower().strip() == "screen"
-    ) or (
+    deep_observation = (
         name == "vision_observe"
         and str(args.get("action", "")).lower().strip() in {"observe", "verify"}
         and _truthy(args.get("deep"))
+    )
+    if deep_observation:
+        return False
+    screen_ocr = (
+        name == "screen_process"
+        and str(args.get("angle", "screen")).lower().strip() == "screen"
     )
     if screen_ocr:
         if screen_ocr_consent_granted():

@@ -1422,11 +1422,11 @@ TOOL_DECLARATIONS = [
     {
         "name": "wake_word",
         "description": (
-            "Controls the hands-free wake word listener ('Hey Kaizumi'). "
-            "When active, Kaizumi sleeps until the wake word is said, then listens. "
-            "'record' samples your voice and builds a 'Hey Kaizumi' reference. "
+            "Controls the hands-free wake word listener ('Hey Niang' / 'Niang IA'). "
+            "When active, NIANG IA sleeps until the wake word is said, then listens. "
+            "'record' samples your voice and builds a 'Hey Niang' reference. "
             "Use when the user says 'activate wake word', 'record the wake word', "
-            "'listen for hey kaizumi', or any wake-word command."
+            "'listen for hey niang', or any wake-word command."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -1465,7 +1465,7 @@ TOOL_DECLARATIONS = [
         "name": "create_presentation",
         "description": (
             "Generates a PowerPoint (.pptx) file from a simple request and saves it "
-            "to Documents/Kaizumi. Use for 'make me a presentation about X', "
+            "to Documents/NIANG IA. Use for 'make me a presentation about X', "
             "'create slides about Y'. Pass the topic as title and the slides with "
             "their bullet points. After creating, tell the user where it was saved."
         ),
@@ -1500,7 +1500,7 @@ TOOL_DECLARATIONS = [
         "name": "create_document",
         "description": (
             "Creates a complete structured Word document (.docx) in "
-            "Documents/Kaizumi. Generate substantial, organized content from the "
+            "Documents/NIANG IA. Generate substantial, organized content from the "
             "user's request with a title and sections containing prose, bullets, "
             "and optional tables. After creating, report the exact saved path."
         ),
@@ -1579,7 +1579,7 @@ TOOL_DECLARATIONS = [
         "name": "create_spreadsheet",
         "description": (
             "Creates an Excel (.xlsx) spreadsheet with headers and data rows and saves it "
-            "to Documents/Kaizumi. Use for 'make a spreadsheet of ...', "
+            "to Documents/NIANG IA. Use for 'make a spreadsheet of ...', "
             "'create a table with columns ... and these values'. "
             "After creating, tell the user where it was saved."
         ),

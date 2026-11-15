@@ -119,16 +119,17 @@ def _send_unicode_text(text: str) -> None:
     class Input(ctypes.Structure):
         _fields_ = [("type", dword), ("value", InputUnion)]
 
-    key_events = []
-    encoded = text.encode("utf-16-le")
-    for offset in range(0, len(encoded), 2):
-        scan_code = int.from_bytes(encoded[offset:offset + 2], "little")
-        key_events.extend((
-            Input(1, InputUnion(keyboard=KeyboardInput(0, scan_code, 0x0004, 0, 0))),
-            Input(1, InputUnion(keyboard=KeyboardInput(0, scan_code, 0x0006, 0, 0))),
-        ))
-    if not key_events:
+    if not text:
         return
+
+    key_events = []
+    for char in text:
+        codepoint = ord(char)
+        key_events.extend((
+            Input(1, InputUnion(keyboard=KeyboardInput(0, codepoint, 0x0004, 0, 0))),
+            Input(1, InputUnion(keyboard=KeyboardInput(0, codepoint, 0x0004 | 0x0002, 0, 0))),
+        ))
+
     events = (Input * len(key_events))(*key_events)
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     user32.SendInput.argtypes = [dword, ctypes.POINTER(Input), ctypes.c_int]

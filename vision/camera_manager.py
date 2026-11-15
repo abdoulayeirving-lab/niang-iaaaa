@@ -1,4 +1,4 @@
-"""Thread-safe camera capture shared by Kaizumi vision modules."""
+"""Thread-safe camera capture shared by NIANG IA vision modules."""
 
 from __future__ import annotations
 
@@ -63,7 +63,7 @@ class CameraManager:
             target=self._capture_loop,
             args=(on_frame,),
             daemon=True,
-            name="KaizumiCamera",
+            name="NIANG_IA_Camera",
         )
         self._thread.start()
         self._ready.wait(timeout=3.0)

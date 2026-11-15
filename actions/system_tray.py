@@ -1,5 +1,5 @@
 # actions/system_tray.py
-# Kaizumi — background system-tray icon + optional global hotkeys.
+# NIANG IA — background system-tray icon + optional global hotkeys.
 # Optional deps: pystray (tray) and keyboard (global hotkeys). Both are
 # guarded — missing ones simply disable that feature instead of crashing.
 
@@ -50,7 +50,7 @@ def configure_icon(menu_factory, title: str = "NIANG IA") -> bool:
     try:
         menu = menu_factory() if callable(menu_factory) else menu_factory
         icon = pystray.Icon(
-            name="Kaizumi",
+            name="NIANG_IA",
             icon=_build_icon(),
             title=title,
             menu=menu,

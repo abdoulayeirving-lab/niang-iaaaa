@@ -20,7 +20,7 @@ class ModelManager:
         self.root = Path(root)
 
     def object_detector(self) -> ModelSpec:
-        custom = os.getenv("KAIZUMI_YOLO_MODEL", "").strip()
+        custom = os.getenv("NIANG_IA_YOLO_MODEL", "").strip()
         path = Path(custom) if custom else self.root / "yolo11n.pt"
         return ModelSpec("object-detector", path, "detect", "custom" if custom else "builtin")
 

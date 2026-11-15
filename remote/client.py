@@ -1,5 +1,5 @@
 # remote/client.py
-# Kaizumi — transport abstraction.
+# NIANG IA — transport abstraction.
 #
 # kaizumi.remote_clients was removed with the WebSocket bridge. Only the
 # Bluetooth transport uses RemoteClient now; the core engine talks to it via

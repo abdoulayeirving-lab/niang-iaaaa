@@ -1,5 +1,5 @@
 # actions/translate.py
-# Kaizumi — translate any text between languages via Gemini
+# NIANG IA — translate any text between languages via Gemini
 
 import json
 import sys

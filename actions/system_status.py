@@ -1,5 +1,5 @@
 # actions/system_status.py
-# Kaizumi — System Health & Status Reporting (battery, CPU, RAM, disk, network, processes)
+# NIANG IA — System Health & Status Reporting (battery, CPU, RAM, disk, network, processes)
 
 import time
 import platform

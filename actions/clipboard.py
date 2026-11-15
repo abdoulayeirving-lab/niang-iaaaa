@@ -1,5 +1,5 @@
 # actions/clipboard.py
-# Kaizumi — Clipboard Manager (copy, paste, read, history)
+# NIANG IA — Clipboard Manager (copy, paste, read, history)
 
 import time
 import threading

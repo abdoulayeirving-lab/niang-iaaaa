@@ -1,12 +1,12 @@
 # actions/autostart.py
-# Kaizumi — start automatically on Windows login (HKCU Run key)
+# NIANG IA — start automatically on Windows login (HKCU Run key)
 
 import sys
 import winreg
 from pathlib import Path
 
 RUN_KEY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
-TASK_NAME    = "Kaizumi"
+TASK_NAME    = "NIANG IA"
 # Older installs registered the entry under another name — reuse whichever
 # one already exists instead of creating a second (double launch at login).
 KNOWN_TASK_NAMES = ("NIANG IA", "Kaizumi")

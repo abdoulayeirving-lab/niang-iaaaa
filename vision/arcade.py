@@ -1,4 +1,4 @@
-"""Deterministic game state for Kaizumi Vision Arcade."""
+"""Deterministic game state for NIANG IA Vision Arcade."""
 
 from __future__ import annotations
 

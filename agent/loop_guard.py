@@ -1,5 +1,5 @@
 """
-loop_guard.py — Anti-loop protection for Kaizumi's tool calls.
+loop_guard.py — Anti-loop protection for NIANG IA's tool calls.
 --------------------------------------------------------------
 Guards against two failure modes while the model drives tools in a live
 session:

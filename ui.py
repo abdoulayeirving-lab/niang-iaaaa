@@ -536,7 +536,7 @@ class KaizumiUI:
             pass
 
     def _build_command_deck(self):
-        """Build the live control surface around the central Kaizumi core."""
+        """Build the live control surface around the central NIANG IA core."""
         self._left_deck = tk.Frame(self.root, bg=self.col["panel"],
                                    highlightbackground=self.col["mid"], highlightthickness=1)
         self._right_deck = tk.Frame(self.root, bg=self.col["panel"],
@@ -2613,6 +2613,10 @@ class KaizumiUI:
         root.after(18, lambda: self._hide_to_tray(step + 1))
 
     def _close_application(self):
+        visibility = getattr(self, "assistant_visibility", None)
+        if visibility is not None:
+            visibility.shutdown(animate=True)
+            return
         if self.on_application_close:
             try:
                 self.on_application_close()

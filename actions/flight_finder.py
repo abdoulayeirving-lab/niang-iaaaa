@@ -1,8 +1,8 @@
 # actions/flight_finder.py
-# Kaizumi — Flight Finder
+# NIANG IA — Flight Finder
 #
 # Searches for flights using Google Flights via browser_control.
-# Results are spoken by Kaizumi. Optionally saved to Notepad or opened in browser.
+# Results are spoken by NIANG IA. Optionally saved to Notepad or opened in browser.
 #
 # Flow:
 #   1. Parse origin, destination, date, passengers from parameters
@@ -273,7 +273,7 @@ def _format_notepad(
     from datetime import datetime as dt
 
     lines = [
-        "Kaizumi — Flight Search Results",
+        "NIANG IA — Flight Search Results",
         "─" * 50,
         f"Route     : {origin} → {destination}",
         f"Date      : {date}",

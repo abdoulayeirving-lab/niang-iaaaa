@@ -1,5 +1,5 @@
 # actions/guardian.py
-# Kaizumi — PC Health Guardian: proactive smart alerts + battery health report.
+# NIANG IA — PC Health Guardian: proactive smart alerts + battery health report.
 #
 # Unlike monitor_alerts (user-defined threshold rules), the guardian works with
 # sensible defaults out of the box and needs zero configuration:

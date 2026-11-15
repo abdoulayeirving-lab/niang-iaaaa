@@ -8,12 +8,16 @@
 #   show()   -> restore + fade-in + brief topmost + focus  (wake word)
 #   hide()   -> fade-out + withdraw                        ("Dors Niang")
 #   confirm_quit() -> confirmation dialog, then full shutdown
+#   shutdown() -> full clean exit; with animate=True it plays a fade-out
+#                that reverses the startup fade-in (base -> 0) before quitting
 
 import threading
+from pathlib import Path
 
 FADE_STEPS = 10            # frames per fade
 FADE_DELAY_MS = 18         # ~180 ms total
 TOPMOST_RELEASE_MS = 1200  # keep the window on top this long after a wake
+CLOSING_ANIMATION_PATH = Path(__file__).resolve().parent / "assets" / "closing_animation.mp4"
 
 
 class AssistantVisibility:
@@ -22,6 +26,11 @@ class AssistantVisibility:
         self.ui = ui
         self._fade_job = None
         self._topmost_job = None
+        self._closing_window = None
+        self._closing_capture = None
+        self._closing_photo = None
+        self._shutdown_started = False
+        self._shutdown_complete = False
         # Cached presence flag: reading the Tk window state from another
         # thread deadlocks the interpreter, so we never call Tk here.
         self._hidden = False
@@ -200,21 +209,195 @@ class AssistantVisibility:
         if answer:
             self.shutdown()
 
-    def shutdown(self):
-        """Full, clean exit (stops listeners and services first)."""
-        self.ui._safe_ui(self._shutdown_on_ui)
+    def shutdown(self, animate: bool = True):
+        """Full, clean exit (stops listeners and services first).
 
-    def _shutdown_on_ui(self):
+        With ``animate=True`` the window plays a fade-out that reverses the
+        startup fade-in (alpha base -> transparent) before destroying.
+        """
+        self.ui._safe_ui(self._shutdown_on_ui, animate)
+
+    def _shutdown_on_ui(self, animate: bool = True):
+        if self._shutdown_started or self._shutdown_complete:
+            return
+        self._shutdown_started = True
+        self._prepare_shutdown()
+        if animate and self._play_closing_animation():
+            return
+        if animate:
+            # Reverse of the startup fade-in (alpha 0 -> base): fade out to 0.
+            self._cancel_fade()
+            try:
+                self.ui.root.attributes("-alpha", self._base_alpha())
+            except Exception:
+                pass
+            self._fade_out()  # base -> 0, then withdraws
+            try:
+                self.ui.root.after((FADE_STEPS + 2) * FADE_DELAY_MS, self._shutdown_destroy)
+            except Exception:
+                self._shutdown_destroy()
+            return
+        self._shutdown_destroy()
+
+    def _prepare_shutdown(self):
+        callback = getattr(self.ui, "on_application_close", None)
+        if callback:
+            try:
+                callback()
+            except Exception as exc:
+                self.ui.write_log(f"ERR: Nettoyage des services agent impossible : {exc}")
+
+        stop_voiceover = getattr(self.ui, "_stop_voiceover", None)
+        if stop_voiceover:
+            try:
+                stop_voiceover()
+            except Exception as exc:
+                self.ui.write_log(f"ERR: Arrêt de la voix off impossible : {exc}")
+
+        voiceover_path = getattr(self.ui, "_voiceover_path", None)
+        if voiceover_path:
+            try:
+                Path(voiceover_path).unlink(missing_ok=True)
+            except OSError as exc:
+                self.ui.write_log(f"ERR: Nettoyage audio temporaire impossible : {exc}")
+
+    def _play_closing_animation(self) -> bool:
+        if not CLOSING_ANIMATION_PATH.is_file():
+            self.ui.write_log(
+                "ERR: Animation de fermeture absente; utilisation du fondu de secours."
+            )
+            return False
+
+        capture = None
+        window = None
         try:
-            self.ui.on_application_close and self.ui.on_application_close()
-        except Exception:
-            pass
+            import cv2
+            import tkinter as tk
+            from PIL import Image, ImageTk
+
+            capture = cv2.VideoCapture(str(CLOSING_ANIMATION_PATH))
+            if not capture.isOpened():
+                capture.release()
+                self.ui.write_log(
+                    "ERR: Animation de fermeture illisible; utilisation du fondu de secours."
+                )
+                return False
+
+            ok, first_frame = capture.read()
+            if not ok:
+                capture.release()
+                self.ui.write_log(
+                    "ERR: Première image de fermeture illisible; utilisation du fondu de secours."
+                )
+                return False
+
+            source_height, source_width = first_frame.shape[:2]
+            cropped_height = max(1, int(source_height * 0.9))
+            screen_width = max(1, int(self.ui.root.winfo_screenwidth()))
+            screen_height = max(1, int(self.ui.root.winfo_screenheight()))
+            scale = min(
+                screen_width * 0.84 / source_width,
+                screen_height * 0.8 / cropped_height,
+            )
+            frame_width = max(1, int(source_width * scale))
+            frame_height = max(1, int(cropped_height * scale))
+            x = (screen_width - frame_width) // 2
+            y = (screen_height - frame_height) // 2
+
+            fps = float(capture.get(cv2.CAP_PROP_FPS))
+            frame_delay = max(1, round(1000 / fps)) if fps > 0 else 33
+
+            window = tk.Toplevel(self.ui.root)
+            window.overrideredirect(True)
+            window.configure(bg="#000000")
+            window.attributes("-topmost", True)
+            window.geometry(f"{frame_width}x{frame_height}+{x}+{y}")
+            label = tk.Label(window, bg="#000000", bd=0, highlightthickness=0)
+            label.pack(fill="both", expand=True)
+
+            self._closing_capture = capture
+            self._closing_window = window
+
+            def show_frame(frame):
+                height, width = frame.shape[:2]
+                frame = frame[:max(1, int(height * 0.9)), :]
+                frame = cv2.resize(
+                    frame, (frame_width, frame_height), interpolation=cv2.INTER_AREA,
+                )
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                photo = ImageTk.PhotoImage(Image.fromarray(rgb), master=window)
+                label.configure(image=photo)
+                label.image = photo
+                self._closing_photo = photo
+
+            def advance():
+                if self._closing_window is not window:
+                    return
+                try:
+                    ok, frame = capture.read()
+                    if not ok:
+                        self._finish_closing_animation()
+                        return
+                    show_frame(frame)
+                    window.after(frame_delay, advance)
+                except Exception as exc:
+                    self.ui.write_log(f"ERR: Animation de fermeture interrompue : {exc}")
+                    self._finish_closing_animation()
+
+            show_frame(first_frame)
+            window.lift()
+            window.update_idletasks()
+            window.after(frame_delay, advance)
+            return True
+        except Exception as exc:
+            if capture is not None:
+                capture.release()
+            if window is not None:
+                try:
+                    window.destroy()
+                except Exception:
+                    pass
+            self._closing_capture = None
+            self._closing_window = None
+            self._closing_photo = None
+            self.ui.write_log(
+                f"ERR: Animation de fermeture indisponible ({exc}); "
+                "utilisation du fondu de secours."
+            )
+            return False
+
+    def _finish_closing_animation(self):
+        self._shutdown_destroy()
+
+    def _shutdown_destroy(self):
+        if self._shutdown_complete:
+            return
+        self._shutdown_complete = True
+        self._finish_closing_animation_resources()
         try:
             self.ui.root.destroy()
         except Exception:
             pass
         import os
         os._exit(0)
+
+    def _finish_closing_animation_resources(self):
+        capture = self._closing_capture
+        self._closing_capture = None
+        if capture is not None:
+            try:
+                capture.release()
+            except Exception as exc:
+                self.ui.write_log(f"ERR: Libération de l’animation impossible : {exc}")
+
+        window = self._closing_window
+        self._closing_window = None
+        self._closing_photo = None
+        if window is not None:
+            try:
+                window.destroy()
+            except Exception as exc:
+                self.ui.write_log(f"ERR: Fermeture de la fenêtre d’animation impossible : {exc}")
 
     # ── Immediate voice stop (no confirmation) ──────────────────────────────
 
@@ -235,16 +418,7 @@ class AssistantVisibility:
                 pass
 
         def finish():
-            try:
-                self.ui.on_application_close and self.ui.on_application_close()
-            except Exception:
-                pass
-            try:
-                root.destroy()
-            except Exception:
-                pass
-            import os
-            os._exit(0)
+            self._shutdown_on_ui(animate=True)
 
         try:
             root.after(max(0, int(delay_ms)), finish)

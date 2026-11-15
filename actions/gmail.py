@@ -1,5 +1,5 @@
 # actions/gmail.py
-# Kaizumi — Gmail (send + read recent mail via SMTP/IMAP app password)
+# NIANG IA — Gmail (send + read recent mail via SMTP/IMAP app password)
 
 import json
 import re

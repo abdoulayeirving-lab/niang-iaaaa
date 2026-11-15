@@ -1,5 +1,5 @@
 # actions/vision_click.py
-# Kaizumi — click anywhere on screen by describing it (vision → coordinates)
+# NIANG IA — click anywhere on screen by describing it (vision → coordinates)
 
 import io
 import json

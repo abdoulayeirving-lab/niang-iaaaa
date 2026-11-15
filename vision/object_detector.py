@@ -22,7 +22,7 @@ class DetectorConfig:
 class ObjectDetector:
     """Run YOLO when an optional model/runtime is available.
 
-    The detector is deliberately lazy: importing Kaizumi never loads a large
+    The detector is deliberately lazy: importing NIANG IA never loads a large
     neural model. A missing model or optional ``ultralytics`` package produces
     a readable status instead of breaking the camera or assistant.
     """
@@ -129,5 +129,5 @@ class ObjectDetector:
 
 
 def default_detector(model_path: str | Path | None = None) -> ObjectDetector:
-    """Create a detector with conservative defaults for Kaizumi."""
+    """Create a detector with conservative defaults for NIANG IA."""
     return ObjectDetector(DetectorConfig(model_path=model_path))

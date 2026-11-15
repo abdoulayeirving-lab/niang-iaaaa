@@ -1,5 +1,5 @@
 """
-resilience.py — Tool execution hardening for Kaizumi.
+resilience.py — Tool execution hardening for NIANG IA.
 ------------------------------------------------------
 Adds:
   - ToolResult: structured outcome of a tool call (ok / content / kind / timing).

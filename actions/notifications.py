@@ -1,5 +1,5 @@
 # actions/notifications.py
-# Kaizumi — Windows toast notifications + native notifications
+# NIANG IA — Windows toast notifications + native notifications
 
 import sys
 
@@ -27,7 +27,7 @@ def notify(
     if _WINOTIFY:
         try:
             note = Notification(
-                app_id="Kaizumi",
+                app_id="NIANG_IA",
                 title=title,
                 msg=message,
                 duration="short",

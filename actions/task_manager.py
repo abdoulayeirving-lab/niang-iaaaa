@@ -1,5 +1,5 @@
 # actions/task_manager.py
-# Kaizumi — Agent Task Status & Control
+# NIANG IA — Agent Task Status & Control
 
 from agent.task_queue import get_queue
 

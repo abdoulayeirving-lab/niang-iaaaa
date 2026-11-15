@@ -9,7 +9,7 @@ def get_base_dir():
     return Path(__file__).resolve().parent.parent
 
 
-OUT_DIR = Path.home() / "Documents" / "Kaizumi"
+OUT_DIR = Path.home() / "Documents" / "NIANG IA"
 
 
 def _ensure_out_dir() -> Path:

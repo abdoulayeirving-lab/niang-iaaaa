@@ -1,5 +1,5 @@
 # actions/document_qa.py
-# Kaizumi — question-answering over any document or web page
+# NIANG IA — question-answering over any document or web page
 # (pdf, txt, md, html, docx, csv, pptx, xlsx, and http(s) URLs)
 
 import os
@@ -243,7 +243,7 @@ def _is_private_target(url: str) -> bool:
 def _safe_get_url(url: str):
     if not _REQUESTS:
         raise RuntimeError("requests is not installed.")
-    headers = {"User-Agent": "Mozilla/5.0 (Kaizumi/assistant)"}
+    headers = {"User-Agent": "Mozilla/5.0 (NIANG_IA/assistant)"}
     from urllib.parse import urljoin
 
     current = url

@@ -1,7 +1,7 @@
 # remote/bluetooth_transport.py
-# Kaizumi — Bluetooth (BLE) phone transport.
+# NIANG IA — Bluetooth (BLE) phone transport.
 #
-# Windows acts as a BLE GATT peripheral advertising a "Kaizumi Remote" service.
+# Windows acts as a BLE GATT peripheral advertising a "NIANG IA Remote" service.
 # A native Android app scans, connects, pairs (the write characteristic requires
 # encryption+authentication, so Windows forces Bluetooth pairing on first
 # write), authenticates with the bridge token, then exchanges JSON messages.
@@ -227,7 +227,7 @@ class BluetoothBridge:
         elif mtype == "status":
             ui = self.kaizumi.ui
             await self._reply(client, "response", {
-                "text": f"Kaizumi is running. Mode: {getattr(ui, 'state', '?')}.",
+                "text": f"NIANG IA is running. Mode: {getattr(ui, 'state', '?')}.",
                 "state": getattr(ui, "state", "?"),
                 "muted": getattr(ui, "muted", False),
             }, msg_id)
@@ -271,7 +271,7 @@ class BluetoothBridge:
             send_lock = getattr(self.kaizumi, "_send_lock", None)
             if session is None or send_lock is None:
                 await self._reply(client, "response",
-                                  {"text": "Kaizumi is not ready yet, sir."}, msg_id)
+                                  {"text": "NIANG IA is not ready yet, sir."}, msg_id)
                 return
             try:
                 async with send_lock:
@@ -364,7 +364,7 @@ class BluetoothBridge:
         write_params.write_protection_level = (
             GattProtectionLevel.ENCRYPTION_AND_AUTHENTICATION_REQUIRED
         )
-        write_params.user_description = "Kaizumi In"
+        write_params.user_description = "NIANG IA In"
         wc = await provider.service.create_characteristic_async(
             uuid.UUID(WRITE_UUID), write_params
         )
@@ -377,7 +377,7 @@ class BluetoothBridge:
         # Notify characteristic (PC → phone).
         notify_params = GattLocalCharacteristicParameters()
         notify_params.characteristic_properties = GattCharacteristicProperties.NOTIFY
-        notify_params.user_description = "Kaizumi Out"
+        notify_params.user_description = "NIANG IA Out"
         nc = await provider.service.create_characteristic_async(
             uuid.UUID(NOTIFY_UUID), notify_params
         )
@@ -415,7 +415,7 @@ class BluetoothBridge:
         self._provider = provider
         self._advertising = True
         print(f"[Bluetooth] 📡 BLE peripheral ON — service "
-              f"{SERVICE_UUID} (scan for 'Kaizumi Remote')")
+              f"{SERVICE_UUID} (scan for 'NIANG IA Remote')")
         return True
 
     async def _on_clients_changed(self, notify_char, added, removed):

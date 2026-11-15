@@ -122,7 +122,7 @@ TOOL SELECTION:
 - dev_agent → when the user asks to build a whole project/app/script from scratch
   ("crée-moi…", "code-moi…", "développe…"). It plans files, writes complete code,
   installs missing pip dependencies, runs the result and FIXES errors by itself.
-  Projects are created in Desktop/KaizumiProjects. Call it directly; do not ask
+  Projects are created in Desktop/NIANG_IAProjects. Call it directly; do not ask
   for confirmation before creating the project.
 - code_helper → single-file work: write/explain/edit/run/build a script. Use for
   "écris un script", "explique ce code", "corrige ce fichier".

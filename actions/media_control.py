@@ -1,5 +1,5 @@
 # actions/media_control.py
-# Kaizumi — universal media/music control via global media keys
+# NIANG IA — universal media/music control via global media keys
 # (works with Spotify, YouTube, YouTube Music, VLC, Windows Media Player, ...)
 
 _MEDIA_KEYS = {

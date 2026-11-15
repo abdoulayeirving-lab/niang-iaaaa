@@ -315,7 +315,7 @@ def _save_to_notepad(content: str, video_url: str) -> str:
     filepath = desktop / filename
 
     header = (
-        f"Kaizumi — YouTube Summary\n"
+        f"NIANG IA — YouTube Summary\n"
         f"{'─' * 50}\n"
         f"URL    : {video_url}\n"
         f"Date   : {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"

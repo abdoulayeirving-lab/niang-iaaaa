@@ -335,7 +335,7 @@ class ProjectExecutionManager:
                 "pid": external_pid,
                 "url": self._healthy_url(profile) if profile["kind"] == "web" else None,
                 "verified": False,
-                "note": "The project appears to be running outside NIANG's process manager; it was not started again.",
+                "note": "The project appears to be running outside NIANG IA's process manager; it was not started again.",
             }
 
         candidate_ports = _ports(profile) if profile["kind"] == "web" else []

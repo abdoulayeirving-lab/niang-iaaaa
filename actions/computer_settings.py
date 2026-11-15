@@ -1,5 +1,5 @@
 # actions/computer_settings.py
-# Kaizumi — Computer Settings & UI Controls
+# NIANG IA — Computer Settings & UI Controls
 #
 # Kullanıcı "sesi aç", "uygulamayı kapat", "tam ekran yap", "şunu yaz" gibi
 # bilgisayar kontrol komutları verdiğinde bu dosya devreye girer.

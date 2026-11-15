@@ -1,4 +1,4 @@
-"""Typed events emitted by Kaizumi vision pipelines."""
+"""Typed events emitted by NIANG IA vision pipelines."""
 
 from __future__ import annotations
 

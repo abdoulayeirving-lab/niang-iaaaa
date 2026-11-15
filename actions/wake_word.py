@@ -1,8 +1,8 @@
 ﻿# actions/wake_word.py
-# Kaizumi — Hands-free "Hey Kaizumi" wake word activation
+# NIANG IA — Hands-free "Hey Niang" wake word activation
 #
 # Uses openwakeword (free, local, on-device) to detect the phrase "hey kaizumi"
-# from the microphone in the background. When detected, Kaizumi un-mutes /
+# from the microphone in the background. When detected, NIANG IA un-mutes /
 # signals that it's listening without needing keyboard or button presses.
 
 import time
@@ -47,7 +47,7 @@ DETECT_THRESHOLD = 0.6
 
 class WakeWordService:
 
-    def __init__(self, model_file: str = "hey_kaizumi_v0.1.onnx", phrase: str = "Hey Kaizumi"):
+    def __init__(self, model_file: str = "hey_kaizumi_v0.1.onnx", phrase: str = "Hey Niang"):
         self._running    = False
         self._thread     = None
         self._on_detect  = None      # callback invoked on wake word
@@ -231,7 +231,7 @@ def wake_word(
     if action in ("status", "info"):
         state = "active" if engine._running else "inactive"
         if engine_name == "kaizumi":
-            return f"Wake word is {state} (Hey Kaizumi). Model: reference loaded."
+            return f"Wake word is {state} (Hey Niang). Model: reference loaded."
         avail = "available" if engine.available else "unavailable (install openwakeword)"
-        return f"Wake word is {state} (Hey Kaizumi). Model: {avail}."
+        return f"Wake word is {state} (Hey Niang). Model: {avail}."
     return f"Unknown wake word action: {action}, sir. Use start | stop | status | record"

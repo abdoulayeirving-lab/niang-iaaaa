@@ -79,7 +79,7 @@ def setup_logger(base_dir) -> Path:
     sys.stderr = _Tee(_PRIMARY_ERR, _LOGFILE)
 
     log("=" * 60)
-    log(f"Kaizumi started — log file: {log_file}")
+    log(f"NIANG IA started — log file: {log_file}")
     log(f"Python {sys.version.split()[0]} | running from {Path(base_dir)}")
     log("=" * 60)
     return log_file

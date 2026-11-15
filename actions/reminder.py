@@ -38,7 +38,7 @@ def reminder(
         if target_dt <= datetime.now():
             return "That time is already in the past."
 
-        task_name    = f"KaizumiReminder_{target_dt.strftime('%Y%m%d_%H%M')}"
+        task_name    = f"NIANG_IA_Reminder_{target_dt.strftime('%Y%m%d_%H%M')}"
         safe_message = message.replace('"', '').replace("'", "").strip()[:200]
         xml_message  = xml_escape(safe_message)
         py_message   = (safe_message
@@ -72,8 +72,8 @@ except Exception:
 try:
     from winotify import Notification
     Notification(
-        app_id="Kaizumi",
-        title="Kaizumi Reminder",
+        app_id="NIANG_IA",
+        title="NIANG IA Reminder",
         msg="{py_message}",
         duration="long",
     ).show()
@@ -96,7 +96,7 @@ except Exception:
         xml_content = f'''<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
-    <Description>Kaizumi Reminder: {xml_message}</Description>
+    <Description>NIANG IA Reminder: {xml_message}</Description>
   </RegistrationInfo>
   <Triggers>
     <TimeTrigger>

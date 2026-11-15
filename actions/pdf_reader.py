@@ -1,5 +1,5 @@
 # actions/pdf_reader.py
-# Kaizumi — PDF reader + lightweight RAG (extract, chunk, Gemini QA)
+# NIANG IA — PDF reader + lightweight RAG (extract, chunk, Gemini QA)
 
 import json
 import re

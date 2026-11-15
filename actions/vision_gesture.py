@@ -1,5 +1,5 @@
 # actions/vision_gesture.py
-# Kaizumi — Full-body computer vision service (FREE, local, no AI API)
+# NIANG IA — Full-body computer vision service (FREE, local, no AI API)
 #
 # Uses Google MediaPipe Tasks (free, on-device, accurate) + OpenCV:
 #   - HolisticLandmarker: full-body pose (33 pts) + hands (21 pts ×2) + face mesh
