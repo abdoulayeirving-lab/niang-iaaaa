@@ -1,5 +1,8 @@
 import os
+import subprocess
+import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -133,6 +136,70 @@ class WorkspaceToolTests(unittest.TestCase):
             with self.subTest(path=path), self.assertRaises(workspace_tools.WorkspaceError):
                 workspace_tools.write_file(path, "not allowed")
 
+    def test_rejects_symbolic_links_and_windows_junctions(self):
+        outside = self.root.parent / f"{self.root.name}-outside"
+        outside.mkdir()
+        (outside / "fictional.txt").write_text("fictional", encoding="utf-8")
+        link = self.root / "symbolic-link.txt"
+        junction = self.root / "junction"
+        try:
+            try:
+                os.symlink(outside / "fictional.txt", link)
+            except OSError as exc:
+                self.skipTest(f"Symbolic links are unavailable in this Windows environment: {exc}")
+
+            with self.assertRaises(workspace_tools.WorkspaceError):
+                workspace_tools.read_file("symbolic-link.txt", workspace_root=self.root)
+
+            result = subprocess.run(
+                [
+                    os.environ.get("COMSPEC", "cmd.exe"),
+                    "/d",
+                    "/c",
+                    "mklink",
+                    "/J",
+                    str(junction),
+                    str(outside),
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                shell=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue(junction.is_junction())
+            with self.assertRaises(workspace_tools.WorkspaceError):
+                workspace_tools._workspace_root(junction)
+            from niang_ia.integrations.cline.cline_config import ClineConfig
+            with self.assertRaises(ValueError):
+                ClineConfig(junction)
+            for operation in (
+                lambda: workspace_tools.read_file("junction/fictional.txt", workspace_root=self.root),
+                lambda: workspace_tools.write_file("junction/new.txt", "fictional", workspace_root=self.root),
+                lambda: workspace_tools.list_files("junction", workspace_root=self.root),
+            ):
+                with self.assertRaises(workspace_tools.WorkspaceError):
+                    operation()
+        finally:
+            if junction.exists():
+                os.rmdir(junction)
+            if outside.exists():
+                import shutil
+                shutil.rmtree(outside)
+
+    def test_rejects_hardlinked_file_aliases(self):
+        outside = self.root.parent / f"{self.root.name}-outside.txt"
+        outside.write_text("fictional", encoding="utf-8")
+        alias = self.root / "hardlink.txt"
+        try:
+            os.link(outside, alias)
+            with self.assertRaisesRegex(workspace_tools.WorkspaceError, "hard links"):
+                workspace_tools.read_file("hardlink.txt", workspace_root=self.root)
+        finally:
+            alias.unlink(missing_ok=True)
+            outside.unlink(missing_ok=True)
+
     def test_skips_credentials_and_environment_files_from_listing(self):
         (self.root / "api_keys.json").write_text('{"api_key":"not for the model"}')
         (self.root / ".env.local").write_text("TOKEN=private")
@@ -159,15 +226,17 @@ class WorkspaceToolTests(unittest.TestCase):
         with patch.object(workspace_tools.shutil, "which", return_value="C:\\tools\\git.exe"):
             with patch.object(
                 workspace_tools.subprocess,
-                "run",
-                return_value=type("Completed", (), {
-                    "returncode": 0, "stdout": "clean", "stderr": "",
+                "Popen",
+                return_value=type("Process", (), {
+                    "returncode": 0,
+                    "pid": 99999999,
+                    "communicate": lambda self, timeout=None: ("clean", ""),
                 })(),
-            ) as run:
+            ) as popen:
                 result = workspace_tools.run_check("git-status")
 
         self.assertIn("Check git-status passed", result)
-        args, kwargs = run.call_args
+        args, kwargs = popen.call_args
         self.assertEqual(args[0], ["C:\\tools\\git.exe", "status", "--short"])
         self.assertFalse(kwargs["shell"])
         self.assertEqual(Path(kwargs["cwd"]), self.root)
@@ -180,14 +249,60 @@ class WorkspaceToolTests(unittest.TestCase):
             with patch.object(workspace_tools.shutil, "which", return_value="C:\\tools\\git.exe"):
                 with patch.object(
                     workspace_tools.subprocess,
-                    "run",
-                    return_value=type("Completed", (), {
-                        "returncode": 0, "stdout": "", "stderr": "",
+                    "Popen",
+                    return_value=type("Process", (), {
+                        "returncode": 0,
+                        "pid": 99999999,
+                        "communicate": lambda self, timeout=None: ("", ""),
                     })(),
-                ) as run:
+                ) as popen:
                     workspace_tools.run_check("git-status")
 
-        self.assertNotIn("GEMINI_API_KEY", run.call_args.kwargs["env"])
+        self.assertNotIn("GEMINI_API_KEY", popen.call_args.kwargs["env"])
+
+    def test_cancelled_check_terminates_its_child_process_tree(self):
+        pid_file = self.root / "child.pid"
+        marker = self.root.parent / f"{self.root.name}-child-marker.txt"
+        child_code = (
+            "import os,time; from pathlib import Path; "
+            f"Path({str(pid_file)!r}).write_text(str(os.getpid()), encoding='utf-8'); "
+            "time.sleep(20); "
+            f"Path({str(marker)!r}).write_text('fictional child ran', encoding='utf-8')"
+        )
+        parent_code = (
+            "import subprocess,sys,time; "
+            f"subprocess.Popen([sys.executable, '-c', {child_code!r}]); "
+            "time.sleep(20)"
+        )
+        cancel_flag = threading.Event()
+        timer = threading.Timer(0.5, cancel_flag.set)
+        timer.start()
+        child_pid = None
+        try:
+            with self.assertRaisesRegex(workspace_tools.WorkspaceError, "cancelled"):
+                workspace_tools._run_workspace_process(
+                    [sys.executable, "-c", parent_code],
+                    root=self.root,
+                    timeout=30,
+                    cancel_flag=cancel_flag,
+                )
+            self.assertTrue(pid_file.exists(), "The fixture child did not start.")
+            child_pid = int(pid_file.read_text(encoding="utf-8"))
+            self.assertFalse(marker.exists(), "A child process continued after cancellation.")
+            import psutil
+            with self.assertRaises(psutil.NoSuchProcess):
+                psutil.Process(child_pid).status()
+        finally:
+            timer.cancel()
+            if child_pid is not None:
+                try:
+                    import psutil
+                    psutil.Process(child_pid).kill()
+                except ImportError:
+                    pass
+                except psutil.NoSuchProcess:
+                    pass
+            marker.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

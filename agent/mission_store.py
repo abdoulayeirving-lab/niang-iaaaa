@@ -65,16 +65,22 @@ class MissionStore:
             connection.close()
 
     def save(self, task_id: str, status: str, payload: dict[str, Any]) -> None:
-        encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        encrypted = _protect(encoded)
-        with self._connection() as connection:
-            connection.execute(
-                "INSERT INTO missions (task_id, status, updated_at, payload) "
-                "VALUES (?, ?, ?, ?) ON CONFLICT(task_id) DO UPDATE SET "
-                "status=excluded.status, updated_at=excluded.updated_at, "
-                "payload=excluded.payload",
-                (task_id, status, time.time(), encrypted),
-            )
+        try:
+            encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            encrypted = _protect(encoded)
+        except Exception as exc:
+            raise RuntimeError(f"mission persistence failed for {task_id}: {type(exc).__name__}: {str(exc)[:200]}") from exc
+        try:
+            with self._connection() as connection:
+                connection.execute(
+                    "INSERT INTO missions (task_id, status, updated_at, payload) "
+                    "VALUES (?, ?, ?, ?) ON CONFLICT(task_id) DO UPDATE SET "
+                    "status=excluded.status, updated_at=excluded.updated_at, "
+                    "payload=excluded.payload",
+                    (task_id, status, time.time(), encrypted),
+                )
+        except Exception as exc:
+            raise RuntimeError(f"mission persistence failed for {task_id}: {type(exc).__name__}: {str(exc)[:200]}") from exc
 
     def load_all(self) -> list[dict[str, Any]]:
         with self._connection() as connection:
@@ -96,7 +102,7 @@ class MissionStore:
         with self._connection() as connection:
             cursor = connection.execute(
                 "DELETE FROM missions WHERE updated_at < ? AND status IN "
-                "('completed', 'partial', 'failed', 'cancelled', 'action_unknown', 'interrupted')",
+                "('completed', 'partial', 'failed', 'blocked', 'cancelled', 'action_unknown', 'interrupted')",
                 (cutoff,),
             )
             return cursor.rowcount

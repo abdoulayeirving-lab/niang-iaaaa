@@ -106,12 +106,16 @@ class ToolRegistryTests(unittest.TestCase):
 
     def test_invalid_model_plan_fails_closed_instead_of_using_a_fallback_action(self):
         response = type("Response", (), {"text": "not valid json"})()
-        with patch("api_keys.GeminiModel") as model:
-            model.return_value.generate_content.return_value = response
+        model = unittest.mock.Mock()
+        model.generate_content.return_value = response
+        with patch(
+            "niang_ia.model_orchestrator.runtime.get_gemini_model",
+            return_value=model,
+        ):
             with self.assertRaises(PlanGenerationError):
                 create_plan("inspect the project")
 
-        model.return_value.generate_content.assert_called_once()
+        model.generate_content.assert_called_once()
 
     def test_agent_tool_catalog_is_the_planners_allowed_tool_source(self):
         from agent.planner import ALLOWED_TOOLS

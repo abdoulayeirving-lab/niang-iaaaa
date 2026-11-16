@@ -107,6 +107,7 @@ TOOL_RISK = {
     "code_helper":       Risk.MEDIUM,
     "dev_agent":         Risk.MEDIUM,
     "agent_task":        Risk.MEDIUM,
+    "software_development": Risk.HIGH,
     "file_controller":   Risk.MEDIUM,
     "task_manager":      Risk.MEDIUM,
     "game_updater":      Risk.HIGH,
@@ -568,6 +569,13 @@ def describe(name: str, args: dict | None) -> str:
     args = args or {}
     action = str(args.get("action", "")).lower().strip()
 
+    if name == "software_development":
+        mode = str(args.get("mode", "assisted")).strip().lower()
+        return (
+            f"start the requested Cline software mission in {mode} mode "
+            "inside the authorized project workspace"
+        )
+
     if name == "terminal_control":
         if action in {"run", "start"}:
             from agent.terminal_agent import command_risk
@@ -785,7 +793,12 @@ def sanitize(name: str, args: dict | None) -> dict:
     for k, v in args.items():
         lk = str(k).lower()
         action = str(args.get("action", "")).lower()
-        if name == "browser_control" and action in {"type", "fill_form"} and lk in {
+        if name == "software_development" and lk == "goal":
+            from agent.secrets import redact_if_sensitive
+            safe[k] = redact_if_sensitive(str(v), "[software mission omitted because it may contain a secret]")
+        elif name == "software_development" and lk in {"confirm_token", "confirm"}:
+            safe[k] = "***" if lk == "confirm_token" else bool(v)
+        elif name == "browser_control" and action in {"type", "fill_form"} and lk in {
             "text", "value", "fields",
         }:
             safe[k] = "[browser input omitted]"

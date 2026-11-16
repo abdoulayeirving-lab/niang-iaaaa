@@ -1,0 +1,81 @@
+# Cline software-development integration
+
+NIANG IA routes software-project missions to `ClineEngine` through the existing
+`TaskQueue`. The adapter uses the installed Cline Agent SDK (`@cline/agents`)
+behind a small Node.js worker; Python and Node exchange newline-delimited JSON
+messages. The Cline CLI is used for installation/version health checks, not for
+unrestricted task execution.
+
+## Start a mission
+
+From the repository root, start NIANG IA with:
+
+```powershell
+py -3.12 main.py
+```
+
+Keep the local Ollama service running and ensure the selected local model is
+already available before opening the development panel (default: `qwen2.5:7b`,
+chosen for native tool-calling compatibility with this SDK/Ollama stack).
+
+Open **DÉVELOPPEMENT LOGICIEL** in NIANG IA, select an existing project folder,
+choose a mode, and enter the task. NIANG IA opens that folder in a new VS Code
+window before starting Cline. The development panel shows progress and completed
+workspace actions as they happen; VS Code reflects the Cline file writes in the
+open project. If a voice request starts the mission, NIANG IA opens the
+development panel on the configured workspace and updates it while the task is
+running. The chat router can also start a mission in the configured
+`NIANG_IA_WORKSPACE_ROOT` after NIANG IA's confirmation gate; it opens the
+development panel and the same workspace in VS Code automatically.
+
+The local model defaults to `qwen2.5:7b` through Ollama at
+`http://127.0.0.1:11434` (models that emit tool calls as plain text rather than
+native tool calls are not compatible with this SDK stack). Cline missions fail
+closed unless the Cline CLI,
+Agent SDK, Ollama service, and selected local model are available. No Gemini,
+OpenAI, Anthropic, or other provider key is copied to Cline or passed to the
+worker. The SDK can represent additional providers, but this integration
+deliberately enables only local Ollama to avoid paid calls and new credentials.
+Model availability alone does not prove native tool-calling compatibility;
+missions that finish without executing a workspace tool are marked failed.
+
+## Modes and permissions
+
+- **Plan**: exposes only workspace list, read, and text-search tools.
+- **Assisted**: asks before every write, patch, project check, or dependency install.
+- **Autonomous controlled**: allows bounded in-workspace edits and new-file
+  creation; overwrites, multi-file patches, dependency installs, and executable
+  project checks still require approval.
+
+The agent receives no general shell, delete, deployment, browser, or system
+administration tool. Python and Node dependency installs are project-scoped;
+Python requires a project `.venv`/`venv`, and npm lifecycle scripts are disabled.
+Tests and build scripts run as the current Windows user, so NIANG IA asks before
+running them; this is not an OS-level sandbox. UAC is not bypassed and no
+administrator command is launched.
+
+The adapter caps each mission at 20 workspace actions, each check/install at
+180 seconds, and a mission at 1,800 seconds. Workspace paths are resolved
+relative to the selected root; symlinks, credential files, environment files,
+generated folders, hard-linked files, junctions, and oversized text files are
+denied. Child processes receive an allowlisted environment without API-key
+variables; cancellation and timeout handling also tracks and terminates
+descendant processes. These checks reduce accidental exposure but do not replace
+an OS sandbox. Mission history continues to use NIANG IA's encrypted mission
+store.
+
+Raw CLI task execution is intentionally not used: Cline CLI's built-in tools
+include shell execution and do not provide the host-controlled workspace tool
+boundary and per-action approval callback used here. SDK tool policies are
+explicit; only read-only tools are auto-approved.
+
+## Validation
+
+Run the isolated unit suite without requiring a live Cline task or paid model:
+
+```powershell
+py -3.12 tests\test_cline_integration.py
+```
+
+These tests use a fake process for protocol behavior. A passing unit suite does
+not claim a real model-backed coding mission was executed.

@@ -339,6 +339,9 @@ class KaizumiUI:
         self.on_text_command = None
         self.on_agent_start = None
         self.on_agent_cancel = None
+        self.on_cline_start = None
+        self.on_cline_cancel = None
+        self.on_cline_health = None
         self.on_application_close = None
         self._agent_window = None
         self._agent_task_id = None
@@ -347,6 +350,23 @@ class KaizumiUI:
         self._agent_screenshot_path = None
         self._agent_screenshot_image = None
         self._agent_refresh_after = None
+        self._cline_window = None
+        self._cline_task_id = None
+        self._cline_refresh_after = None
+        self._cline_history_task_id = None
+        self._cline_history_count = 0
+        self._cline_history_ids = []
+        self._cline_display_task_id = None
+        self._cline_mode_var = None
+        self._cline_workspace_var = None
+        self._cline_goal = None
+        self._cline_status_label = None
+        self._cline_health_label = None
+        self._cline_history_list = None
+        self._cline_action_text = None
+        self._cline_report_text = None
+        self._cline_start_button = None
+        self._cline_stop_button = None
         self._diagnostics_window = None
         self._diagnostics_output = None
         self._diagnostics_status = None
@@ -545,6 +565,7 @@ class KaizumiUI:
         self._deck_title(self._right_deck, "VISION", self.col["acc2"])
 
         self._deck_label(self._left_deck, "ACTIONS RAPIDES")
+        self._deck_button(self._left_deck, "DÉVELOPPEMENT LOGICIEL", "__open_development__")
         self._deck_button(self._left_deck, "AGENT AUTONOME", "__open_agent__")
         self._deck_button(self._left_deck, "DIAGNOSTIC DU PC", "__open_pc_diagnostics__")
         self._deck_button(self._left_deck, "JEUX DE VISION", "__open_arcade__")
@@ -706,6 +727,9 @@ class KaizumiUI:
             ).start()
 
     def _deck_command(self, command, mode=None):
+        if command == "__open_development__":
+            self.open_development_panel()
+            return
         if command == "__open_agent__":
             self.open_agent_panel()
             return
@@ -912,6 +936,418 @@ class KaizumiUI:
 
         window.protocol("WM_DELETE_WINDOW", close_panel)
         self._refresh_agent_panel()
+
+    def open_development_panel(self):
+        if self._cline_window is not None and self._cline_window.winfo_exists():
+            self._cline_window.deiconify()
+            self._cline_window.lift()
+            self._refresh_cline_panel()
+            return
+
+        window = tk.Toplevel(self.root)
+        window.title("NIANG IA — Développement logiciel")
+        window.geometry("900x790")
+        window.minsize(740, 640)
+        window.configure(bg=self.col["bg"])
+        self._cline_window = window
+
+        tk.Label(
+            window,
+            text="MOTEUR DE DÉVELOPPEMENT CLINE",
+            anchor="w",
+            bg=self.col["bg"],
+            fg=self.col["pri"],
+            font=("Consolas", 12, "bold"),
+        ).pack(fill="x", padx=14, pady=(14, 4))
+        tk.Label(
+            window,
+            text="VS Code s’ouvre sur le projet ; les fichiers et actions apparaissent au fil de la mission.",
+            anchor="w",
+            bg=self.col["bg"],
+            fg=self.col["dim"],
+            font=("Segoe UI", 8),
+        ).pack(fill="x", padx=14, pady=(0, 4))
+        self._cline_health_label = tk.Label(
+            window,
+            text="Vérification de Cline et du modèle local…",
+            anchor="w",
+            bg=self.col["bg"],
+            fg=self.col["dim"],
+            font=("Consolas", 8),
+        )
+        self._cline_health_label.pack(fill="x", padx=14)
+
+        folder_row = tk.Frame(window, bg=self.col["bg"])
+        folder_row.pack(fill="x", padx=14, pady=(10, 4))
+        tk.Label(
+            folder_row,
+            text="PROJET",
+            bg=self.col["bg"],
+            fg=self.col["pri"],
+            font=("Consolas", 9, "bold"),
+        ).pack(side="left", padx=(0, 8))
+        configured_root = os.environ.get("NIANG_IA_WORKSPACE_ROOT", "")
+        self._cline_workspace_var = tk.StringVar(value=configured_root)
+        tk.Entry(
+            folder_row,
+            textvariable=self._cline_workspace_var,
+            bg=self.col["input"],
+            fg=self.col["text"],
+            insertbackground=self.col["text"],
+            relief="flat",
+        ).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        tk.Button(
+            folder_row,
+            text="CHOISIR…",
+            command=self._choose_cline_workspace,
+            bg=self.col["input"],
+            fg=self.col["text"],
+            relief="flat",
+        ).pack(side="right")
+
+        mode_row = tk.Frame(window, bg=self.col["bg"])
+        mode_row.pack(fill="x", padx=14, pady=4)
+        tk.Label(
+            mode_row,
+            text="MODE",
+            bg=self.col["bg"],
+            fg=self.col["pri"],
+            font=("Consolas", 9, "bold"),
+        ).pack(side="left", padx=(0, 8))
+        self._cline_mode_var = tk.StringVar(value="assisted")
+        tk.OptionMenu(
+            mode_row,
+            self._cline_mode_var,
+            "plan",
+            "assisted",
+            "autonomous_controlled",
+        ).pack(side="left")
+        tk.Label(
+            mode_row,
+            text="Plan = lecture seule • Assisté = confirmation des modifications • Autonome contrôlé = liste d’actions limitée",
+            bg=self.col["bg"],
+            fg=self.col["dim"],
+            font=("Segoe UI", 8),
+        ).pack(side="left", padx=8)
+
+        tk.Label(
+            window,
+            text="MISSION LOGICIELLE",
+            anchor="w",
+            bg=self.col["bg"],
+            fg=self.col["pri"],
+            font=("Consolas", 9, "bold"),
+        ).pack(fill="x", padx=14, pady=(8, 3))
+        self._cline_goal = tk.Text(
+            window,
+            height=4,
+            wrap="word",
+            bg=self.col["input"],
+            fg=self.col["text"],
+            insertbackground=self.col["text"],
+            relief="flat",
+        )
+        self._cline_goal.pack(fill="x", padx=14)
+
+        controls = tk.Frame(window, bg=self.col["bg"])
+        controls.pack(fill="x", padx=14, pady=8)
+        self._cline_start_button = tk.Button(
+            controls,
+            text="▶ DÉMARRER",
+            command=self._start_cline_mission,
+            bg=self.col["input"],
+            fg=self.col["green"],
+            relief="flat",
+        )
+        self._cline_start_button.pack(side="left", padx=(0, 7))
+        self._cline_stop_button = tk.Button(
+            controls,
+            text="■ ARRÊTER",
+            command=self._stop_cline_mission,
+            bg=self.col["input"],
+            fg=self.col["red"],
+            relief="flat",
+            state="disabled",
+        )
+        self._cline_stop_button.pack(side="left")
+        self._cline_status_label = tk.Label(
+            controls,
+            text="Inactif",
+            anchor="w",
+            bg=self.col["bg"],
+            fg=self.col["text"],
+            font=("Consolas", 9),
+        )
+        self._cline_status_label.pack(side="left", fill="x", expand=True, padx=10)
+
+        tk.Label(
+            window,
+            text="HISTORIQUE DES MISSIONS CLINE",
+            anchor="w",
+            bg=self.col["bg"],
+            fg=self.col["pri"],
+            font=("Consolas", 9, "bold"),
+        ).pack(fill="x", padx=14, pady=(4, 3))
+        self._cline_history_list = tk.Listbox(
+            window,
+            height=5,
+            bg=self.col["panel"],
+            fg=self.col["text"],
+            selectbackground=self.col["mid"],
+            relief="flat",
+        )
+        self._cline_history_list.pack(fill="x", padx=14)
+        self._cline_history_list.bind("<<ListboxSelect>>", self._select_cline_history)
+
+        tk.Label(
+            window,
+            text="FICHIERS / ACTIONS / CONTRÔLES",
+            anchor="w",
+            bg=self.col["bg"],
+            fg=self.col["pri"],
+            font=("Consolas", 9, "bold"),
+        ).pack(fill="x", padx=14, pady=(8, 3))
+        self._cline_action_text = tk.Text(
+            window,
+            height=11,
+            wrap="word",
+            state="disabled",
+            bg=self.col["panel"],
+            fg=self.col["text"],
+            relief="flat",
+        )
+        self._cline_action_text.pack(fill="both", expand=True, padx=14)
+
+        tk.Label(
+            window,
+            text="RAPPORT",
+            anchor="w",
+            bg=self.col["bg"],
+            fg=self.col["pri"],
+            font=("Consolas", 9, "bold"),
+        ).pack(fill="x", padx=14, pady=(8, 3))
+        self._cline_report_text = tk.Text(
+            window,
+            height=5,
+            wrap="word",
+            state="disabled",
+            bg=self.col["panel"],
+            fg=self.col["text"],
+            relief="flat",
+        )
+        self._cline_report_text.pack(fill="x", padx=14, pady=(0, 12))
+
+        def close_panel():
+            if self._cline_refresh_after is not None:
+                try:
+                    self.root.after_cancel(self._cline_refresh_after)
+                except tk.TclError:
+                    pass
+                self._cline_refresh_after = None
+            self._cline_window = None
+            window.destroy()
+
+        window.protocol("WM_DELETE_WINDOW", close_panel)
+        self._check_cline_health()
+        self._refresh_cline_panel()
+
+    def show_development_panel(self, workspace_root=None):
+        self._safe_ui(self._show_development_panel, workspace_root)
+
+    def _show_development_panel(self, workspace_root=None):
+        self.open_development_panel()
+        if workspace_root and self._cline_workspace_var:
+            self._cline_workspace_var.set(str(workspace_root))
+
+    def _choose_cline_workspace(self):
+        from tkinter import filedialog
+
+        initial = self._cline_workspace_var.get().strip() if self._cline_workspace_var else ""
+        selected = filedialog.askdirectory(
+            title="Choisir le dossier du projet",
+            initialdir=initial if Path(initial).is_dir() else str(Path.home()),
+            parent=self._cline_window,
+        )
+        if selected and self._cline_workspace_var:
+            self._cline_workspace_var.set(selected)
+
+    def _check_cline_health(self):
+        if not self.on_cline_health:
+            self._cline_health_label.configure(text="Contrôle Cline indisponible.")
+            return
+
+        def check():
+            try:
+                result = self.on_cline_health()
+            except Exception as exc:
+                result = {"error": str(exc)}
+            try:
+                self.root.after(0, lambda: self._show_cline_health(result))
+            except tk.TclError:
+                pass
+
+        threading.Thread(target=check, daemon=True).start()
+
+    def _show_cline_health(self, result):
+        label = self._cline_health_label
+        if label is None or not label.winfo_exists():
+            return
+        service = result.get("model_service", {})
+        model_names = service.get("models", []) if isinstance(service, dict) else []
+        model_state = "Ollama local disponible" if service.get("available") else "Ollama local indisponible"
+        version = result.get("version") or "CLI indisponible"
+        sdk_state = "SDK prêt" if result.get("sdk_available") else "SDK absent"
+        label.configure(
+            text=f"Cline {version} • {sdk_state} • {model_state} • Modèles : {', '.join(model_names[:6]) or 'aucun'}",
+            fg=self.col["green"] if result.get("ready") else self.col["red"],
+        )
+
+    def _start_cline_mission(self):
+        goal = self._cline_goal.get("1.0", "end-1c").strip()
+        workspace = self._cline_workspace_var.get().strip()
+        mode = self._cline_mode_var.get().strip()
+        if not goal:
+            self._cline_status_label.configure(text="Saisissez une mission logicielle.")
+            return
+        if not workspace or not Path(workspace).is_dir():
+            self._cline_status_label.configure(text="Choisissez un dossier de projet existant.")
+            return
+        if Path(workspace).is_symlink():
+            self._cline_status_label.configure(text="Le dossier projet ne peut pas être un lien symbolique.")
+            return
+        if self._cline_task_id:
+            self._cline_status_label.configure(text="Une mission Cline est déjà en cours.")
+            return
+        if not self.on_cline_start:
+            self._cline_status_label.configure(text="Le moteur Cline n’est pas disponible.")
+            return
+        try:
+            self._cline_task_id = self.on_cline_start(goal, workspace, mode)
+            self._cline_display_task_id = self._cline_task_id
+            self._cline_history_task_id = None
+            self._cline_history_count = 0
+            self._cline_start_button.configure(state="disabled")
+            self._cline_stop_button.configure(state="normal")
+            self._cline_status_label.configure(text="Mission Cline en attente…")
+            self._refresh_cline_panel()
+        except Exception as exc:
+            self._cline_status_label.configure(text=f"Échec : {str(exc)[:160]}")
+            self.write_log(f"ERR: Mission Cline impossible : {exc}")
+
+    def _stop_cline_mission(self):
+        if not self._cline_task_id or not self.on_cline_cancel:
+            return
+        try:
+            if self.on_cline_cancel(self._cline_task_id):
+                self._cline_status_label.configure(text="Arrêt Cline demandé…")
+            else:
+                self._cline_status_label.configure(text="Aucune mission Cline active.")
+        except Exception as exc:
+            self._cline_status_label.configure(text=f"Arrêt impossible : {str(exc)[:120]}")
+            self.write_log(f"ERR: Arrêt Cline impossible : {exc}")
+
+    def _select_cline_history(self, _event=None):
+        if not self._cline_history_list:
+            return
+        selection = self._cline_history_list.curselection()
+        if selection and selection[0] < len(self._cline_history_ids):
+            self._cline_display_task_id = self._cline_history_ids[selection[0]]
+            self._cline_history_task_id = None
+            self._cline_history_count = 0
+            self._refresh_cline_panel()
+
+    def _refresh_cline_panel(self):
+        window = self._cline_window
+        if window is None or not window.winfo_exists():
+            return
+        try:
+            from agent.task_queue import get_queue
+            queue = get_queue()
+            statuses = [
+                item for item in queue.get_all_statuses()
+                if item.get("executor_kind") == "cline"
+            ]
+        except Exception as exc:
+            statuses = []
+            self._cline_status_label.configure(text=f"Historique indisponible : {str(exc)[:80]}")
+
+        statuses.sort(key=lambda item: item.get("created_at", 0), reverse=True)
+        self._cline_history_ids = [item["task_id"] for item in statuses[:30]]
+        current_selection = self._cline_display_task_id
+        self._cline_history_list.delete(0, tk.END)
+        for item in statuses[:30]:
+            self._cline_history_list.insert(
+                tk.END,
+                f"[{item.get('task_id')}] {item.get('status', '').upper()} "
+                f"{item.get('goal', '')[:90]}",
+            )
+        if current_selection in self._cline_history_ids:
+            index = self._cline_history_ids.index(current_selection)
+        elif self._cline_history_ids:
+            index = 0
+            self._cline_display_task_id = self._cline_history_ids[0]
+        else:
+            index = None
+            self._cline_display_task_id = None
+        if index is not None:
+            self._cline_history_list.selection_set(index)
+            self._render_cline_task(self._cline_display_task_id, queue)
+        if self._cline_task_id:
+            active = queue.get_status(self._cline_task_id)
+            if active:
+                self._cline_status_label.configure(
+                    text=(
+                        f"{active.get('status', '').upper()} "
+                        f"{active.get('completed_steps', 0)}/{active.get('total_steps', 0)} "
+                        f"{active.get('current_step', '')}"
+                    )[:180]
+                )
+                if active.get("status") in {
+                    "completed", "partial", "failed", "blocked", "action_unknown", "cancelled", "interrupted",
+                }:
+                    self._cline_task_id = None
+                    self._cline_start_button.configure(state="normal")
+                    self._cline_stop_button.configure(state="disabled")
+        if self._cline_window is not None and self._cline_window.winfo_exists():
+            self._cline_refresh_after = self.root.after(1000, self._refresh_cline_panel)
+
+    def _render_cline_task(self, task_id, queue):
+        if not task_id:
+            return
+        status = queue.get_status(task_id)
+        if not status:
+            return
+        if self._cline_history_task_id != task_id:
+            self._cline_history_task_id = task_id
+            self._cline_history_count = 0
+            self._cline_action_text.configure(state="normal")
+            self._cline_action_text.delete("1.0", tk.END)
+            self._cline_action_text.configure(state="disabled")
+            self._cline_report_text.configure(state="normal")
+            self._cline_report_text.delete("1.0", tk.END)
+            self._cline_report_text.configure(state="disabled")
+        actions = status.get("action_history", [])
+        if len(actions) < self._cline_history_count:
+            self._cline_history_count = 0
+        for action in actions[self._cline_history_count:]:
+            self._cline_action_text.configure(state="normal")
+            self._cline_action_text.insert(
+                tk.END,
+                f"[{action.get('number', '?')}] {action.get('status', '').upper()} "
+                f"{action.get('tool', '')}: {action.get('description', '')}\n"
+                f"{action.get('result', '')}\n\n",
+            )
+            self._cline_action_text.see(tk.END)
+            self._cline_action_text.configure(state="disabled")
+        self._cline_history_count = len(actions)
+        if status.get("status") in {
+            "completed", "partial", "failed", "blocked", "action_unknown", "cancelled", "interrupted",
+        }:
+            report = status.get("result") or status.get("error") or "Mission terminée."
+            self._cline_report_text.configure(state="normal")
+            self._cline_report_text.delete("1.0", tk.END)
+            self._cline_report_text.insert(tk.END, str(report))
+            self._cline_report_text.configure(state="disabled")
 
     def open_pc_diagnostics_panel(self):
         if self._diagnostics_window is not None and self._diagnostics_window.winfo_exists():
@@ -1379,6 +1815,105 @@ class KaizumiUI:
         if not completed.wait(timeout=300):
             self.write_log(f"ERR: Confirmation expirée pour {tool} ; action refusée.")
             return False
+        return decision["approved"]
+
+    def request_cline_approval(
+        self,
+        tool: str,
+        parameters: dict,
+        description: str,
+        cancel_flag=None,
+    ) -> bool:
+        decision = {"approved": False}
+        completed = threading.Event()
+        dialog = {"window": None}
+        deadline = time.monotonic() + 300
+
+        def finish(approved):
+            if completed.is_set():
+                return
+            decision["approved"] = bool(approved)
+            completed.set()
+            current = dialog["window"]
+            if current is not None:
+                try:
+                    current.destroy()
+                except tk.TclError:
+                    pass
+
+        def show():
+            if cancel_flag is not None and cancel_flag.is_set():
+                finish(False)
+                return
+            try:
+                window = tk.Toplevel(self.root)
+                dialog["window"] = window
+                window.title("Confirmation requise — Cline")
+                window.geometry("470x220")
+                window.resizable(False, False)
+                window.configure(bg=self.col["bg"])
+                window.transient(self.root)
+                window.protocol("WM_DELETE_WINDOW", lambda: finish(False))
+                tk.Label(
+                    window,
+                    text="ACTION LOGICIELLE À AUTORISER",
+                    anchor="w",
+                    bg=self.col["bg"],
+                    fg=self.col["pri"],
+                    font=("Consolas", 10, "bold"),
+                ).pack(fill="x", padx=14, pady=(14, 8))
+                tk.Label(
+                    window,
+                    text=description,
+                    anchor="w",
+                    justify="left",
+                    wraplength=430,
+                    bg=self.col["bg"],
+                    fg=self.col["text"],
+                    font=("Segoe UI", 10),
+                ).pack(fill="both", expand=True, padx=14, pady=4)
+                buttons = tk.Frame(window, bg=self.col["bg"])
+                buttons.pack(fill="x", padx=14, pady=(6, 14))
+                tk.Button(
+                    buttons,
+                    text="REFUSER",
+                    command=lambda: finish(False),
+                    bg=self.col["input"],
+                    fg=self.col["red"],
+                    relief="flat",
+                ).pack(side="right", padx=(6, 0))
+                tk.Button(
+                    buttons,
+                    text="AUTORISER CETTE ACTION",
+                    command=lambda: finish(True),
+                    bg=self.col["input"],
+                    fg=self.col["green"],
+                    relief="flat",
+                ).pack(side="right")
+                window.lift()
+            except tk.TclError as exc:
+                self.write_log(f"ERR: Demande Cline impossible: {exc}")
+                finish(False)
+
+        try:
+            self.root.after(0, show)
+        except tk.TclError as exc:
+            self.write_log(f"ERR: Interface fermée pendant la demande Cline: {exc}")
+            return False
+        while not completed.wait(timeout=0.1):
+            if cancel_flag is not None and cancel_flag.is_set():
+                try:
+                    self.root.after(0, lambda: finish(False))
+                except tk.TclError:
+                    finish(False)
+                break
+            if time.monotonic() >= deadline:
+                try:
+                    self.root.after(0, lambda: finish(False))
+                except tk.TclError:
+                    finish(False)
+                self.write_log(f"ERR: Confirmation Cline expirée pour {tool} ; action refusée.")
+                break
         return decision["approved"]
 
     def _refresh_agent_panel(self):

@@ -27,7 +27,7 @@ class AgentErrorPrivacyTests(unittest.TestCase):
         model = unittest.mock.Mock()
         model.generate_content.return_value = response
         with (
-            patch("api_keys.GeminiModel", return_value=model),
+            patch("niang_ia.model_orchestrator.runtime.get_gemini_model", return_value=model),
         ):
             error_handler.analyze_error(
                 self.step,
@@ -51,7 +51,7 @@ class AgentErrorPrivacyTests(unittest.TestCase):
         model = unittest.mock.Mock()
         model.generate_content.return_value = response
         with (
-            patch("api_keys.GeminiModel", return_value=model),
+            patch("niang_ia.model_orchestrator.runtime.get_gemini_model", return_value=model),
             patch.object(
                 planner,
                 "_validate_plan",
@@ -76,7 +76,7 @@ class AgentErrorPrivacyTests(unittest.TestCase):
         model = unittest.mock.Mock()
         model.generate_content.side_effect = RuntimeError("private-token")
         with (
-            patch("api_keys.GeminiModel", return_value=model),
+            patch("niang_ia.model_orchestrator.runtime.get_gemini_model", return_value=model),
         ):
             result = error_handler.analyze_error(self.step, "network failure")
 
@@ -88,7 +88,7 @@ class AgentErrorPrivacyTests(unittest.TestCase):
         model = unittest.mock.Mock()
         model.generate_content.return_value = response
         with (
-            patch("api_keys.GeminiModel", return_value=model),
+            patch("niang_ia.model_orchestrator.runtime.get_gemini_model", return_value=model),
         ):
             error_handler.generate_fix(
                 self.step,

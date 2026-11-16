@@ -8,7 +8,7 @@ import tempfile
 import os
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from agent.planner       import create_plan, replan
 from agent.error_handler import analyze_error, generate_fix, ErrorDecision
@@ -45,6 +45,99 @@ class MissionExecutionResult(str):
         return instance
 
 
+def _coerce_result_status(result: Any) -> str:
+    """Normalize execution results without treating uncertain outcomes as success."""
+    def normalize_status(raw: Any) -> str | None:
+        if raw is None:
+            return None
+        if isinstance(raw, str):
+            candidate = raw.strip().lower()
+        else:
+            candidate = str(raw).strip().lower()
+        if not candidate:
+            return None
+        known = {
+            "completed", "returned", "success", "done", "ok", "finished",
+            "partial", "in_progress", "running",
+            "blocked", "failed", "cancelled", "action_unknown", "unknown", "error",
+            "invalid", "timeout", "denied",
+        }
+        if candidate in {"completed", "returned", "success", "done", "ok", "finished"}:
+            return "completed"
+        if candidate in {"partial", "in_progress", "running"}:
+            return "partial" if candidate == "partial" else "unknown"
+        if candidate in {"blocked", "failed", "cancelled", "action_unknown", "unknown", "error", "invalid", "timeout", "denied"}:
+            return candidate
+        if candidate.startswith("blocked"):
+            return "blocked"
+        if "blocked" in candidate and ("no action was taken" in candidate or "not executed" in candidate or "requires" in candidate):
+            return "blocked"
+        if "failed" in candidate or "exception" in candidate or "could not" in candidate or "error:" in candidate:
+            return "failed"
+        if "partial" in candidate or "incomplete" in candidate or "in progress" in candidate:
+            return "partial"
+        if candidate in known:
+            return candidate
+        return None
+
+    if result is None:
+        return "unknown"
+
+    if isinstance(result, dict):
+        status = normalize_status(result.get("status") or result.get("outcome"))
+        if status is not None:
+            return status
+        if result.get("ok") is False:
+            return "failed"
+        if bool(result.get("blocked")):
+            return "blocked"
+        if result.get("status") is not None and not str(result.get("status")).strip():
+            return "unknown"
+        if result.get("error_kind"):
+            return "failed"
+        return "unknown"
+
+    if hasattr(result, "status"):
+        status = normalize_status(getattr(result, "status", ""))
+        if status is not None:
+            return status
+        if getattr(result, "ok", None) is False:
+            return "failed"
+        if bool(getattr(result, "blocked", False)):
+            return "blocked"
+
+    text = str(result).strip()
+    if not text:
+        return "unknown"
+    lowered = text.lower()
+    if lowered in {"completed", "returned", "success", "done", "ok", "finished"}:
+        return "completed"
+    status = normalize_status(lowered)
+    if status is not None:
+        return status
+
+    block_markers = (
+        "blocked for continuity safety",
+        "blocked for safety",
+        "mission blocked",
+        "task stopped; no action was taken",
+        "approval was denied",
+        "requires verified workspace continuity",
+        "resume refused:",
+    )
+    if any(marker in lowered for marker in block_markers):
+        return "blocked"
+    if lowered.startswith("blocked"):
+        return "blocked"
+    if lowered.startswith("mission blocked"):
+        return "blocked"
+    if lowered.startswith("error") or "failed" in lowered or "exception" in lowered or "could not" in lowered:
+        return "failed"
+    if "partial" in lowered or "incomplete" in lowered or "in progress" in lowered:
+        return "partial"
+    return "unknown"
+
+
 _TOOL_EXECUTION_LOCK = threading.Lock()
 _TOOL_EXECUTION_IDLE = threading.Event()
 _TOOL_EXECUTION_IDLE.set()
@@ -66,8 +159,6 @@ API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 
 
 def _run_generated_code(description: str, speak: Callable | None = None) -> str:
-    from api_keys import GeminiModel
-
     if speak:
         speak("Writing custom code for this task, sir.")
 
@@ -85,21 +176,44 @@ def _run_generated_code(description: str, speak: Callable | None = None) -> str:
         except Exception:
             pass
 
-    model = GeminiModel(
-        model_name="gemini-2.5-flash",
-        system_instruction=(
-            "You are an expert Python developer. "
-            "Write clean, complete, working Python code. "
-            "Use standard library + common packages. "
-            "Install missing packages with subprocess + pip if needed. "
-            "Return ONLY the Python code. No explanation, no markdown, no backticks.\n\n"
-            f"SYSTEM PATHS:\n"
-            f"  Desktop   = r'{desktop}'\n"
-            f"  Downloads = r'{downloads}'\n"
-            f"  Documents = r'{documents}'\n"
-            f"  Home      = r'{home}'\n"
+    try:
+        from niang_ia.model_orchestrator.runtime import get_gemini_model
+        model = get_gemini_model(
+            "gemini-2.5-flash",
+            system_instruction=(
+                "You are an expert Python developer. "
+                "Write clean, complete, working Python code. "
+                "Use standard library + common packages. "
+                "Install missing packages with subprocess + pip if needed. "
+                "Return ONLY the Python code. No explanation, no markdown, no backticks.\n\n"
+                f"SYSTEM PATHS:\n"
+                f"  Desktop   = r'{desktop}'\n"
+                f"  Downloads = r'{downloads}'\n"
+                f"  Documents = r'{documents}'\n"
+                f"  Home      = r'{home}'\n"
+            ),
+            mission_type="code_generation",
+            needs_coding=True,
+            needs_reasoning=True,
+            preferred_latency="balanced",
         )
-    )
+    except Exception:
+        from api_keys import GeminiModel
+        model = GeminiModel(
+            model_name="gemini-2.5-flash",
+            system_instruction=(
+                "You are an expert Python developer. "
+                "Write clean, complete, working Python code. "
+                "Use standard library + common packages. "
+                "Install missing packages with subprocess + pip if needed. "
+                "Return ONLY the Python code. No explanation, no markdown, no backticks.\n\n"
+                f"SYSTEM PATHS:\n"
+                f"  Desktop   = r'{desktop}'\n"
+                f"  Downloads = r'{downloads}'\n"
+                f"  Documents = r'{documents}'\n"
+                f"  Home      = r'{home}'\n"
+            ),
+        )
 
     try:
         response = model.generate_content(
@@ -166,8 +280,16 @@ def _inject_context(params: dict, tool: str, step_results: dict, goal: str = "")
 
     return params
 def _detect_language(text: str) -> str:
-    from api_keys import GeminiModel
-    model = GeminiModel("gemini-3.5-flash-lite")
+    try:
+        from niang_ia.model_orchestrator.runtime import get_gemini_model
+        model = get_gemini_model(
+            "gemini-3.5-flash-lite",
+            mission_type="language_detect",
+            preferred_latency="fast",
+        )
+    except Exception:
+        from api_keys import GeminiModel
+        model = GeminiModel("gemini-3.5-flash-lite")
     try:
         response = model.generate_content(
             f"What language is this text written in? "
@@ -183,8 +305,17 @@ def _translate_to_goal_language(content: str, goal: str) -> str:
     if not goal:
         return content
     try:
-        from api_keys import GeminiModel
-        model = GeminiModel("gemini-2.5-flash")
+        try:
+            from niang_ia.model_orchestrator.runtime import get_gemini_model
+            model = get_gemini_model(
+                "gemini-2.5-flash",
+                mission_type="translation",
+                needs_reasoning=True,
+                preferred_latency="balanced",
+            )
+        except Exception:
+            from api_keys import GeminiModel
+            model = GeminiModel("gemini-2.5-flash")
 
         target_lang = _detect_language(goal)
         print(f"[Executor] ðŸŒ Translating to: {target_lang}")
@@ -215,6 +346,7 @@ def _call_tool(
     cancel_flag: threading.Event | None = None,
     mission_id: str | None = None,
     tool_registry: ToolRegistry | None = None,
+    continuity_context: Any | None = None,
 ) -> str:
     if cancel_flag and cancel_flag.is_set():
         raise MissionCancelled("Task cancelled before the action started.")
@@ -257,6 +389,23 @@ def _call_tool(
     if cancel_flag and cancel_flag.is_set():
         raise MissionCancelled("Task cancelled before the action started.")
 
+    # Central continuity guard (8A.3): only enforced for missions explicitly marked.
+    # safety.py approvals/confirmations remain independent and mandatory.
+    if continuity_context is not None:
+        try:
+            from niang_ia.model_orchestrator.continuity_guard import evaluate_continuity_guard
+            allowed, guard_issues = evaluate_continuity_guard(
+                continuity_context, tool=tool, parameters=parameters
+            )
+        except Exception:
+            allowed, guard_issues = False, ["continuity_guard_unavailable"]
+        if not allowed:
+            details = ", ".join(guard_issues[:6]) if guard_issues else "verification_required"
+            return (
+                f"Blocked for continuity safety: {tool} requires verified workspace continuity "
+                f"before this sensitive operation; no action was taken ({details})."
+            )
+
     if tool_registry is not None:
         definition = tool_registry.get(tool)
         if definition is None or not definition.agent_enabled:
@@ -269,6 +418,7 @@ def _call_tool(
                 cancel_flag=cancel_flag,
                 speak=speak,
                 agent_mode=True,
+                protected=bool(continuity_context is not None),
             ),
         )
         return result
@@ -533,7 +683,8 @@ def _call_tool_with_timeout(tool: str, parameters: dict, speak: Callable | None,
                             approval_callback: Callable[[str, dict, str], bool] | None = None,
                             mission_id: str | None = None,
                             timeout_s: float | None = None,
-                            tool_registry: ToolRegistry | None = None) -> str:
+                            tool_registry: ToolRegistry | None = None,
+                            continuity_context: Any | None = None) -> str:
     """Run one tool without blocking the queue past timeout or cancellation."""
     from agent.settings import action_timeout_seconds
 
@@ -569,6 +720,7 @@ def _call_tool_with_timeout(tool: str, parameters: dict, speak: Callable | None,
                 action_cancel,
                 mission_id,
                 tool_registry,
+                continuity_context,
             )
             completed = (True, result)
         except Exception as exc:
@@ -714,6 +866,7 @@ class AgentExecutor:
         mission_id: str | None = None,
         resume_context: str = "",
         tool_registry: ToolRegistry | None = None,
+        continuity_context: Any | None = None,
     ) -> MissionExecutionResult:
         from agent.settings import (
             max_actions_per_mission,
@@ -852,6 +1005,7 @@ class AgentExecutor:
                             mission_id,
                             mission_deadline - time.monotonic(),
                             tool_registry,
+                            continuity_context,
                         )
                         if getattr(result, "ok", True) is False:
                             self._report_action(
@@ -864,7 +1018,7 @@ class AgentExecutor:
                                 "unknown",
                             )
                             raise ToolTimeoutError(str(result))
-                        if result.strip().lower().startswith("blocked for safety:"):
+                        if _coerce_result_status(result) == "blocked":
                             self._report_action(
                                 on_action, action_count, tool, desc, params, result, "blocked"
                             )
@@ -1008,8 +1162,9 @@ class AgentExecutor:
                                         mission_id,
                                         mission_deadline - time.monotonic(),
                                         tool_registry,
+                                        continuity_context,
                                     )
-                                    if res.strip().lower().startswith("blocked for safety:"):
+                                    if _coerce_result_status(res) == "blocked":
                                         self._report_action(
                                             on_action,
                                             action_count,
@@ -1179,11 +1334,21 @@ class AgentExecutor:
             f"{verification_note}"
         )
         try:
-            from api_keys import GeminiModel
-            model     = GeminiModel(
-                model_name="gemini-3.5-flash-lite",
-                timeout_s=timeout_s,
-            )
+            try:
+                from niang_ia.model_orchestrator.runtime import get_gemini_model, classify_runtime_error, record_error_safe
+                model = get_gemini_model(
+                    "gemini-3.5-flash-lite",
+                    mission_type="summary",
+                    preferred_latency="fast",
+                    timeout_s=timeout_s,
+                )
+                model_name = "gemini-3.5-flash-lite"
+            except Exception:
+                from api_keys import GeminiModel
+                model = GeminiModel(model_name="gemini-3.5-flash-lite", timeout_s=timeout_s)
+                model_name = "gemini-3.5-flash-lite"
+                classify_runtime_error = None  # type: ignore
+                record_error_safe = None  # type: ignore
             steps_str = "\n".join(f"- {s.get('description', '')}" for s in completed_steps)
             prompt    = (
                 f'User goal: "{goal}"\n'
@@ -1197,6 +1362,12 @@ class AgentExecutor:
             if speak: speak(summary)
             return summary
         except Exception as exc:
+            try:
+                if 'classify_runtime_error' in locals() and classify_runtime_error and 'record_error_safe' in locals() and record_error_safe:
+                    cls = classify_runtime_error(exc, provider="gemini")
+                    record_error_safe(cls, provider_id="gemini", model_id=locals().get("model_name", ""), details={"component": "executor_summary"})
+            except Exception:
+                pass
             print(f"[Executor] Final summary unavailable: {type(exc).__name__}.")
             if speak: speak(fallback)
             return fallback

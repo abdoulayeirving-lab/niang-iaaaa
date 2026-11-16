@@ -122,6 +122,46 @@ class MissionStoreTests(unittest.TestCase):
         self.assertIn("Review its history", restored["error"])
         self.assertEqual(fake_store.saved[0][1], TaskStatus.INTERRUPTED.value)
 
+    def test_interrupted_cline_mission_is_not_replayed_or_resumed(self):
+        class FakeStore:
+            def prune_terminal(self, _days):
+                return 0
+
+            def load_all(self):
+                return [{
+                    "task_id": "cline-interrupted",
+                    "status": "running",
+                    "payload": {
+                        "goal": "Create a fictional test file",
+                        "executor_kind": "cline",
+                        "cline_workspace_root": "C:/temporary/workspace",
+                        "cline_mode": "autonomous_controlled",
+                        "current_step": "workspace_write_file",
+                    },
+                }]
+
+            def save(self, *_args):
+                pass
+
+        queue = TaskQueue(persist=True)
+        queue._mission_store = FakeStore()
+        with patch("agent.settings.artifact_retention_days", return_value=30):
+            queue._restore_missions()
+
+        restored = queue.get_status("cline-interrupted")
+        self.assertEqual(restored["status"], TaskStatus.INTERRUPTED.value)
+        self.assertEqual(queue.pending_count(), 0)
+        with self.assertRaisesRegex(ValueError, "cannot be replayed automatically"):
+            queue.resume_interrupted(
+                "cline-interrupted",
+                user_confirmed=True,
+            )
+        self.assertEqual(queue.pending_count(), 0)
+        self.assertEqual(
+            queue.get_status("cline-interrupted")["status"],
+            TaskStatus.INTERRUPTED.value,
+        )
+
     def test_resume_requires_explicit_confirmation_and_does_not_copy_results(self):
         queue = TaskQueue()
         previous = Task(

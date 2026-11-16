@@ -398,13 +398,24 @@ def create_plan(
     timeout_s: int | None = None,
     registry: ToolRegistry | None = None,
 ) -> dict:
-    from api_keys import GeminiModel
-
-    model = GeminiModel(
-        model_name="gemini-3.5-flash-lite",
-        system_instruction=_planner_system_prompt(registry),
-        timeout_s=timeout_s,
-    )
+    try:
+        from niang_ia.model_orchestrator.runtime import get_gemini_model
+        model = get_gemini_model(
+            "gemini-3.5-flash-lite",
+            system_instruction=_planner_system_prompt(registry),
+            timeout_s=timeout_s,
+            mission_type="planning",
+            needs_reasoning=True,
+            needs_tool_calling=True,
+            preferred_latency="balanced",
+        )
+    except Exception:
+        from api_keys import GeminiModel
+        model = GeminiModel(
+            model_name="gemini-3.5-flash-lite",
+            system_instruction=_planner_system_prompt(registry),
+            timeout_s=timeout_s,
+        )
 
     user_input = f"Goal: {goal}"
     if context:
@@ -442,14 +453,25 @@ def replan(
     timeout_s: int | None = None,
     registry: ToolRegistry | None = None,
 ) -> dict:
-    from api_keys import GeminiModel
     from agent.error_handler import _safe_error_summary, _safe_step_metadata
-
-    model = GeminiModel(
-        model_name="gemini-2.5-flash",
-        system_instruction=_planner_system_prompt(registry),
-        timeout_s=timeout_s,
-    )
+    try:
+        from niang_ia.model_orchestrator.runtime import get_gemini_model
+        model = get_gemini_model(
+            "gemini-2.5-flash",
+            system_instruction=_planner_system_prompt(registry),
+            timeout_s=timeout_s,
+            mission_type="replanning",
+            needs_reasoning=True,
+            needs_tool_calling=True,
+            preferred_latency="balanced",
+        )
+    except Exception:
+        from api_keys import GeminiModel
+        model = GeminiModel(
+            model_name="gemini-2.5-flash",
+            system_instruction=_planner_system_prompt(registry),
+            timeout_s=timeout_s,
+        )
 
     completed_summary = "\n".join(
         f"  - Step {s['step']} ({s['tool']}): DONE" for s in completed_steps

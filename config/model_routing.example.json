@@ -1,0 +1,66 @@
+{
+  "mode": "auto",
+  "expert_manual_override": true,
+  "paid_usage_allowed": false,
+  "default_ranking_kind": "general",
+  "failover_max_attempts": 3,
+  "failover_cooldown_seconds": 60,
+  "providers": {
+    "gemini": {
+      "enabled": false,
+      "kind": "free_quota",
+      "paid_allowed": false,
+      "models": [
+        {
+          "model_id": "gemini-2.5-flash",
+          "display_name": "Gemini 2.5 Flash",
+          "supports_general": true,
+          "supports_cline": false,
+          "cline_tool_calling_verified": false,
+          "verified": false
+        }
+      ]
+    },
+    "ollama": {
+      "enabled": false,
+      "kind": "local",
+      "paid_allowed": false,
+      "base_url": "http://127.0.0.1:11434",
+      "options": {
+        "discover_models": false
+      },
+      "models": [
+        {
+          "model_id": "qwen2.5:7b",
+          "display_name": "Qwen 2.5 7B (local)",
+          "reasoning": false,
+          "coding": true,
+          "tool_calling": true,
+          "supports_general": true,
+          "supports_cline": true,
+          "cline_tool_calling_verified": false,
+          "verified": false,
+          "notes": "Default Cline local model candidate; set cline_tool_calling_verified true only after real verification."
+        }
+      ]
+    },
+    "deepseek": {
+      "enabled": false,
+      "kind": "paid",
+      "paid_allowed": false,
+      "models": []
+    },
+    "zhipu_glm": {
+      "enabled": false,
+      "kind": "paid",
+      "paid_allowed": false,
+      "models": []
+    },
+    "qwen": {
+      "enabled": false,
+      "kind": "paid",
+      "paid_allowed": false,
+      "models": []
+    }
+  }
+}

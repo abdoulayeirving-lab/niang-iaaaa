@@ -1,4 +1,5 @@
 import json
+import os
 import threading
 import time
 import uuid
@@ -14,6 +15,7 @@ class TaskStatus(Enum):
     COMPLETED  = "completed"
     PARTIAL = "partial"
     FAILED     = "failed"
+    BLOCKED    = "blocked"
     ACTION_UNKNOWN = "action_unknown"
     CANCELLED  = "cancelled"
     INTERRUPTED = "interrupted"
@@ -47,6 +49,22 @@ class Task:
     approval_callback: Any = field(compare=False, default=None)
     resume_context: str = field(compare=False, default="")
     tool_registry: Any = field(compare=False, default=None)
+    executor_kind: str = field(compare=False, default="niang")
+    cline_workspace_root: str = field(compare=False, default="")
+    cline_mode: str = field(compare=False, default="assisted")
+    routing_provider: str = field(compare=False, default="")
+    routing_model: str = field(compare=False, default="")
+    routing_reason: str = field(compare=False, default="")
+    routing_incident_history: list[dict] = field(compare=False, default_factory=list)
+    failover_history: list[dict] = field(compare=False, default_factory=list)
+    handoff_summary: dict = field(compare=False, default_factory=dict)
+    workspace_verification_required: bool = field(compare=False, default=False)
+    last_checkpoint: dict = field(compare=False, default_factory=dict)
+    continuity_workspace_proof: Any = field(compare=False, default=None)
+    continuity_workspace_root: str = field(compare=False, default="")
+    continuity_state: str = field(compare=False, default="normal")
+    execution_attempt_id: str = field(compare=False, default="")
+    continuity_mission_id: str = field(compare=False, default="")
 
 
 class TaskQueue:
@@ -82,10 +100,61 @@ class TaskQueue:
         return self._mission_store
 
     @staticmethod
+    def _serialize_structured_value(value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, (dict, list, int, float, bool)):
+            return value
+        if type(value) is not str and isinstance(value, str):
+            text = str(value)
+            meta = {}
+            for key in ("tool_name", "tool", "status", "ok", "verified", "error_kind", "error", "exit_code"):
+                if hasattr(value, key):
+                    meta[key] = TaskQueue._serialize_structured_value(getattr(value, key))
+            if meta or hasattr(value, "status"):
+                return {"__type__": type(value).__name__, "content": text, **meta}
+            return text
+        if isinstance(value, str):
+            return value
+        if isinstance(value, tuple):
+            return [TaskQueue._serialize_structured_value(item) for item in value]
+        if hasattr(value, "to_dict"):
+            try:
+                return TaskQueue._serialize_structured_value(value.to_dict())
+            except Exception:
+                pass
+        if hasattr(value, "__dict__"):
+            serializable = {}
+            for key, item in vars(value).items():
+                if key.startswith("_"):
+                    continue
+                serializable[key] = TaskQueue._serialize_structured_value(item)
+            if serializable:
+                return serializable
+        return str(value)
+
+    @staticmethod
     def _task_payload(task: Task) -> dict:
+        proof = task.continuity_workspace_proof
+        if proof is not None:
+            try:
+                if not isinstance(proof, (dict, str, int, float, bool, list)):
+                    proof = TaskQueue._serialize_structured_value(proof)
+                if isinstance(proof, str) and proof.startswith("<") and " object at " in proof and proof.endswith(">"):
+                    raise ValueError("continuity proof object is not serializable")
+            except Exception as exc:
+                raise ValueError(f"continuity proof serialization failed: {type(exc).__name__}") from exc
+        continuity_markers = bool(
+            task.continuity_mission_id
+            or task.continuity_workspace_root
+            or task.continuity_state not in {"", "normal"}
+            or task.execution_attempt_id
+        )
+        if task.workspace_verification_required and proof is None and continuity_markers:
+            raise ValueError("continuity proof missing for protected mission")
         return {
             "goal": task.goal,
-            "result": task.result,
+            "result": TaskQueue._serialize_structured_value(task.result),
             "outcome": task.outcome,
             "verified": task.verified,
             "error": task.error,
@@ -95,18 +164,77 @@ class TaskQueue:
             "total_steps": task.total_steps,
             "action_history": task.action_history[-50:],
             "resume_context": task.resume_context,
+            "executor_kind": task.executor_kind,
+            "cline_workspace_root": task.cline_workspace_root,
+            "cline_mode": task.cline_mode,
+            "routing_provider": task.routing_provider,
+            "routing_model": task.routing_model,
+            "routing_reason": task.routing_reason,
+            "routing_incident_history": task.routing_incident_history[-20:],
+            "failover_history": task.failover_history[-20:],
+            "handoff_summary": task.handoff_summary,
+            "workspace_verification_required": task.workspace_verification_required,
+            "last_checkpoint": task.last_checkpoint,
+            "continuity_workspace_proof": proof,
+            "continuity_workspace_root": task.continuity_workspace_root,
+            "continuity_state": task.continuity_state,
+            "continuity_mission_id": task.continuity_mission_id,
+            "execution_attempt_id": task.execution_attempt_id,
         }
 
+    def mark_workspace_verification_required(self, task_id: str, required: bool = True, checkpoint: dict | None = None):
+        with self._lock:
+            task = self._tasks.get(task_id) if hasattr(self, "_tasks") else None
+            if task is None:
+                return
+            task.workspace_verification_required = bool(required)
+            if checkpoint is not None:
+                task.last_checkpoint = dict(checkpoint)
+            if hasattr(self, "_persist"):
+                try:
+                    self._persist()
+                except Exception:
+                    pass
+
+    def record_failover_handoff(self, task_id: str, handoff: dict | None = None, failover_event: dict | None = None):
+        with self._lock:
+            task = self._tasks.get(task_id) if hasattr(self, "_tasks") else None
+            if task is None:
+                return
+            if handoff:
+                task.handoff_summary = dict(handoff)
+                task.workspace_verification_required = True
+            if failover_event:
+                task.failover_history.append(dict(failover_event))
+                task.failover_history = task.failover_history[-20:]
+            if hasattr(self, "_persist"):
+                try:
+                    self._persist()
+                except Exception:
+                    pass
+
     def _persist_task(self, task: Task, *, required: bool = False) -> None:
+        try:
+            payload = self._task_payload(task)
+        except Exception as exc:
+            task.status = TaskStatus.BLOCKED
+            task.phase = "blocked"
+            task.outcome = "blocked"
+            task.error = f"Mission persistence failed: {type(exc).__name__}: {str(exc)[:250]}"
+            if required:
+                raise
+            print(f"[TaskQueue] Mission persistence failed: {type(exc).__name__}")
+            return
         store = self._get_mission_store()
         if store is None:
             return
         try:
-            store.save(task.task_id, task.status.value, self._task_payload(task))
+            store.save(task.task_id, task.status.value, payload)
             if task.status in {
                 TaskStatus.COMPLETED,
                 TaskStatus.PARTIAL,
                 TaskStatus.FAILED,
+                TaskStatus.BLOCKED,
                 TaskStatus.ACTION_UNKNOWN,
                 TaskStatus.CANCELLED,
                 TaskStatus.INTERRUPTED,
@@ -114,6 +242,10 @@ class TaskQueue:
                 from agent.settings import artifact_retention_days
                 store.prune_terminal(artifact_retention_days())
         except Exception as exc:
+            task.status = TaskStatus.BLOCKED
+            task.phase = "blocked"
+            task.outcome = "blocked"
+            task.error = f"Mission persistence failed: {type(exc).__name__}: {str(exc)[:250]}"
             if required:
                 raise
             print(f"[TaskQueue] Mission persistence failed: {type(exc).__name__}")
@@ -162,6 +294,22 @@ class TaskQueue:
                     action_history=payload.get("action_history", []),
                     resume_context=payload.get("resume_context", ""),
                     tool_registry=self._tool_registry,
+                    executor_kind=payload.get("executor_kind", "niang"),
+                    cline_workspace_root=payload.get("cline_workspace_root", ""),
+                    cline_mode=payload.get("cline_mode", "assisted"),
+                    routing_provider=payload.get("routing_provider", ""),
+                    routing_model=payload.get("routing_model", ""),
+                    routing_reason=payload.get("routing_reason", ""),
+                    routing_incident_history=payload.get("routing_incident_history", []),
+                    failover_history=payload.get("failover_history", []),
+                    handoff_summary=payload.get("handoff_summary", {}),
+                    workspace_verification_required=bool(payload.get("workspace_verification_required", False)),
+                    last_checkpoint=payload.get("last_checkpoint", {}),
+                    continuity_workspace_proof=payload.get("continuity_workspace_proof"),
+                    continuity_workspace_root=payload.get("continuity_workspace_root", ""),
+                    continuity_state=payload.get("continuity_state", "normal"),
+                    continuity_mission_id=payload.get("continuity_mission_id", ""),
+                    execution_attempt_id=payload.get("execution_attempt_id", ""),
                 )
                 if (
                     in_flight
@@ -179,11 +327,18 @@ class TaskQueue:
                         "Application closed before this mission completed. "
                         "Review its history before explicitly resuming."
                     )
-                    store.save(
-                        task.task_id,
-                        task.status.value,
-                        self._task_payload(task),
-                    )
+                    try:
+                        store.save(
+                            task.task_id,
+                            task.status.value,
+                            self._task_payload(task),
+                        )
+                    except Exception as exc:
+                        task.status = TaskStatus.BLOCKED
+                        task.phase = "blocked"
+                        task.outcome = "blocked"
+                        task.error = f"Mission persistence failed during recovery restore: {type(exc).__name__}: {str(exc)[:250]}"
+                        task.result = {"status": "blocked", "persisted": False, "error": task.error}
                 self._tasks[task.task_id] = task
 
     def _get_executor(self):
@@ -203,13 +358,13 @@ class TaskQueue:
             name="AgentTaskQueue"
         )
         self._worker_thread.start()
-        print("[TaskQueue] ✅ Started")
+        print("[TaskQueue] Started")
 
     def stop(self) -> None:
         self._running = False
         with self._condition:
             self._condition.notify_all()
-        print("[TaskQueue] 🔴 Stopped")
+        print("[TaskQueue] Stopped")
 
     def shutdown(self) -> None:
         with self._lock:
@@ -231,30 +386,64 @@ class TaskQueue:
         approval_callback: Callable[[str, dict, str], bool] | None = None,
         resume_context: str = "",
         tool_registry=None,
+        executor_kind: str = "niang",
+        cline_workspace_root: str = "",
+        cline_mode: str = "assisted",
+        workspace_verification_required: bool = False,
+        continuity_workspace_proof: Any = None,
+        continuity_workspace_root: str = "",
+        continuity_state: str = "normal",
+        handoff_summary: dict | None = None,
+        last_checkpoint: dict | None = None,
+        task_id: str | None = None,
+        continuity_mission_id: str | None = None,
     ) -> str:
 
-        task_id = str(uuid.uuid4())[:8]
+        if executor_kind not in {"niang", "cline"}:
+            raise ValueError("Unsupported mission engine.")
+        if executor_kind == "cline" and not cline_workspace_root:
+            raise ValueError("Cline missions require a selected project folder.")
+        if cline_mode not in {"plan", "assisted", "autonomous_controlled"}:
+            raise ValueError("Unsupported Cline operating mode.")
+        preserved_task_id = str(task_id) if task_id else str(uuid.uuid4())[:8]
+        canonical_mission_id = str(continuity_mission_id or preserved_task_id)
         task    = Task(
             priority    = priority.value,
             created_at  = time.time(),
-            task_id     = task_id,
+            task_id     = preserved_task_id,
             goal        = goal,
             speak       = speak,
             on_complete = on_complete,
             approval_callback = approval_callback,
             resume_context = resume_context,
             tool_registry = tool_registry or self._tool_registry,
+            executor_kind = executor_kind,
+            cline_workspace_root = cline_workspace_root,
+            cline_mode = cline_mode,
+            workspace_verification_required = bool(workspace_verification_required),
+            continuity_workspace_proof = continuity_workspace_proof,
+            continuity_workspace_root = continuity_workspace_root or "",
+            continuity_state = continuity_state or "normal",
+            handoff_summary = dict(handoff_summary or {}),
+            last_checkpoint = dict(last_checkpoint or {}),
+            execution_attempt_id = str(uuid.uuid4())[:12],
+            continuity_mission_id = canonical_mission_id,
         )
 
         with self._condition:
+            # Preserve history if reusing a terminal mission id for a recovery attempt.
+            existing = self._tasks.get(preserved_task_id)
+            if existing is not None and existing.status in {TaskStatus.INTERRUPTED, TaskStatus.ACTION_UNKNOWN, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.PARTIAL}:
+                archive_id = f"{preserved_task_id}__hist__{int(time.time()*1000)}"
+                self._tasks[archive_id] = existing
             self._persist_task(task, required=True)
             self._queue.append(task)
             self._queue.sort(key=lambda t: (t.priority, t.created_at))
-            self._tasks[task_id] = task
+            self._tasks[preserved_task_id] = task
             self._condition.notify()
 
-        print(f"[TaskQueue] Task queued: [{task_id}]")
-        return task_id
+        print(f"[TaskQueue] Task queued: [{preserved_task_id}]")
+        return preserved_task_id
 
     def cancel(self, task_id: str) -> bool:
         stop_computer_input = False
@@ -273,7 +462,9 @@ class TaskQueue:
             ):
                 return False
 
-            stop_computer_input = task.status == TaskStatus.RUNNING
+            stop_computer_input = (
+                task.status == TaskStatus.RUNNING and task.executor_kind != "cline"
+            )
             task.cancel_flag.set()
             if task.status == TaskStatus.PENDING:
                 task.status = TaskStatus.CANCELLED
@@ -284,12 +475,12 @@ class TaskQueue:
                 task.status = TaskStatus.STOP_REQUESTED
                 task.phase = "stop_requested"
                 task.outcome = "stop_requested"
-                stop_browser_action = True
+                stop_browser_action = task.executor_kind != "cline"
             try:
                 self._queue.remove(task)
             except ValueError:
                 pass
-            print(f"[TaskQueue] 🛑 Stop requested: [{task_id}]")
+            print(f"[TaskQueue] Stop requested: [{task_id}]")
         if stop_browser_action:
             try:
                 from actions.playwright_mcp import cancel_playwright_mcp_action
@@ -323,6 +514,7 @@ class TaskQueue:
             candidates = [
                 task for task in self._tasks.values()
                 if task.status in (TaskStatus.INTERRUPTED, TaskStatus.ACTION_UNKNOWN)
+                and task.executor_kind != "cline"
             ]
             if not candidates:
                 return None
@@ -342,6 +534,9 @@ class TaskQueue:
         speak: Callable | None = None,
         on_complete: Callable | None = None,
         approval_callback: Callable[[str, dict, str], bool] | None = None,
+        workspace_proof=None,
+        workspace_root: str | None = None,
+        require_workspace_verification: bool | None = None,
     ) -> str:
         if not user_confirmed:
             raise ValueError("Mission recovery requires explicit user confirmation.")
@@ -352,6 +547,10 @@ class TaskQueue:
                 TaskStatus.ACTION_UNKNOWN,
             ):
                 raise ValueError("The selected mission is not available for recovery.")
+            if previous.executor_kind == "cline":
+                raise ValueError(
+                    "Interrupted Cline missions cannot be replayed automatically; start a new mission after reviewing the project."
+                )
             history = [
                 {
                     "number": item.get("number"),
@@ -360,7 +559,65 @@ class TaskQueue:
                 }
                 for item in previous.action_history[-50:]
             ]
+            has_uncertain = any(
+                str(item.get("status", "unknown")).lower() in {"unknown", "in_progress", "running"}
+                for item in previous.action_history[-50:]
+            )
+            protected_mission = bool(
+                previous.workspace_verification_required
+                or previous.continuity_workspace_proof is not None
+            )
             goal = previous.goal
+            mission_id = previous.task_id
+            effective_workspace = workspace_root or previous.cline_workspace_root or os.environ.get("NIANG_IA_WORKSPACE_ROOT", "")
+        must_verify = protected_mission or require_workspace_verification is True
+        if must_verify:
+            try:
+                from niang_ia.model_orchestrator.workspace_verification import authorize_risky_resume_or_write
+                from niang_ia.model_orchestrator.continuity_guard import _normalize_checkpoint
+                raw_handoff = previous.handoff_summary or previous.last_checkpoint or None
+                handoff_obj, handoff_invalid = _normalize_checkpoint(raw_handoff)
+                if handoff_obj is not None:
+                    if str(getattr(handoff_obj, "mission_id", "") or "") not in {"", previous.continuity_mission_id or previous.task_id}:
+                        handoff_invalid = True
+                elif raw_handoff is not None:
+                    # Fail closed for protected/resume-required missions: history may help diagnose,
+                    # but it does not recreate a valid checkpoint for a security-gated resume.
+                    handoff_invalid = True
+                has_blocking_uncertainty = bool(has_uncertain or handoff_invalid)
+                if handoff_obj is not None:
+                    for cp in getattr(handoff_obj, "checkpoints", []) or []:
+                        if getattr(cp, "status", "unknown") in {"unknown", "in_progress"}:
+                            has_blocking_uncertainty = True
+                            break
+                if has_blocking_uncertainty:
+                    step_state = "unknown_unverified"
+                    handoff_for_auth = handoff_obj
+                else:
+                    step_state = "verified_safe_for_new_action" if workspace_proof is not None else "unknown_unverified"
+                    handoff_for_auth = None if workspace_proof is not None else handoff_obj
+                ok, issues = authorize_risky_resume_or_write(
+                    mission_id=mission_id,
+                    workspace_root=effective_workspace or None,
+                    proof=workspace_proof,
+                    handoff=handoff_for_auth,
+                    current_step_state=step_state,
+                    allow_without_proof=False,
+                )
+                if handoff_invalid:
+                    ok = False
+                    issues = list(issues) + ["handoff_invalid_or_mission_mismatch"]
+                if has_blocking_uncertainty and workspace_proof is not None:
+                    ok = False
+                    if "prior_actions_uncertain_or_in_progress" not in issues:
+                        issues = list(issues) + ["prior_actions_uncertain_or_in_progress"]
+            except Exception:
+                ok, issues = False, ["workspace_verification_unavailable"]
+            if not ok:
+                raise ValueError(
+                    "Resume refused: trusted workspace verification required before any risky recovery/write. "
+                    f"Issues: {', '.join(issues)}"
+                )
         context = (
             "This is an explicitly user-approved recovery of a previously interrupted "
             "mission. The prior action metadata below is not proof that actions completed. "
@@ -370,12 +627,25 @@ class TaskQueue:
             "metadata (tool and status only): "
             + json.dumps(history, ensure_ascii=True)
         )
+        if must_verify and workspace_proof is not None:
+            context += " Trusted workspace verification proof was validated before resume."
+        # If verification was required/validated (or mission flagged), carry continuity context to new attempt.
+        carry_verification = bool(must_verify or previous.workspace_verification_required)
+        canonical_mission_id = previous.continuity_mission_id or previous.task_id
         return self.submit(
             goal,
             speak=speak,
             on_complete=on_complete,
             approval_callback=approval_callback,
             resume_context=context,
+            workspace_verification_required=carry_verification,
+            continuity_workspace_proof=workspace_proof if must_verify else None,
+            continuity_workspace_root=effective_workspace or "",
+            continuity_state="recovery_verified" if (must_verify and workspace_proof is not None) else ("recovery_pending" if carry_verification else "normal"),
+            handoff_summary=previous.handoff_summary or {},
+            last_checkpoint=previous.last_checkpoint or {},
+            task_id=previous.task_id,
+            continuity_mission_id=canonical_mission_id,
         )
 
     def get_status(self, task_id: str) -> dict | None:
@@ -396,6 +666,13 @@ class TaskQueue:
                 "completed_steps": task.completed_steps,
                 "total_steps": task.total_steps,
                 "action_history": [dict(item) for item in task.action_history],
+                "executor_kind": task.executor_kind,
+                "cline_workspace_root": task.cline_workspace_root,
+                "routing_provider": task.routing_provider,
+                "routing_model": task.routing_model,
+                "routing_reason": task.routing_reason,
+                "failover_history": [dict(item) for item in task.failover_history[-10:]],
+                "workspace_verification_required": task.workspace_verification_required,
             }
 
     def get_all_statuses(self) -> list[dict]:
@@ -403,6 +680,7 @@ class TaskQueue:
             return [
                 {
                     "task_id": t.task_id,
+                    "created_at": t.created_at,
                     "goal":    t.goal[:50],
                     "status":  t.status.value,
                     "outcome": t.outcome,
@@ -412,6 +690,10 @@ class TaskQueue:
                     "completed_steps": t.completed_steps,
                     "total_steps": t.total_steps,
                     "action_history": [dict(item) for item in t.action_history[-20:]],
+                    "executor_kind": t.executor_kind,
+                    "routing_provider": t.routing_provider,
+                    "routing_model": t.routing_model,
+                    "workspace_verification_required": t.workspace_verification_required,
                 }
                 for t in self._tasks.values()
             ]
@@ -459,20 +741,163 @@ class TaskQueue:
         from agent.executor import ToolTimeoutError, wait_for_tool_idle
 
         try:
-            executor = self._get_executor()
-            result   = executor.execute(
-                goal        = task.goal,
-                speak       = task.speak,
-                cancel_flag = task.cancel_flag,
-                on_progress = lambda progress: self._update_progress(task, progress),
-                on_action = lambda action: self._record_action(task, action),
-                approval_callback = task.approval_callback,
-                mission_id = task.task_id,
-                resume_context = task.resume_context,
-                tool_registry = task.tool_registry or self._tool_registry,
-            )
+            if task.executor_kind == "cline":
+                protected = bool(task.workspace_verification_required or task.continuity_workspace_proof is not None)
+                if protected:
+                    if not task.continuity_workspace_proof:
+                        task.status = TaskStatus.BLOCKED
+                        task.phase = "blocked"
+                        task.outcome = "blocked"
+                        task.error = "Protected Cline mission refused: continuity proof is required before execution."
+                        task.result = {"status": "blocked", "persisted": False, "error": task.error}
+                        self._persist_task(task)
+                        with self._condition:
+                            self._condition.notify()
+                        self._active_count -= 1
+                        return
+                    if not task.continuity_workspace_root:
+                        task.status = TaskStatus.BLOCKED
+                        task.phase = "blocked"
+                        task.outcome = "blocked"
+                        task.error = "Protected Cline mission refused: verified workspace root is required before execution."
+                        task.result = {"status": "blocked", "persisted": False, "error": task.error}
+                        self._persist_task(task)
+                        with self._condition:
+                            self._condition.notify()
+                        self._active_count -= 1
+                        return
+                    try:
+                        from niang_ia.model_orchestrator.workspace_verification import validate_proof
+                        ok, issues = validate_proof(
+                            task.continuity_workspace_proof,
+                            mission_id=(task.continuity_mission_id or task.task_id),
+                            workspace_root=task.continuity_workspace_root,
+                        )
+                        if not ok:
+                            raise ValueError(", ".join(issues or ["proof_invalid"]))
+                    except Exception as exc:
+                        task.status = TaskStatus.BLOCKED
+                        task.phase = "blocked"
+                        task.outcome = "blocked"
+                        task.error = f"Protected Cline mission refused: {type(exc).__name__}: {str(exc)[:250]}"
+                        task.result = {"status": "blocked", "persisted": False, "error": task.error}
+                        self._persist_task(task)
+                        with self._condition:
+                            self._condition.notify()
+                        self._active_count -= 1
+                        return
+                from niang_ia.integrations.cline.cline_vscode import open_vscode_workspace
+                open_vscode_workspace(task.cline_workspace_root)
+                from niang_ia.integrations.cline.cline_engine import ClineEngine
+                result = ClineEngine().execute(
+                    task.goal,
+                    task.cline_workspace_root,
+                    task.cline_mode,
+                    cancel_flag=task.cancel_flag,
+                    approval_callback=task.approval_callback,
+                    on_progress=lambda progress: self._update_progress(task, progress),
+                    on_action=lambda action: self._record_action(task, action),
+                )
+            else:
+                continuity_context = None
+                protected_context_required = bool(task.workspace_verification_required or task.continuity_workspace_proof is not None)
+                if protected_context_required:
+                    try:
+                        from niang_ia.model_orchestrator.continuity_guard import ContinuityExecutionContext
+                        continuity_context = ContinuityExecutionContext(
+                            mission_id=(task.continuity_mission_id or task.task_id),
+                            workspace_root=task.continuity_workspace_root or os.environ.get("NIANG_IA_WORKSPACE_ROOT", ""),
+                            workspace_proof=task.continuity_workspace_proof,
+                            checkpoint=task.handoff_summary or task.last_checkpoint or {},
+                            workspace_verification_required=bool(task.workspace_verification_required),
+                            continuity_state=task.continuity_state or "normal",
+                            execution_attempt_id=task.execution_attempt_id or "",
+                            last_operation_uncertain=any(
+                                str(item.get("status", "")).lower() in {"unknown", "in_progress", "running"}
+                                for item in (task.action_history or [])[-50:]
+                            ),
+                            action_history=tuple(dict(item) for item in (task.action_history or [])[-50:]),
+                        )
+                    except Exception as exc:
+                        task.status = TaskStatus.BLOCKED
+                        task.phase = "blocked"
+                        task.outcome = "blocked"
+                        task.error = f"Continuity context construction failed: {type(exc).__name__}"
+                        task.result = {"status": "blocked", "error": task.error}
+                        self._persist_task(task)
+                        with self._condition:
+                            self._condition.notify()
+                        self._active_count -= 1
+                        return
+                    if continuity_context is None or not getattr(continuity_context, "mission_id", ""):
+                        task.status = TaskStatus.BLOCKED
+                        task.phase = "blocked"
+                        task.outcome = "blocked"
+                        task.error = "Continuity context missing or invalid for protected mission."
+                        task.result = {"status": "blocked", "error": task.error}
+                        self._persist_task(task)
+                        with self._condition:
+                            self._condition.notify()
+                        self._active_count -= 1
+                        return
+                    if task.workspace_verification_required and task.continuity_workspace_proof is None:
+                        task.status = TaskStatus.BLOCKED
+                        task.phase = "blocked"
+                        task.outcome = "blocked"
+                        task.error = "Continuity proof missing for protected mission."
+                        task.result = {"status": "blocked", "error": task.error}
+                        self._persist_task(task)
+                        with self._condition:
+                            self._condition.notify()
+                        self._active_count -= 1
+                        return
+                    if task.continuity_mission_id and continuity_context.mission_id != task.continuity_mission_id:
+                        task.status = TaskStatus.BLOCKED
+                        task.phase = "blocked"
+                        task.outcome = "blocked"
+                        task.error = "Continuity context mission identity mismatch."
+                        task.result = {"status": "blocked", "error": task.error}
+                        self._persist_task(task)
+                        with self._condition:
+                            self._condition.notify()
+                        self._active_count -= 1
+                        return
+                    if task.continuity_workspace_proof is not None:
+                        try:
+                            from niang_ia.model_orchestrator.workspace_verification import validate_proof
+                            ok, issues = validate_proof(
+                                task.continuity_workspace_proof,
+                                mission_id=continuity_context.mission_id,
+                                workspace_root=task.continuity_workspace_root or continuity_context.workspace_root,
+                            )
+                            if not ok:
+                                raise ValueError(", ".join(issues))
+                        except Exception as exc:
+                            task.status = TaskStatus.BLOCKED
+                            task.phase = "blocked"
+                            task.outcome = "blocked"
+                            task.error = f"Continuity proof invalid or unusable: {type(exc).__name__}"
+                            task.result = {"status": "blocked", "error": task.error}
+                            self._persist_task(task)
+                            with self._condition:
+                                self._condition.notify()
+                            self._active_count -= 1
+                            return
+                executor = self._get_executor()
+                result = executor.execute(
+                    goal=task.goal,
+                    speak=task.speak,
+                    cancel_flag=task.cancel_flag,
+                    on_progress=lambda progress: self._update_progress(task, progress),
+                    on_action=lambda action: self._record_action(task, action),
+                    approval_callback=task.approval_callback,
+                    mission_id=task.task_id,
+                    resume_context=task.resume_context,
+                    tool_registry=task.tool_registry or self._tool_registry,
+                    continuity_context=continuity_context,
+                )
 
-            if task.cancel_flag.is_set():
+            if task.cancel_flag.is_set() and task.executor_kind != "cline":
                 wait_for_tool_idle()
             with self._lock:
                 if task.cancel_flag.is_set():
@@ -480,18 +905,27 @@ class TaskQueue:
                     task.phase = "cancelled"
                     task.outcome = "cancelled"
                 else:
-                    outcome = getattr(result, "status", "completed")
+                    from agent.executor import _coerce_result_status
+                    outcome = _coerce_result_status(result)
                     task.outcome = outcome
                     task.verified = bool(getattr(result, "verified", False))
                     task.status = (
                         TaskStatus.COMPLETED if outcome == "completed"
                         else TaskStatus.PARTIAL if outcome == "partial"
+                        else TaskStatus.BLOCKED if outcome == "blocked"
+                        else TaskStatus.FAILED if outcome == "failed"
+                        else TaskStatus.ACTION_UNKNOWN if outcome == "action_unknown"
                         else TaskStatus.FAILED
                     )
                     task.phase = task.status.value
                     task.current_step = ""
-                    task.result = str(result)
-                    if task.status != TaskStatus.COMPLETED:
+                    if hasattr(result, "text") and not isinstance(result, (str, bytes)):
+                        task.result = result.text
+                    else:
+                        task.result = result
+                    if task.status not in {TaskStatus.COMPLETED, TaskStatus.BLOCKED}:
+                        task.error = str(result)
+                    elif task.status == TaskStatus.BLOCKED:
                         task.error = str(result)
                 self._active_count -= 1
 
@@ -499,14 +933,14 @@ class TaskQueue:
                 try:
                     task.on_complete(task.task_id, result)
                 except Exception as e:
-                    print(f"[TaskQueue] ⚠️ on_complete callback error: {e}")
+                    print(f"[TaskQueue] on_complete callback error: {e}")
 
             if task.status == TaskStatus.COMPLETED:
-                print(f"[TaskQueue] ✅ Completed: [{task.task_id}]")
+                print(f"[TaskQueue] Completed: [{task.task_id}]")
             elif task.status == TaskStatus.PARTIAL:
-                print(f"[TaskQueue] ⚠️ Partial result: [{task.task_id}]")
+                print(f"[TaskQueue] Partial result: [{task.task_id}]")
             else:
-                print(f"[TaskQueue] ❌ Mission did not complete: [{task.task_id}]")
+                print(f"[TaskQueue] Mission did not complete: [{task.task_id}]")
 
         except Exception as e:
             is_timeout = isinstance(e, ToolTimeoutError)

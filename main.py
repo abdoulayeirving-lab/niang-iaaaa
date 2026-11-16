@@ -974,6 +974,29 @@ TOOL_DECLARATIONS = [
         }
     },
     {
+        "name": "software_development",
+        "description": (
+            "Starts a Cline-powered software-development mission for analyzing "
+            "architecture, changing source files, creating applications, diagnosing "
+            "code errors, running approved checks, and reporting results. Opens the "
+            "selected workspace in Visual Studio Code so file changes are visible live. Use this "
+            "for software-project work instead of agent_task, code_helper, or dev_agent. "
+            "The mission is confined to NIANG_IA_WORKSPACE_ROOT and requires explicit "
+            "confirmation before it starts."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "goal": {"type": "STRING", "description": "Specific software task to perform"},
+                "mode": {
+                    "type": "STRING",
+                    "description": "plan | assisted | autonomous_controlled (default: assisted)",
+                },
+            },
+            "required": ["goal"],
+        },
+    },
+    {
         "name": "computer_control",
         "description": (
             "Guarded local Windows desktop control, separate from browser_control "
@@ -2057,6 +2080,7 @@ for _decl in TOOL_DECLARATIONS:
         "windows_diagnostics",
         "windows_repair",
         "vision_observe",
+        "software_development",
     }:
         _decl.setdefault("parameters", {}).setdefault("properties", {})[
             "confirm"
@@ -2111,6 +2135,9 @@ class KaizumiLive:
         self.ui.on_text_command = self._on_text_command
         self.ui.on_agent_start = self._start_agent_task
         self.ui.on_agent_cancel = self._cancel_agent_task
+        self.ui.on_cline_start = self._start_cline_task
+        self.ui.on_cline_cancel = self._cancel_agent_task
+        self.ui.on_cline_health = self._cline_health
         self.ui.on_application_close = self._shutdown_agent_services
         self.ui.on_farewell = self._speak_farewell
         self.ui.on_files_selected = self._on_files_selected
@@ -2453,6 +2480,23 @@ class KaizumiLive:
             tool_registry=self._tool_registry,
         )
 
+    def _start_cline_task(self, goal: str, workspace_root: str, mode: str) -> str:
+        from agent.task_queue import get_queue
+        return get_queue().submit(
+            goal=goal,
+            speak=self.speak,
+            approval_callback=self.ui.request_cline_approval,
+            tool_registry=self._tool_registry,
+            executor_kind="cline",
+            cline_workspace_root=workspace_root,
+            cline_mode=mode,
+        )
+
+    @staticmethod
+    def _cline_health() -> dict:
+        from niang_ia.integrations.cline.cline_health import check_cline_health
+        return check_cline_health()
+
     def _cancel_agent_task(self, task_id: str) -> bool:
         from agent.task_queue import get_queue
         return get_queue().cancel(task_id)
@@ -2790,6 +2834,27 @@ class KaizumiLive:
             )
             return f"Task started (ID: {task_id})."
 
+        def _software_development(args):
+            from agent import workspace_tools
+            from agent.task_queue import get_queue
+            from niang_ia.integrations.cline.cline_models import ClineMode
+
+            mode = str(args.get("mode", ClineMode.ASSISTED.value)).strip().lower()
+            if mode not in {item.value for item in ClineMode}:
+                return "Invalid Cline mode. Choose plan, assisted, or autonomous_controlled."
+            root = workspace_tools._workspace_root()
+            ui.show_development_panel(str(root))
+            task_id = get_queue().submit(
+                goal=args.get("goal", ""),
+                speak=speak,
+                approval_callback=ui.request_cline_approval,
+                tool_registry=self._tool_registry,
+                executor_kind="cline",
+                cline_workspace_root=str(root),
+                cline_mode=mode,
+            )
+            return f"Cline software mission queued (ID: {task_id})."
+
         def _recall(args):
             from memory.memory_manager import search_memory
             return search_memory(args.get("query", ""), args.get("category", ""))
@@ -3103,6 +3168,7 @@ class KaizumiLive:
             "code_helper":       (lambda a: code_helper(parameters=a, player=ui, speak=speak), 180),
             "dev_agent":         (lambda a: dev_agent(parameters=a, player=ui, speak=speak), 180),
             "agent_task":        (_agent_task, 15),
+            "software_development": (_software_development, 15),
             "web_search":        (lambda a: web_search_action(parameters=a, player=ui), 90),
             "web_fetch":         (lambda a: web_fetch_action(parameters=a, player=ui), 60),
             "computer_control":  (lambda a: computer_control(parameters=a, player=ui), 120),

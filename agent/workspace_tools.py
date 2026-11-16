@@ -8,14 +8,17 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 MAX_TEXT_BYTES = 1_000_000
 MAX_SEARCH_RESULTS = 100
+MAX_SEARCH_FILES = 2_000
+MAX_SEARCH_BYTES = 50_000_000
 IGNORED_DIRECTORIES = {
     ".git", ".hg", ".svn", ".venv", "venv", "node_modules",
     "__pycache__", "dist", "build", ".pytest_cache", ".aws", ".ssh",
-    ".gnupg",
+    ".gnupg", ".npm", ".cache", ".niang-npm-cache",
 }
 SENSITIVE_NAMES = {
     "api_keys.json", "credentials.json", "token.json", "bridge_token.txt",
@@ -38,19 +41,41 @@ class WorkspaceError(ValueError):
     """Raised when an operation is not allowed in the configured workspace."""
 
 
-def _workspace_root() -> Path:
+def _is_link_or_junction(path: Path) -> bool:
+    is_junction = getattr(path, "is_junction", None)
+    return path.is_symlink() or (is_junction is not None and is_junction())
+
+
+def _workspace_root(workspace_root: str | os.PathLike[str] | None = None) -> Path:
+    if workspace_root is not None:
+        candidate = Path(workspace_root).expanduser()
+        if _is_link_or_junction(candidate):
+            raise WorkspaceError("The selected workspace root must not be a symbolic link or junction.")
+        try:
+            root = candidate.resolve(strict=True)
+        except OSError as exc:
+            raise WorkspaceError(f"The selected workspace cannot be opened: {exc}") from exc
+        if not root.is_dir():
+            raise WorkspaceError("The selected workspace root must be a directory.")
+        return root
+
     configured = os.environ.get("NIANG_IA_WORKSPACE_ROOT", "").strip()
     if not configured:
         # Default workspace: created automatically, still fully confined.
         # Override with NIANG_IA_WORKSPACE_ROOT for a specific project.
         default = Path.home() / "NIANG_IA_Workspace"
+        if _is_link_or_junction(default):
+            raise WorkspaceError("The default workspace root must not be a symbolic link or junction.")
         try:
             default.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             raise WorkspaceError(f"Cannot create the default workspace {default}: {exc}") from exc
         return default.resolve()
     try:
-        root = Path(configured).expanduser().resolve(strict=True)
+        candidate = Path(configured).expanduser()
+        if _is_link_or_junction(candidate):
+            raise WorkspaceError("NIANG_IA_WORKSPACE_ROOT must not be a symbolic link or junction.")
+        root = candidate.resolve(strict=True)
     except OSError as exc:
         raise WorkspaceError(f"Configured workspace cannot be opened: {exc}") from exc
     if not root.is_dir():
@@ -58,8 +83,13 @@ def _workspace_root() -> Path:
     return root
 
 
-def _resolve_workspace_path(path: str, *, must_exist: bool = False) -> Path:
-    root = _workspace_root()
+def _resolve_workspace_path(
+    path: str,
+    *,
+    must_exist: bool = False,
+    workspace_root: str | os.PathLike[str] | None = None,
+) -> Path:
+    root = _workspace_root(workspace_root)
     if not isinstance(path, str) or "\x00" in path:
         raise WorkspaceError("Workspace paths must be strings.")
     relative = Path(path or ".")
@@ -72,8 +102,8 @@ def _resolve_workspace_path(path: str, *, must_exist: bool = False) -> Path:
         if part in {"", "."}:
             continue
         current = current / part
-        if current.is_symlink():
-            raise WorkspaceError("Workspace operations do not follow symbolic links.")
+        if _is_link_or_junction(current):
+            raise WorkspaceError("Workspace operations do not follow symbolic links or junctions.")
     resolved = candidate.resolve(strict=must_exist)
     try:
         resolved.relative_to(root)
@@ -85,35 +115,55 @@ def _resolve_workspace_path(path: str, *, must_exist: bool = False) -> Path:
         raise WorkspaceError("Credential and token files are not accessible to workspace tools.")
     if any(part.startswith(".env") for part in resolved.relative_to(root).parts):
         raise WorkspaceError("Environment files are not accessible to workspace tools.")
+    if resolved.is_file():
+        try:
+            if resolved.stat().st_nlink > 1:
+                raise WorkspaceError("Files with multiple hard links are not accessible to workspace tools.")
+        except OSError as exc:
+            raise WorkspaceError("The file's workspace identity could not be verified.") from exc
     return resolved
 
 
-def list_files(path: str = ".", max_entries: int = 200) -> str:
-    target = _resolve_workspace_path(path, must_exist=True)
+def list_files(
+    path: str = ".",
+    max_entries: int = 200,
+    *,
+    workspace_root: str | os.PathLike[str] | None = None,
+) -> str:
+    target = _resolve_workspace_path(path, must_exist=True, workspace_root=workspace_root)
     if not target.is_dir():
         raise WorkspaceError("The requested workspace path is not a directory.")
     limit = max(1, min(int(max_entries), 500))
-    root = _workspace_root()
+    root = _workspace_root(workspace_root)
     results = []
-    for candidate in target.rglob("*"):
-        relative = candidate.relative_to(root)
-        if any(part.lower() in IGNORED_DIRECTORIES for part in relative.parts):
-            continue
-        if any(part.lower() in SENSITIVE_NAMES or part.startswith(".env") for part in relative.parts):
-            continue
-        if candidate.is_symlink():
-            continue
-        depth = len(candidate.relative_to(target).parts)
-        if depth > 3 or not (candidate.is_file() or candidate.is_dir()):
-            continue
-        results.append(f"{'DIR ' if candidate.is_dir() else 'FILE'} {relative.as_posix()}")
+    for current, directories, filenames in os.walk(target, topdown=True, followlinks=False):
+        current_path = Path(current)
+        depth = len(current_path.relative_to(target).parts)
+        directories[:] = [
+            name for name in directories
+            if name.lower() not in IGNORED_DIRECTORIES
+            and name.lower() not in SENSITIVE_NAMES
+            and not name.startswith(".env")
+            and not _is_link_or_junction(current_path / name)
+            and depth < 3
+        ]
+        for name in directories + filenames:
+            candidate = current_path / name
+            if _is_link_or_junction(candidate):
+                continue
+            relative = candidate.relative_to(root)
+            if name.lower() in SENSITIVE_NAMES or name.startswith(".env"):
+                continue
+            results.append(f"{'DIR ' if candidate.is_dir() else 'FILE'} {relative.as_posix()}")
+            if len(results) >= limit:
+                break
         if len(results) >= limit:
             break
     return "\n".join(results) if results else "No accessible files found in that workspace folder."
 
 
-def read_file(path: str) -> str:
-    target = _resolve_workspace_path(path, must_exist=True)
+def read_file(path: str, *, workspace_root: str | os.PathLike[str] | None = None) -> str:
+    target = _resolve_workspace_path(path, must_exist=True, workspace_root=workspace_root)
     if not target.is_file():
         raise WorkspaceError("The requested workspace path is not a file.")
     if target.stat().st_size > MAX_TEXT_BYTES:
@@ -124,15 +174,20 @@ def read_file(path: str) -> str:
         raise WorkspaceError("The requested file is not valid UTF-8 text.") from exc
 
 
-def write_file(path: str, content: str) -> str:
+def write_file(
+    path: str,
+    content: str,
+    *,
+    workspace_root: str | os.PathLike[str] | None = None,
+) -> str:
     if not isinstance(content, str):
         raise WorkspaceError("File content must be text.")
     encoded = content.encode("utf-8")
     if len(encoded) > MAX_TEXT_BYTES:
         raise WorkspaceError(f"File content exceeds the {MAX_TEXT_BYTES}-byte limit.")
-    target = _resolve_workspace_path(path)
+    target = _resolve_workspace_path(path, workspace_root=workspace_root)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target = _resolve_workspace_path(path)
+    target = _resolve_workspace_path(path, workspace_root=workspace_root)
     if target.exists() and not target.is_file():
         raise WorkspaceError("The destination exists and is not a regular file.")
 
@@ -151,7 +206,7 @@ def write_file(path: str, content: str) -> str:
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
-    return f"Wrote {len(encoded)} bytes to {target.relative_to(_workspace_root()).as_posix()}."
+    return f"Wrote {len(encoded)} bytes to {target.relative_to(_workspace_root(workspace_root)).as_posix()}."
 
 
 def edit_file(
@@ -159,6 +214,8 @@ def edit_file(
     find: str,
     replace: str,
     expected_occurrences: int = 1,
+    *,
+    workspace_root: str | os.PathLike[str] | None = None,
 ) -> str:
     if not isinstance(find, str) or not find:
         raise WorkspaceError("The exact text to find must not be empty.")
@@ -173,7 +230,7 @@ def edit_file(
     if len(find.encode("utf-8")) > MAX_TEXT_BYTES or len(replace.encode("utf-8")) > MAX_TEXT_BYTES:
         raise WorkspaceError(f"Search and replacement text must not exceed {MAX_TEXT_BYTES} bytes.")
 
-    target = _resolve_workspace_path(path, must_exist=True)
+    target = _resolve_workspace_path(path, must_exist=True, workspace_root=workspace_root)
     if not target.is_file():
         raise WorkspaceError("The requested workspace path is not a file.")
     if target.stat().st_size > MAX_TEXT_BYTES:
@@ -211,7 +268,7 @@ def edit_file(
             temporary_path.unlink(missing_ok=True)
     return (
         f"Edited {actual} occurrence(s) in "
-        f"{target.relative_to(_workspace_root()).as_posix()}."
+        f"{target.relative_to(_workspace_root(workspace_root)).as_posix()}."
     )
 
 
@@ -326,14 +383,20 @@ def _apply_file_hunks(contents: str, hunks: list[tuple[int, int, list[str]]], pa
     return "".join(output)
 
 
-def apply_patch(patch: str) -> str:
+def apply_patch(
+    patch: str,
+    *,
+    workspace_root: str | os.PathLike[str] | None = None,
+) -> str:
     """Apply a context-verified unified diff to existing workspace text files."""
     parsed = _parse_unified_patch(patch)
-    root = _workspace_root()
+    root = _workspace_root(workspace_root)
     changes = []
 
     for relative_path, hunks in parsed:
-        target = _resolve_workspace_path(relative_path, must_exist=True)
+        target = _resolve_workspace_path(
+            relative_path, must_exist=True, workspace_root=workspace_root
+        )
         if not target.is_file():
             raise WorkspaceError(f"Patch target is not a regular file: {relative_path}.")
         if target.stat().st_size > MAX_TEXT_BYTES:
@@ -384,23 +447,59 @@ def apply_patch(patch: str) -> str:
     return f"Applied verified patch to {len(changes)} file(s): {names}."
 
 
-def search_text(query: str, path: str = ".", max_results: int = 50) -> str:
+def search_text(
+    query: str,
+    path: str = ".",
+    max_results: int = 50,
+    *,
+    workspace_root: str | os.PathLike[str] | None = None,
+) -> str:
     if not isinstance(query, str) or not query.strip():
         raise WorkspaceError("A non-empty search query is required.")
     if len(query) > 500:
         raise WorkspaceError("Search queries must not exceed 500 characters.")
-    target = _resolve_workspace_path(path, must_exist=True)
-    root = _workspace_root()
+    target = _resolve_workspace_path(path, must_exist=True, workspace_root=workspace_root)
+    root = _workspace_root(workspace_root)
     limit = max(1, min(int(max_results), MAX_SEARCH_RESULTS))
-    candidates = [target] if target.is_file() else target.rglob("*")
+    candidates = [target] if target.is_file() else None
     results = []
+    if candidates is None:
+        candidates = []
+        for current, directories, filenames in os.walk(target, topdown=True, followlinks=False):
+            current_path = Path(current)
+            depth = len(current_path.relative_to(target).parts)
+            directories[:] = [
+                name for name in directories
+                if name.lower() not in IGNORED_DIRECTORIES
+                and name.lower() not in SENSITIVE_NAMES
+                and not name.startswith(".env")
+                and not (current_path / name).is_symlink()
+                and depth < 12
+            ]
+            for name in filenames:
+                candidate = current_path / name
+                if not candidate.is_symlink():
+                    candidates.append(candidate)
+                    if len(candidates) >= MAX_SEARCH_FILES:
+                        break
+            if len(candidates) >= MAX_SEARCH_FILES:
+                break
+    scanned_bytes = 0
     for candidate in candidates:
         if candidate.is_symlink() or not candidate.is_file():
             continue
         try:
-            safe_path = _resolve_workspace_path(candidate.relative_to(root).as_posix(), must_exist=True)
-            if safe_path.stat().st_size > MAX_TEXT_BYTES:
+            safe_path = _resolve_workspace_path(
+                candidate.relative_to(root).as_posix(),
+                must_exist=True,
+                workspace_root=workspace_root,
+            )
+            size = safe_path.stat().st_size
+            if size > MAX_TEXT_BYTES:
                 continue
+            scanned_bytes += size
+            if scanned_bytes > MAX_SEARCH_BYTES:
+                break
             contents = safe_path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError, WorkspaceError):
             continue
@@ -414,8 +513,14 @@ def search_text(query: str, path: str = ".", max_results: int = 50) -> str:
     return "\n".join(results) if results else "No matching text found in the workspace."
 
 
-def run_check(check: str, timeout_seconds: int = 60) -> str:
-    root = _workspace_root()
+def run_check(
+    check: str,
+    timeout_seconds: int = 60,
+    *,
+    workspace_root: str | os.PathLike[str] | None = None,
+    cancel_flag=None,
+) -> str:
+    root = _workspace_root(workspace_root)
     command = APPROVED_CHECKS.get(str(check).strip().lower())
     if command is None:
         raise WorkspaceError(
@@ -425,8 +530,101 @@ def run_check(check: str, timeout_seconds: int = 60) -> str:
     if executable is None and command[0] != sys.executable:
         raise WorkspaceError(f"Required command is unavailable: {command[0]}")
 
-    timeout = max(1, min(int(timeout_seconds), 120))
+    timeout = max(1, min(int(timeout_seconds), 180))
     command = [executable or command[0], *command[1:]]
+    completed = _run_workspace_process(
+        command, root=root, timeout=timeout, cancel_flag=cancel_flag
+    )
+    output = "\n".join(part for part in (completed.stdout.strip(), completed.stderr.strip()) if part)
+    output = output[-20000:]
+    status = "passed" if completed.returncode == 0 else f"failed with exit code {completed.returncode}"
+    return f"Check {check} {status}.\n{output}".strip()
+
+
+def install_dependency(
+    ecosystem: str,
+    package: str,
+    *,
+    workspace_root: str | os.PathLike[str] | None = None,
+    timeout_seconds: int = 180,
+    cancel_flag=None,
+) -> str:
+    root = _workspace_root(workspace_root)
+    if not isinstance(package, str) or not re.fullmatch(
+        r"(?:[A-Za-z0-9][A-Za-z0-9._-]*|@[A-Za-z0-9._-]+/[A-Za-z0-9._-]+)"
+        r"(?:@[A-Za-z0-9.*<>=!~^+-]+)?",
+        package,
+    ):
+        raise WorkspaceError("The dependency name or version is invalid.")
+
+    if ecosystem == "python":
+        python = next(
+            (
+                candidate
+                for candidate in (
+                    root / ".venv" / "Scripts" / "python.exe",
+                    root / "venv" / "Scripts" / "python.exe",
+                )
+                if candidate.is_file()
+            ),
+            None,
+        )
+        if python is None:
+            raise WorkspaceError(
+                "Python dependency installation requires a project-local .venv or venv."
+            )
+        command = [
+            str(python), "-m", "pip", "install", "--disable-pip-version-check",
+            "--no-input", "--only-binary=:all:", "--no-cache-dir", package,
+        ]
+        env_overrides = {}
+    elif ecosystem == "node":
+        npm = shutil.which("npm.cmd") or shutil.which("npm")
+        if npm is None:
+            raise WorkspaceError("The npm command is unavailable.")
+        command = [npm, "install", "--save", "--ignore-scripts", "--", package]
+        env_overrides = {"npm_config_cache": str(root / ".niang-npm-cache")}
+    else:
+        raise WorkspaceError("Only Python and Node dependencies are supported.")
+
+    completed = _run_workspace_process(
+        command,
+        root=root,
+        timeout=max(1, min(int(timeout_seconds), 180)),
+        cancel_flag=cancel_flag,
+        env_overrides=env_overrides,
+    )
+    output = "\n".join(part for part in (completed.stdout.strip(), completed.stderr.strip()) if part)
+    output = output[-20000:]
+    if completed.returncode != 0:
+        raise WorkspaceError(
+            f"Dependency installation failed with exit code {completed.returncode}.\n{output}"
+        )
+    return f"Installed {package} in the selected project.\n{output}".strip()
+
+
+def _run_workspace_process(
+    command: list[str],
+    *,
+    root: Path,
+    timeout: int,
+    cancel_flag=None,
+    env_overrides: dict[str, str] | None = None,
+):
+    try:
+        import psutil
+    except ImportError as exc:
+        raise WorkspaceError(
+            "Cannot safely run project commands without process-tree tracking (psutil)."
+        ) from exc
+
+    executable = command[0]
+    if os.name == "nt" and Path(executable).suffix.lower() in {".cmd", ".bat"}:
+        command = [
+            os.environ.get("COMSPEC", "cmd.exe"),
+            "/d", "/s", "/c",
+            subprocess.list2cmdline(command),
+        ]
     allowed_env = {
         key: value
         for key, value in os.environ.items()
@@ -436,25 +634,129 @@ def run_check(check: str, timeout_seconds: int = 60) -> str:
         }
     }
     allowed_env["PYTHONNOUSERSITE"] = "1"
+    if env_overrides:
+        allowed_env.update(env_overrides)
+    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     try:
-        completed = subprocess.run(
+        process = subprocess.Popen(
             command,
             cwd=root,
             env=allowed_env,
             shell=False,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=timeout,
-            check=False,
+            creationflags=creation_flags,
         )
-    except subprocess.TimeoutExpired as exc:
-        raise WorkspaceError(
-            f"Check '{check}' exceeded its {timeout}-second timeout; outcome is unknown."
-        ) from exc
+    except OSError as exc:
+        raise WorkspaceError(f"Could not start the approved project operation: {exc}") from exc
 
-    output = "\n".join(part for part in (completed.stdout.strip(), completed.stderr.strip()) if part)
-    output = output[-20000:]
-    status = "passed" if completed.returncode == 0 else f"failed with exit code {completed.returncode}"
-    return f"Check {check} {status}.\n{output}".strip()
+    deadline = time.monotonic() + timeout
+    while True:
+        if cancel_flag is not None and cancel_flag.is_set():
+            _terminate_workspace_process_tree(process, psutil)
+            raise WorkspaceError("Project operation cancelled; its final state must be checked.")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _terminate_workspace_process_tree(process, psutil)
+            raise WorkspaceError(
+                f"Project operation exceeded its {timeout}-second timeout; outcome is unknown."
+            )
+        try:
+            stdout, stderr = process.communicate(timeout=min(0.25, remaining))
+            if _workspace_process_descendants(process.pid, psutil):
+                _terminate_workspace_process_tree(process, psutil)
+                raise WorkspaceError(
+                    "The project operation left child processes running; they were terminated."
+                )
+            return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def _workspace_process_descendants(root_pid: int, psutil_module) -> list:
+    children_by_parent = {}
+    for process in psutil_module.process_iter(["pid", "ppid"]):
+        try:
+            pid = process.info.get("pid")
+            parent_pid = process.info.get("ppid")
+        except psutil_module.Error:
+            continue
+        if isinstance(pid, int) and isinstance(parent_pid, int):
+            children_by_parent.setdefault(parent_pid, []).append(process)
+
+    descendants = []
+    seen = {root_pid}
+    frontier = [root_pid]
+    while frontier:
+        parent_pid = frontier.pop()
+        for child in children_by_parent.get(parent_pid, ()):
+            child_pid = child.pid
+            if child_pid in seen:
+                continue
+            seen.add(child_pid)
+            descendants.append(child)
+            frontier.append(child_pid)
+    return descendants
+
+
+def _terminate_workspace_process_tree(process, psutil_module, grace_seconds: float = 3) -> None:
+    root_pid = process.pid
+    try:
+        process.terminate()
+    except OSError:
+        pass
+
+    descendants = _workspace_process_descendants(root_pid, psutil_module)
+    for child in reversed(descendants):
+        try:
+            child.terminate()
+        except psutil_module.NoSuchProcess:
+            continue
+
+    try:
+        process.communicate(timeout=grace_seconds)
+    except subprocess.TimeoutExpired:
+        descendants = _workspace_process_descendants(root_pid, psutil_module)
+        for child in reversed(descendants):
+            try:
+                child.kill()
+            except psutil_module.NoSuchProcess:
+                continue
+        try:
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=2)
+        except subprocess.TimeoutExpired as exc:
+            raise WorkspaceError(
+                "The approved project process tree could not be confirmed stopped."
+            ) from exc
+
+    descendants = _workspace_process_descendants(root_pid, psutil_module)
+    for child in reversed(descendants):
+        try:
+            child.terminate()
+        except psutil_module.NoSuchProcess:
+            continue
+    _, alive = psutil_module.wait_procs(descendants, timeout=1)
+    for child in alive:
+        try:
+            child.kill()
+        except psutil_module.NoSuchProcess:
+            continue
+    if alive:
+        psutil_module.wait_procs(alive, timeout=2)
+
+    remaining = []
+    for child in _workspace_process_descendants(root_pid, psutil_module):
+        try:
+            if child.is_running() and child.status() != psutil_module.STATUS_ZOMBIE:
+                remaining.append(child.pid)
+        except psutil_module.NoSuchProcess:
+            continue
+    if process.poll() is None or remaining:
+        raise WorkspaceError(
+            "The approved project process tree could not be confirmed stopped."
+        )

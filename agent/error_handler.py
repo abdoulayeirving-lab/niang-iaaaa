@@ -120,10 +120,23 @@ def analyze_error(
             "user_message":  "Trying a different approach, sir."
         }
 
-    model = GeminiModel(
-        model_name="gemini-3.5-flash-lite",
-        system_instruction=ERROR_ANALYST_PROMPT
-    )
+    try:
+        from niang_ia.model_orchestrator.runtime import get_gemini_model, classify_runtime_error, record_error_safe
+        model = get_gemini_model(
+            "gemini-3.5-flash-lite",
+            system_instruction=ERROR_ANALYST_PROMPT,
+            mission_type="error_analysis",
+            needs_reasoning=True,
+            preferred_latency="fast",
+        )
+        cls = classify_runtime_error(error, provider="gemini", mission_or_code_error=False)
+        record_error_safe(cls, provider_id="gemini", model_id="gemini-3.5-flash-lite", details={"component": "error_handler"})
+    except Exception:
+        from api_keys import GeminiModel
+        model = GeminiModel(
+            model_name="gemini-3.5-flash-lite",
+            system_instruction=ERROR_ANALYST_PROMPT
+        )
 
     tool, action, critical = _safe_step_metadata(step)
     prompt = f"""Failed step:
@@ -177,9 +190,17 @@ def generate_fix(step: dict, error: str, fix_suggestion: str) -> dict:
 
     Returns a modified step dict.
     """
-    from api_keys import GeminiModel
-
-    model = GeminiModel(model_name="gemini-2.0-flash")
+    try:
+        from niang_ia.model_orchestrator.runtime import get_gemini_model
+        model = get_gemini_model(
+            "gemini-2.0-flash",
+            mission_type="fix_generation",
+            needs_coding=True,
+            needs_reasoning=True,
+        )
+    except Exception:
+        from api_keys import GeminiModel
+        model = GeminiModel(model_name="gemini-2.0-flash")
 
     tool, action, _ = _safe_step_metadata(step)
     prompt = f"""A task step failed. Generate a replacement step.

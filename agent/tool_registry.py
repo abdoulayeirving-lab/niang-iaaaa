@@ -54,12 +54,27 @@ class ToolExecutionResult(str):
         return instance
 
 
+_PROTECTED_SENSITIVE_TOOLS = {
+    "workspace_write_file",
+    "workspace_edit_file",
+    "workspace_apply_patch",
+    "workspace_run_check",
+    "terminal_control",
+    "file_controller",
+    "cmd_control",
+    "computer_control",
+    "windows_repair",
+    "project_execution",
+}
+
+
 @dataclass(frozen=True)
 class ToolExecutionContext:
     mission_id: str | None = None
     cancel_flag: Event | None = None
     speak: Callable[..., Any] | None = None
     agent_mode: bool = False
+    protected: bool = False
 
 
 @dataclass(frozen=True)
@@ -140,6 +155,12 @@ class ToolRegistry:
             raise ToolRegistryError(f"Tool '{name}' parameters must be an object.")
         if context and context.agent_mode and not tool.agent_enabled:
             raise ToolRegistryError(f"Tool '{name}' is not enabled for autonomous missions.")
+        if context and context.protected and name in _PROTECTED_SENSITIVE_TOOLS:
+            if not context.mission_id:
+                raise ToolRegistryError(f"Protected mission direct tool call refused for '{name}': missing mission identity.")
+            raise ToolRegistryError(
+                f"Protected mission direct tool call refused for '{name}': use the guarded executor path and verified continuity context."
+            )
         self.validate_parameters(name, parameters)
         raw_result = tool.handler(dict(parameters), context or ToolExecutionContext())
         if isinstance(raw_result, ToolExecutionResult):
