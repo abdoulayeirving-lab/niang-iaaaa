@@ -927,12 +927,16 @@ TOOL_DECLARATIONS = [
 
     {
         "name": "dev_agent",
-        "description": "Builds complete multi-file projects from scratch: plans, writes files, installs deps, opens VSCode, runs and fixes errors.",
+        "description": (
+            "Builds non-web projects from scratch. For websites, landing pages, "
+            "web apps, or frontend interfaces, use software_development instead; "
+            "NIANG IA routes accidental web requests away from the default Python builder."
+        ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
                 "description":  {"type": "STRING", "description": "What the project should do"},
-                "language":     {"type": "STRING", "description": "Programming language (default: python)"},
+                "language":     {"type": "STRING", "description": "Programming language for non-web projects (default: python)"},
                 "project_name": {"type": "STRING", "description": "Optional project folder name"},
                 "timeout":      {"type": "INTEGER", "description": "Run timeout in seconds (default: 30)"},
             },
@@ -959,10 +963,11 @@ TOOL_DECLARATIONS = [
         "name": "software_development",
         "description": (
             "Starts an OpenCode-powered software-development mission for analyzing "
-            "architecture, changing source files, creating applications, diagnosing "
+            "architecture, changing source files, creating applications and websites "
+            "including landing pages, diagnosing "
             "code errors, running approved checks, and reporting results. Opens the "
             "selected workspace in Visual Studio Code so file changes are visible live. Use this "
-            "for software-project work instead of agent_task, code_helper, or dev_agent. "
+            "for all web/frontend project work instead of dev_agent, agent_task, or code_helper. "
             "The mission is confined to NIANG_IA_WORKSPACE_ROOT, uses the local OpenCode "
             "configuration and requires confirmation before modifying existing files."
         ),
@@ -2058,6 +2063,7 @@ for _decl in TOOL_DECLARATIONS:
         "workspace_apply_patch",
         "workspace_run_check",
         "terminal_control", "project_execution",
+        "dev_agent",
         "screen_process",
         "windows_diagnostics",
         "windows_repair",
@@ -2835,6 +2841,20 @@ class KaizumiLive:
             )
             return f"OpenCode software mission queued (ID: {task_id})."
 
+        def _dev_agent(args):
+            from agent.task_routing import dispatch_project_creation
+
+            return dispatch_project_creation(
+                args.get("description", ""),
+                args.get("project_name", ""),
+                web_handler=lambda goal: _software_development(
+                    {"goal": goal, "mode": "assisted"}
+                ),
+                default_handler=lambda: dev_agent(
+                    parameters=args, player=ui, speak=speak
+                ),
+            )
+
         def _recall(args):
             from memory.memory_manager import search_memory
             return search_memory(args.get("query", ""), args.get("category", ""))
@@ -3145,7 +3165,7 @@ class KaizumiLive:
             "computer_settings": (lambda a: computer_settings(parameters=a, response=None, player=ui), 120),
             "cmd_control":       (lambda a: cmd_control(parameters=a, player=ui), 120),
             "desktop_control":   (lambda a: desktop_control(parameters=a, player=ui), 60),
-            "dev_agent":         (lambda a: dev_agent(parameters=a, player=ui, speak=speak), 180),
+            "dev_agent":         (_dev_agent, 15),
             "agent_task":        (_agent_task, 15),
             "software_development": (_software_development, 15),
             "web_search":        (lambda a: web_search_action(parameters=a, player=ui), 90),

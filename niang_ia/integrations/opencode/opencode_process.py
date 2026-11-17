@@ -15,6 +15,7 @@ from typing import Any, Callable, Sequence
 
 from niang_ia.integrations.cline.cline_events import redact_text
 from niang_ia.integrations.opencode.opencode_health import find_opencode_binary
+from agent.task_routing import is_web_frontend_request
 from niang_ia.skills.catalog import ALL_SKILL_IDS, DEFAULT_SKILL_ROOT
 
 
@@ -780,15 +781,27 @@ def _managed_config(
 
 
 def _skill_prompt(goal: str, selected_skill_ids: Sequence[str]) -> str:
-    if not selected_skill_ids:
-        return goal
-    available = ", ".join(selected_skill_ids)
-    return (
-        f"{goal}\n\n"
-        "NIANG IA has preselected these vetted development skills for this task: "
-        f"{available}. Load the relevant skills with the skill tool before "
-        "implementing, and always load testing-debugging-mastery. Other skill IDs are unavailable."
-    )
+    sections = [goal]
+    if is_web_frontend_request(goal):
+        sections.append(
+            "WEB PROJECT DELIVERABLE: Build the actual browser-facing website, "
+            "not a Python script that generates a website. Inspect the workspace "
+            "and use its existing frontend framework when present. For a new "
+            "project without a frontend stack, create real, separate index.html, "
+            "styles.css, and app.js files; do not install a framework just for a "
+            "landing page. Deliver a polished, responsive page with semantic "
+            "sections, working navigation and interactions, accessible controls, "
+            "and reduced-motion support. Verify the page files and report their "
+            "paths; never claim a website is complete if only a Python file was made."
+        )
+    if selected_skill_ids:
+        available = ", ".join(selected_skill_ids)
+        sections.append(
+            "NIANG IA has preselected these vetted development skills for this task: "
+            f"{available}. Load the relevant skills with the skill tool before "
+            "implementing, and always load testing-debugging-mastery. Other skill IDs are unavailable."
+        )
+    return "\n\n".join(sections)
 
 
 def _workspace_tools_server(workspace_root: Path) -> dict[str, Any]:

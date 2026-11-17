@@ -84,6 +84,12 @@ The mission result includes a quality gate: `PASS`, `FAIL`, or `NOT_TESTED`
 responsive behavior, accessibility, interactions, performance, and security
 remain `NOT_TESTED` without corresponding verification evidence.
 
+Website and landing-page requests that reach the general project builder are
+routed to this supervised OpenCode workflow instead of the Python project
+generator. For a new workspace without an existing frontend stack, the task
+requires actual `index.html`, `styles.css`, and `app.js` deliverables; an
+installer script or Python-only file is not considered a website.
+
 ## Validation
 
 Run the OpenCode integration tests without contacting a model provider:

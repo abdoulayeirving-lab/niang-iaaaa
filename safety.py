@@ -524,6 +524,10 @@ def classify(name: str, args: dict | None) -> Risk:
             "run", "open_run",
         }:
             return Risk.HIGH
+    if name == "dev_agent":
+        from agent.task_routing import is_web_frontend_request
+        if is_web_frontend_request(str(args.get("description", ""))):
+            return Risk.HIGH
     overrides = _ACTION_RISK.get(name)
     if overrides is not None:
         risk = overrides.get(action, overrides.get(None))
@@ -575,6 +579,13 @@ def describe(name: str, args: dict | None) -> str:
             f"start the requested OpenCode software mission in {mode} mode "
             "inside the authorized project workspace"
         )
+    if name == "dev_agent":
+        from agent.task_routing import is_web_frontend_request
+        if is_web_frontend_request(str(args.get("description", ""))):
+            return (
+                "start the requested OpenCode website mission in the authorized "
+                "project workspace; confirm before creating or modifying website files"
+            )
 
     if name == "terminal_control":
         if action in {"run", "start"}:
