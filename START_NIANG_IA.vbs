@@ -24,6 +24,16 @@ If Not fso.FileExists(entryScript) Then
 End If
 
 If fso.FileExists(pythonw) Then
+    command = Quote(pythonw) & " -c ""from mcp.server import Server; from mcp.server.stdio import stdio_server"""
+    If shell.Run(command, 0, True) <> 0 Then
+        If fso.FileExists(batchFile) Then
+            shell.Run Quote(batchFile), 1, False
+            WScript.Quit 0
+        End If
+        MsgBox "Le module MCP requis par OpenCode est absent. Relancez START_NIANG_IA.bat pour réparer l'environnement Python.", vbCritical, "NIANG IA"
+        WScript.Quit 1
+    End If
+
     command = Quote(pythonw) & " -u " & Quote(entryScript)
     For Each argument In WScript.Arguments
         If LCase(CStr(argument)) <> "--voice" Then

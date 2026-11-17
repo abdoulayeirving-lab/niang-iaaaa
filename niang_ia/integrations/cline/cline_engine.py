@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -36,6 +37,7 @@ from niang_ia.integrations.cline.cline_process import (
 from niang_ia.skills.catalog import SkillError, load_skill
 from niang_ia.skills.quality_gate import evaluate_quality_gate
 from niang_ia.skills.selector import select_skills
+from niang_ia.visual_assets import VisualAssetService
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -131,6 +133,7 @@ class ClineEngine:
         selected_skill_ids = set(skill_selection.ids)
         loaded_skill_ids: set[str] = set()
         quality_checks: list[dict] = []
+        visual_asset_service = VisualAssetService()
 
         def progress(event: ClineEvent) -> None:
             if on_progress:
@@ -191,6 +194,13 @@ class ClineEngine:
                 return f"# {skill.name}\n\n{skill.description}\n\n{skill.instructions}"
             if tool not in ALLOWED_TOOLS:
                 raise ClineEngineError("Cline requested a tool that NIANG IA does not provide.")
+            if (
+                tool.startswith("workspace_visual_asset_")
+                and "visual-asset-intelligence" not in loaded_skill_ids
+            ):
+                raise ClineEngineError(
+                    "Load visual-asset-intelligence before using its project tools."
+                )
             args = validate_tool_input(tool, raw_args, config.workspace_root)
             if selected_mode == ClineMode.PLAN and tool not in READ_TOOLS:
                 raise ClineEngineError("Plan mode is read-only.")
@@ -222,12 +232,37 @@ class ClineEngine:
                     "total_steps": config.max_actions,
                 })
             try:
-                output = _dispatch_tool(tool, args, config, cancel_flag)
+                output = _dispatch_tool(
+                    tool,
+                    args,
+                    config,
+                    cancel_flag,
+                    visual_asset_service=visual_asset_service,
+                )
                 if tool == "workspace_run_check":
                     quality_checks.append({
                         "name": args["check"],
                         "status": "PASS",
                         "evidence": f"workspace_run_check: {args['check']}",
+                    })
+                if tool == "workspace_visual_asset_verify":
+                    report = json.loads(output)
+                    status = report.get("status")
+                    if status in {"PASS", "FAIL"}:
+                        quality_checks.append({
+                            "name": "visual-assets-integrity",
+                            "status": status,
+                            "evidence": (
+                                f"visual_asset_verify: {len(report.get('issues', []))} issue(s)"
+                            ),
+                        })
+                    quality_checks.append({
+                        "name": "visual_asset_review",
+                        "status": "NOT_TESTED",
+                        "evidence": report.get(
+                            "visual_review",
+                            "Image composition and semantic fit were not visually reviewed.",
+                        ),
                     })
                 safe_output = redact_text(output)
                 if on_action:
@@ -356,8 +391,11 @@ def _dispatch_tool(
     args: dict,
     config: ClineConfig,
     cancel_flag: threading.Event,
+    *,
+    visual_asset_service: VisualAssetService | None = None,
 ) -> str:
     root = config.workspace_root
+    asset_service = visual_asset_service or VisualAssetService()
     if tool == "workspace_list_files":
         return workspace_tools.list_files(
             args.get("path", "."), workspace_root=root
@@ -397,4 +435,37 @@ def _dispatch_tool(
             timeout_seconds=config.action_timeout_seconds,
             cancel_flag=cancel_flag,
         )
+    if tool == "workspace_visual_asset_inspect":
+        result = asset_service.inspect_local(
+            root,
+            path=args.get("path", "."),
+            limit=args.get("limit", 8),
+        )
+        return json.dumps(result, ensure_ascii=False)
+    if tool == "workspace_visual_asset_search":
+        result = asset_service.search(
+            args["query"],
+            orientation=args.get("orientation", "any"),
+            min_width=args.get("min_width", 0),
+            min_height=args.get("min_height", 0),
+            limit=args.get("limit", 8),
+            allow_pexels=args.get("allow_pexels", False),
+        )
+        return json.dumps(result, ensure_ascii=False)
+    if tool == "workspace_visual_asset_use":
+        result = asset_service.use_asset(
+            args["candidate_id"],
+            root,
+            relative_path=args.get("relative_path", ""),
+            placement=args.get("placement", ""),
+            output_format=args.get("output_format", "original"),
+            reuse_authorized=args.get("reuse_authorized", False),
+        )
+        return json.dumps(result, ensure_ascii=False)
+    if tool == "workspace_visual_asset_verify":
+        result = asset_service.verify_project(
+            root,
+            check_external_urls=args.get("check_external_urls", False),
+        )
+        return json.dumps(result, ensure_ascii=False)
     raise ClineEngineError(f"Unknown Cline action: {tool}.")

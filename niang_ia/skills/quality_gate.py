@@ -20,6 +20,7 @@ _WEB_SKILLS = {
     "threejs-webgl-mastery", "advanced-css-design-systems",
     "performance-optimization",
 }
+_VISUAL_ASSET_CHECKS = {"visual-assets-integrity"}
 _WEB_QUALITY_DIMENSIONS = (
     ("visual_design", "Visual design"),
     ("responsive", "Responsive behavior"),
@@ -47,13 +48,18 @@ def evaluate_quality_gate(
             continue
         if (
             not isinstance(status, str)
-            or status not in {"PASS", "FAIL"}
+            or status not in {"PASS", "FAIL", "NOT_TESTED"}
             or not isinstance(evidence, str)
             or not evidence.strip()
         ):
             continue
-        if name in {"visual_design", "responsive", "accessibility", "interactions", "performance", "security"}:
+        if name in {
+            "visual_design", "responsive", "accessibility", "interactions",
+            "performance", "security", "visual_asset_review",
+        }:
             explicit[name] = {"status": status, "evidence": [evidence.strip()]}
+        elif name in _VISUAL_ASSET_CHECKS:
+            latest[name] = {"status": status, "evidence": [evidence.strip()]}
         elif name in _TEST_CHECKS or name in _BUILD_CHECKS:
             latest[name] = {"status": status, "evidence": [evidence.strip()]}
 
@@ -67,6 +73,19 @@ def evaluate_quality_gate(
             (key, label, explicit.get(key))
             for key, label in _WEB_QUALITY_DIMENSIONS
         )
+    if "visual-asset-intelligence" in selected_skill_ids:
+        required.extend([
+            (
+                "visual_assets",
+                "Visual asset integrity, provenance and attribution",
+                _evidence_for(latest, _VISUAL_ASSET_CHECKS),
+            ),
+            (
+                "visual_asset_review",
+                "Visual content and composition review",
+                explicit.get("visual_asset_review"),
+            ),
+        ])
 
     evaluated = []
     for key, label, evidence in required:
@@ -114,7 +133,12 @@ def _evidence_for(
     relevant = [value for name, value in checks.items() if name in accepted_names]
     if not relevant:
         return None
-    status = "FAIL" if any(item["status"] == "FAIL" for item in relevant) else "PASS"
+    if any(item["status"] == "FAIL" for item in relevant):
+        status = "FAIL"
+    elif any(item["status"] == "NOT_TESTED" for item in relevant):
+        status = "NOT_TESTED"
+    else:
+        status = "PASS"
     return {
         "status": status,
         "evidence": [name for name in checks if name in accepted_names],

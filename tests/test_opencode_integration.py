@@ -31,6 +31,7 @@ from niang_ia.integrations.opencode.opencode_process import (
     _managed_config,
     _select_session_model,
     _safe_child_environment,
+    _workspace_tools_server,
 )
 from niang_ia.integrations.opencode import opencode_process as opencode_process_module
 from niang_ia.integrations.opencode.opencode_tools_server import (
@@ -80,7 +81,13 @@ class _Input:
 
 
 class _FakeACPProcess:
-    def __init__(self, permission_kind="edit", tool_name="write", raw_input=None):
+    def __init__(
+        self,
+        permission_kind="edit",
+        tool_name="write",
+        raw_input=None,
+        load_visual_skill=False,
+    ):
         self.stdout = _Stream()
         self.stderr = _Stream()
         self.stdin = _Input(self)
@@ -91,6 +98,7 @@ class _FakeACPProcess:
         self.approved = None
         self.model_id = "opencode/nemotron-3.5-super-vl-free"
         self.quota_exhausted = False
+        self.load_visual_skill = load_visual_skill
 
     def on_message(self, message):
         method = message.get("method")
@@ -162,6 +170,40 @@ class _FakeACPProcess:
                 })
                 self.sent.append(message)
                 return
+            if self.load_visual_skill:
+                self.stdout.push({
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": "ses_test",
+                        "update": {
+                            "sessionUpdate": "tool_call",
+                            "toolCallId": "skill_1",
+                            "name": "skill",
+                            "title": "Load visual asset intelligence",
+                            "rawInput": {"id": "visual-asset-intelligence"},
+                        },
+                    },
+                })
+                self.stdout.push({
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": "ses_test",
+                        "update": {
+                            "sessionUpdate": "tool_call_update",
+                            "toolCallId": "skill_1",
+                            "status": "completed",
+                            "content": [{
+                                "type": "content",
+                                "content": {
+                                    "type": "text",
+                                    "text": '<skill_content name="visual-asset-intelligence">verified</skill_content>',
+                                },
+                            }],
+                        },
+                    },
+                })
             self.stdout.push({
                 "jsonrpc": "2.0",
                 "method": "session/update",
@@ -403,6 +445,46 @@ class OpenCodeIntegrationTests(unittest.TestCase):
         self.assertFalse(unavailable["ready"])
         self.assertFalse(unavailable["free_models_available"])
 
+    def test_health_requires_the_workspace_mcp_dependency(self):
+        executable = self.root / "opencode.exe"
+        executable.touch()
+        with patch(
+            "niang_ia.integrations.opencode.opencode_health.find_opencode_binary",
+            return_value=executable,
+        ), patch(
+            "niang_ia.integrations.opencode.opencode_health.get_opencode_version",
+            return_value="1.0.0",
+        ), patch(
+            "niang_ia.integrations.opencode.opencode_health.workspace_mcp_status",
+            return_value=(False, "MCP package is missing."),
+        ), patch.object(
+            OpenCodeProcess,
+            "_available_free_models",
+            return_value=["opencode/nemotron-3.5-super-vl-free"],
+        ):
+            result = check_opencode_health()
+
+        self.assertFalse(result["ready"])
+        self.assertFalse(result["workspace_tools_available"])
+        self.assertEqual(result["workspace_tools_error"], "MCP package is missing.")
+
+    def test_engine_stops_before_starting_when_workspace_mcp_is_missing(self):
+        class Process:
+            called = False
+
+            def run(self, *_args, **_kwargs):
+                self.called = True
+                raise AssertionError("OpenCode must not start without the MCP workspace server.")
+
+        process = Process()
+        with patch(
+            "niang_ia.integrations.opencode.opencode_engine.workspace_mcp_status",
+            return_value=(False, "MCP package is missing."),
+        ):
+            with self.assertRaisesRegex(OpenCodeEngineError, "MCP package is missing"):
+                OpenCodeEngine(process).execute("Create a landing page", self.root, "assisted")
+        self.assertFalse(process.called)
+
     def test_exhausted_opencode_quotas_stop_without_a_paid_fallback(self):
         executable = self.root / "opencode.exe"
         executable.touch()
@@ -572,7 +654,7 @@ class OpenCodeIntegrationTests(unittest.TestCase):
                         "sessionUpdate": "tool_call",
                         "toolCallId": "skill_1",
                         "name": "skill",
-                        "rawInput": {"id": "testing-debugging-mastery"},
+                        "rawInput": {},
                     },
                 })
                 on_event({
@@ -580,6 +662,39 @@ class OpenCodeIntegrationTests(unittest.TestCase):
                         "sessionUpdate": "tool_call_update",
                         "toolCallId": "skill_1",
                         "status": "completed",
+                        "content": [{
+                            "type": "content",
+                            "content": {
+                                "type": "text",
+                                "text": (
+                                    '<skill_content name="testing-debugging-mastery">'
+                                    "Skill instructions loaded."
+                                    "</skill_content>"
+                                ),
+                            },
+                        }],
+                    },
+                })
+                on_event({
+                    "update": {
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": "skill_2",
+                        "name": "skill",
+                        "rawInput": {},
+                    },
+                })
+                on_event({
+                    "update": {
+                        "sessionUpdate": "tool_call_update",
+                        "toolCallId": "skill_2",
+                        "status": "completed",
+                        "content": [{
+                            "type": "content",
+                            "content": {
+                                "type": "text",
+                                "text": '<skill_content name="not-selected">Other instructions.</skill_content>',
+                            },
+                        }],
                     },
                 })
                 on_event({
@@ -643,6 +758,72 @@ class OpenCodeIntegrationTests(unittest.TestCase):
             "opencode_tools_server.py",
         )
         self.assertEqual(servers[0]["args"][-1], str(self.root))
+
+    def test_visual_asset_skill_is_loaded_before_its_approved_workspace_tool_is_available(self):
+        fake = _FakeACPProcess(
+            permission_kind="other",
+            tool_name="niang_workspace_visual_asset_inspect",
+            raw_input={"limit": 1},
+            load_visual_skill=True,
+        )
+        approvals = []
+        result = OpenCodeEngine(self._process(fake)).execute(
+            "Create a landing page with real images.",
+            self.root,
+            "assisted",
+            approval_callback=lambda tool, arguments, description, cancel: approvals.append(
+                (tool, arguments, description)
+            ) or True,
+        )
+        self.assertIn("visual-asset-intelligence", result["skills"]["loaded"])
+        self.assertEqual(approvals[0][0], "opencode_visual_asset_inspect")
+        server = next(
+            item for item in fake.sent if item.get("method") == "session/new"
+        )["params"]["mcpServers"][0]
+        self.assertIn("--visual-assets", server["args"])
+
+    def test_visual_asset_server_only_receives_authorized_provider_environment(self):
+        keys = {
+            "NIANG_IA_PIXABAY_API_KEY": "pixabay-key",
+            "NIANG_IA_UNSPLASH_ACCESS_KEY": "unsplash-key",
+            "NIANG_IA_PEXELS_API_KEY": "pexels-key",
+            "OPENAI_API_KEY": "unrelated-key",
+        }
+        with patch.dict("os.environ", keys, clear=True):
+            enabled = _workspace_tools_server(
+                self.root, ("visual-asset-intelligence",)
+            )
+            disabled = _workspace_tools_server(self.root, ())
+        self.assertEqual(
+            enabled["env"],
+            {
+                "NIANG_IA_PIXABAY_API_KEY": "pixabay-key",
+                "NIANG_IA_UNSPLASH_ACCESS_KEY": "unsplash-key",
+                "NIANG_IA_PEXELS_API_KEY": "pexels-key",
+            },
+        )
+        self.assertEqual(disabled["env"], {})
+        self.assertNotIn("--visual-assets", disabled["args"])
+
+    def test_visual_asset_tool_input_is_bounded_and_not_available_when_unselected(self):
+        with self.assertRaisesRegex(ValueError, "sensitive information"):
+            _validate_arguments(
+                "visual_asset_search",
+                {"query": "token is sk-123456789012345678901234"},
+            )
+        with self.assertRaisesRegex(ValueError, "not enabled"):
+            execute_workspace_tool(
+                "visual_asset_inspect",
+                {},
+                self.root,
+            )
+        self.assertEqual(
+            _validate_arguments(
+                "visual_asset_search",
+                {"query": "landscape car", "orientation": "landscape"},
+            )["orientation"],
+            "landscape",
+        )
 
     def test_bounded_workspace_tool_requires_approval_with_exact_arguments(self):
         fake = _FakeACPProcess(

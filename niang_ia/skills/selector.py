@@ -82,6 +82,19 @@ _ELITE_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
         "code review", "review code", "review pull request", "review pr",
         "refactor", "refactoring", "cleanup", "clean up",
     )),
+    ("visual-asset-intelligence", (
+        "visual asset", "visual assets", "image asset", "image assets",
+        "image", "images", "photo", "photos", "photography", "photograph",
+        "illustration", "illustrations", "product image", "hero image",
+        "cover image", "thumbnail", "youtube thumbnail", "texture", "textures",
+        "sprite", "sprites", "avatar", "logo", "icon", "icons", "background image",
+        "image gallery", "real images", "stock photo", "image réelle",
+        "images réelles", "photo réelle", "photos réelles", "visuel", "visuels",
+        "photographie", "bannière", "miniature", "icône", "icônes",
+        "fond d'image", "catalogue produit", "voiture", "véhicule",
+        "automobile", "restaurant", "hôtel", "hotel", "voyage", "tourisme",
+        "paysage", "animal", "animaux", "mode", "immobilier",
+    )),
 )
 _LEGACY_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("ai-engineering", (

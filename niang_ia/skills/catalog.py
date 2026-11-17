@@ -46,16 +46,20 @@ ELITE_SKILL_IDS = (
     "devops-production-engineering",
     "code-review-refactoring",
 )
+VISUAL_SKILL_IDS = ("visual-asset-intelligence",)
 _ELITE_ADDITIONAL_SKILL_IDS = tuple(
     skill_id for skill_id in ELITE_SKILL_IDS if skill_id != "software-architecture"
 )
-ALL_SKILL_IDS = tuple(dict.fromkeys((*LEGACY_SKILL_IDS, *ELITE_SKILL_IDS)))
+ALL_SKILL_IDS = tuple(dict.fromkeys(
+    (*LEGACY_SKILL_IDS, *ELITE_SKILL_IDS, *VISUAL_SKILL_IDS)
+))
 DEFAULT_SKILL_ROOT = Path(__file__).resolve().parents[2] / "web_design_skills"
 ELITE_SKILL_ROOT = DEFAULT_SKILL_ROOT / "elite"
 MAX_SKILL_BYTES = 100_000
 _SKILL_ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _SKILL_DIRECTORIES = {
     **{skill_id: Path(skill_id) for skill_id in LEGACY_SKILL_IDS},
+    **{skill_id: Path(skill_id) for skill_id in VISUAL_SKILL_IDS},
     **{
         skill_id: Path("elite") / skill_id
         for skill_id in _ELITE_ADDITIONAL_SKILL_IDS
@@ -95,7 +99,11 @@ def discover_skills(
                 f"{folded[key]} and {path.name}."
             )
         folded[key] = path.name
-        if path.name not in LEGACY_SKILL_IDS and path.name != "elite":
+        if (
+            path.name not in LEGACY_SKILL_IDS
+            and path.name not in VISUAL_SKILL_IDS
+            and path.name != "elite"
+        ):
             raise SkillError(f"Unregistered skill directory: {path.name}.")
 
     elite_directory = library / "elite"

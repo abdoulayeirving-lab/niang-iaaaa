@@ -40,7 +40,8 @@ required and is checked by the provider when the first request is made.
 
 ## Modes and permissions
 
-- **Plan**: exposes only workspace list, read, and text-search tools.
+- **Plan**: exposes only workspace list, read, text-search, and (when selected)
+  local visual-asset inspection tools.
 - **Assisted**: asks before every write, patch, project check, or dependency install.
 - **Autonomous controlled**: allows bounded in-workspace edits and new-file
   creation; overwrites, multi-file patches, dependency installs, and executable
@@ -67,12 +68,23 @@ Raw CLI task execution is intentionally not used: Cline CLI's built-in tools
 include shell execution and do not provide the host-controlled workspace tool
 boundary and per-action approval callback used here. SDK tool policies are
 explicit; only read-only workspace access and skill loading are auto-approved.
+When `visual-asset-intelligence` is selected and loaded, Cline can inspect local
+images, search the configured Pixabay/Unsplash APIs, optionally search Pexels
+when explicitly approved, save a selected image, and verify its local
+references, provenance, and credits. Provider searches, writes, and verification
+require explicit user approval. The Python host reads provider keys only from
+`NIANG_IA_PIXABAY_API_KEY`, `NIANG_IA_UNSPLASH_ACCESS_KEY`, or
+`NIANG_IA_PEXELS_API_KEY`; the Cline worker and model prompt never receive them.
+No provider request is made without a configured key. Search results are
+cached locally with a 24-hour minimum for Pixabay; cache entries contain no
+provider keys or plaintext queries.
 
-Each mission selects up to 10 skills from `web_design_skills/`: the 20 existing
-general skills and the 15-skill elite engineering profile (with
+Each mission selects up to 10 skills from `web_design_skills/`: the existing
+general skills, the 15-skill elite engineering profile (with
 `software-architecture` shared between them). The engineering baseline includes
 `clean-code-engineering`, `testing-debugging-mastery`, and
-`secure-software-engineering`. Cline receives only selected IDs and
+`secure-software-engineering`; `visual-asset-intelligence` is selected
+automatically for image-dependent work. Cline receives only selected IDs and
 descriptions; the `workspace_load_skill` host tool returns instructions only
 after checking the ID against that mission's selection. Skill loading cannot
 read arbitrary workspace files. Mission results distinguish selected skills

@@ -6,6 +6,8 @@ title NIANG IA - Assistant
 
 if exist ".venv\Scripts\python.exe" (
     set "PYTHON_EXE=%~dp0.venv\Scripts\python.exe"
+    "%PYTHON_EXE%" -c "from mcp.server import Server; from mcp.server.stdio import stdio_server" >nul 2>&1
+    if errorlevel 1 goto install_dependencies
     goto launch
 )
 
@@ -50,6 +52,8 @@ if errorlevel 1 (
 )
 
 set "PYTHON_EXE=%~dp0.venv\\Scripts\\python.exe"
+
+:install_dependencies
 echo.
 echo Installation des dependances. Cette etape necessite Internet et peut prendre plusieurs minutes...
 "%PYTHON_EXE%" setup.py

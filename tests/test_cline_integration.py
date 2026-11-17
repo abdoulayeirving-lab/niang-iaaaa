@@ -38,6 +38,10 @@ from niang_ia.integrations.cline.cline_protocol import (
 )
 from niang_ia.integrations.cline.cline_vscode import open_vscode_workspace
 from niang_ia.integrations.cline.cline_process import _safe_child_environment
+from niang_ia.integrations.cline.cline_policy import (
+    approval_required,
+    validate_tool_input,
+)
 
 
 class _Stream:
@@ -398,6 +402,50 @@ class ClineEngineTests(unittest.TestCase):
                 "Create a desktop Tkinter application",
                 self.root,
                 ClineMode.PLAN,
+            )
+
+    def test_visual_asset_tools_require_the_skill_to_be_loaded_and_inspect_local_files(self):
+        def action(_goal, _config, _mode, run_tool, *_):
+            with self.assertRaisesRegex(ClineEngineError, "Load visual-asset-intelligence"):
+                run_tool("workspace_visual_asset_inspect", {"limit": 1})
+            run_tool(
+                "workspace_load_skill",
+                {"skill_id": "visual-asset-intelligence"},
+            )
+            result = json.loads(
+                run_tool("workspace_visual_asset_inspect", {"limit": 1})
+            )
+            self.assertEqual(result["status"], "ok")
+            return "Visual assets inspected."
+
+        engine = self.engine(action)
+        result = engine.execute(
+            "Create a landing page with genuine images.",
+            self.root,
+            ClineMode.PLAN,
+        )
+        self.assertIn("visual-asset-intelligence", result.loaded_skills)
+        self.assertEqual(result.status, "completed")
+
+    def test_visual_provider_search_requires_approval_and_rejects_sensitive_queries(self):
+        args = validate_tool_input(
+            "workspace_visual_asset_search",
+            {"query": "black luxury car"},
+            self.root,
+        )
+        self.assertTrue(
+            approval_required(
+                ClineMode.AUTONOMOUS_CONTROLLED,
+                "workspace_visual_asset_search",
+                args,
+                self.root,
+            )
+        )
+        with self.assertRaisesRegex(WorkspaceError, "sensitive information"):
+            validate_tool_input(
+                "workspace_visual_asset_search",
+                {"query": "token is sk-123456789012345678901234"},
+                self.root,
             )
 
     def test_autonomous_mode_only_writes_new_files_inside_workspace(self):

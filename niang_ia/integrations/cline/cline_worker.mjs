@@ -68,8 +68,25 @@ function schemas(planOnly, selectedSkills) {
       },
     });
   }
+  const visualSkillSelected = selectedSkills.some(
+    (skill) => skill.id === "visual-asset-intelligence",
+  );
+  if (visualSkillSelected) {
+    tools.push({
+      name: "workspace_visual_asset_inspect",
+      description: "Inspect existing local image assets in the selected project.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
+          limit: { type: "integer", minimum: 1, maximum: 30 },
+        },
+        additionalProperties: false,
+      },
+    });
+  }
   if (planOnly) return tools;
-  return tools.concat([
+  const buildTools = [
     {
       name: "workspace_write_file",
       description: "Create or replace a UTF-8 text file inside the selected project.",
@@ -157,7 +174,54 @@ function schemas(planOnly, selectedSkills) {
         additionalProperties: false,
       },
     },
-  ]);
+  ];
+  if (visualSkillSelected) {
+    buildTools.push(
+      {
+        name: "workspace_visual_asset_search",
+        description: "Search approved free image providers for relevant visual assets.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: { type: "string", minLength: 2, maxLength: 120 },
+            orientation: { type: "string", enum: ["any", "landscape", "portrait", "square"] },
+            min_width: { type: "integer", minimum: 0, maximum: 16000 },
+            min_height: { type: "integer", minimum: 0, maximum: 16000 },
+            limit: { type: "integer", minimum: 1, maximum: 30 },
+            allow_pexels: { type: "boolean" },
+          },
+          required: ["query"],
+          additionalProperties: false,
+        },
+      },
+      {
+        name: "workspace_visual_asset_use",
+        description: "Save an approved image candidate and its source metadata in the project.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            candidate_id: { type: "string", minLength: 3, maxLength: 240 },
+            relative_path: { type: "string", maxLength: 240 },
+            placement: { type: "string", minLength: 2, maxLength: 80 },
+            output_format: { type: "string", enum: ["original", "webp", "avif"] },
+            reuse_authorized: { type: "boolean" },
+          },
+          required: ["candidate_id", "placement"],
+          additionalProperties: false,
+        },
+      },
+      {
+        name: "workspace_visual_asset_verify",
+        description: "Verify project image references, provenance, credits, and local files.",
+        inputSchema: {
+          type: "object",
+          properties: { check_external_urls: { type: "boolean" } },
+          additionalProperties: false,
+        },
+      },
+    );
+  }
+  return tools.concat(buildTools);
 }
 
 async function start(message) {
@@ -189,7 +253,7 @@ async function start(message) {
       toolDefs.map((definition) => [
         definition.name,
         { enabled: true, autoApprove: definition.name.startsWith("workspace_") &&
-            ["workspace_list_files", "workspace_read_file", "workspace_search", "workspace_load_skill"].includes(definition.name) },
+            ["workspace_list_files", "workspace_read_file", "workspace_search", "workspace_load_skill", "workspace_visual_asset_inspect"].includes(definition.name) },
       ]),
     );
     activeAgent = new sdk.Agent({
@@ -210,6 +274,9 @@ async function start(message) {
         "Report which checks were actually run and distinguish unverified suggestions from verified results.",
         selectedSkills.length
           ? `Selected skills: ${selectedSkills.map((skill) => `${skill.id}: ${skill.description}`).join("\n")}\nAlways load testing-debugging-mastery and load other relevant selected skills with workspace_load_skill before implementing; skill loading is read-only.`
+          : "",
+        selectedSkills.some((skill) => skill.id === "visual-asset-intelligence")
+          ? "For visual work, inspect local assets first. Never invent image paths. External provider searches and project asset writes require the user's approval through the host; report provenance and attribution and run the visual asset verification before delivery."
           : "",
       ].join("\n"),
       requestToolApproval: async (approval) => {

@@ -1197,6 +1197,8 @@ class KaizumiUI:
             state = "contrôle impossible"
         elif not result.get("version"):
             state = "CLI indisponible"
+        elif not result.get("workspace_tools_available", True):
+            state = "dépendance MCP manquante — relancez START_NIANG_IA.bat"
         elif result.get("free_models_available"):
             state = f"{len(result.get('free_models', []))} modèles gratuits prêts"
         elif result.get("free_model_error"):

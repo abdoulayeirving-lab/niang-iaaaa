@@ -1,10 +1,24 @@
 from __future__ import annotations
 
+import importlib
 import os
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
+
+
+def workspace_mcp_status() -> tuple[bool, str | None]:
+    try:
+        importlib.import_module("mcp.server")
+        importlib.import_module("mcp.server.stdio")
+    except ImportError:
+        return (
+            False,
+            "The NIANG IA Python environment is missing the MCP package. "
+            "Run START_NIANG_IA.bat to repair the declared dependencies.",
+        )
+    return True, None
 
 
 def find_opencode_binary() -> Path | None:
@@ -59,6 +73,7 @@ def get_opencode_version(binary: Path | None = None) -> str | None:
 
 
 def check_opencode_health() -> dict[str, Any]:
+    workspace_tools_available, workspace_tools_error = workspace_mcp_status()
     binary = find_opencode_binary()
     version = get_opencode_version(binary)
     free_models: list[str] = []
@@ -85,6 +100,13 @@ def check_opencode_health() -> dict[str, Any]:
         "free_models": free_models,
         "free_models_available": bool(free_models),
         "free_model_error": free_model_error,
-        "ready": binary is not None and version is not None and bool(free_models),
+        "workspace_tools_available": workspace_tools_available,
+        "workspace_tools_error": workspace_tools_error,
+        "ready": (
+            workspace_tools_available
+            and binary is not None
+            and version is not None
+            and bool(free_models)
+        ),
         "authentication": "OpenCode user configuration; checked when a mission starts",
     }

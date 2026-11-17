@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import threading
 from pathlib import Path
@@ -7,14 +8,11 @@ from typing import Any, Callable
 
 from agent import workspace_tools
 from niang_ia.integrations.cline.cline_events import redact_text
+from niang_ia.integrations.opencode.opencode_health import workspace_mcp_status
 from niang_ia.integrations.opencode.opencode_process import (
     OpenCodeCancelled,
     OpenCodeProcess,
     OpenCodeProcessError,
-)
-from niang_ia.integrations.opencode.opencode_tools_server import (
-    _resolve_preview_directory,
-    _validate_arguments as _validate_workspace_tool_arguments,
 )
 from niang_ia.skills.catalog import SkillError
 from niang_ia.skills.quality_gate import evaluate_quality_gate
@@ -29,6 +27,10 @@ WORKSPACE_TOOLS = {
     "niang_workspace_install_dependency": "install_dependency",
     "niang_workspace_start_preview": "start_preview",
     "niang_workspace_stop_preview": "stop_preview",
+    "niang_workspace_visual_asset_inspect": "visual_asset_inspect",
+    "niang_workspace_visual_asset_search": "visual_asset_search",
+    "niang_workspace_visual_asset_use": "visual_asset_use",
+    "niang_workspace_visual_asset_verify": "visual_asset_verify",
 }
 
 
@@ -61,6 +63,9 @@ class OpenCodeEngine:
             root = workspace_tools._workspace_root(workspace_root)
         except (TypeError, ValueError, OSError) as exc:
             raise OpenCodeEngineError(str(exc)) from exc
+        mcp_available, mcp_error = workspace_mcp_status()
+        if not mcp_available:
+            raise OpenCodeEngineError(mcp_error or "The NIANG IA workspace tools are unavailable.")
         _validate_workspace_integrations(root)
         try:
             skill_selection = select_skills(goal, workspace_root=root)
@@ -136,7 +141,36 @@ class OpenCodeEngine:
                     call["status"] = status
                     if call["name"] == "skill" and status == "completed":
                         raw_input = call.get("raw_input")
-                        skill_id = raw_input.get("id") if isinstance(raw_input, dict) else None
+                        skill_id = None
+                        if isinstance(raw_input, dict):
+                            for key in ("id", "skill_id"):
+                                candidate = raw_input.get(key)
+                                if isinstance(candidate, str) and candidate in skill_selection.ids:
+                                    skill_id = candidate
+                                    break
+                        content_blocks = update.get("content")
+                        if skill_id is None and isinstance(content_blocks, list):
+                            for block in content_blocks:
+                                if not isinstance(block, dict):
+                                    continue
+                                body = block.get("content")
+                                text = (
+                                    body.get("text")
+                                    if isinstance(body, dict)
+                                    else block.get("text")
+                                )
+                                if not isinstance(text, str):
+                                    continue
+                                skill_id = next(
+                                    (
+                                        candidate
+                                        for candidate in skill_selection.ids
+                                        if f'<skill_content name="{candidate}">' in text
+                                    ),
+                                    None,
+                                )
+                                if skill_id is not None:
+                                    break
                         if isinstance(skill_id, str) and skill_id in skill_selection.ids:
                             loaded_skill_ids.add(skill_id)
                     if call["name"] == "niang_workspace_run_check":
@@ -148,6 +182,28 @@ class OpenCodeEngine:
                                 "status": "PASS" if status == "completed" else "FAIL",
                                 "evidence": f"niang_workspace_run_check: {check}",
                             })
+                    if (
+                        call["name"] == "niang_workspace_visual_asset_verify"
+                        and status == "completed"
+                    ):
+                        report = _parse_visual_asset_report(update.get("content"))
+                        if report is not None and report.get("status") in {"PASS", "FAIL"}:
+                            quality_checks.append({
+                                "name": "visual-assets-integrity",
+                                "status": report["status"],
+                                "evidence": (
+                                    "visual_asset_verify: "
+                                    f"{len(report.get('issues', []))} issue(s)"
+                                ),
+                            })
+                        quality_checks.append({
+                            "name": "visual_asset_review",
+                            "status": "NOT_TESTED",
+                            "evidence": report.get(
+                                "visual_review",
+                                "Image composition and semantic fit were not visually reviewed.",
+                            ) if report else "The visual verification report could not be parsed.",
+                        })
                     if status == "completed":
                         completed_actions += 1
                     if on_action:
@@ -180,6 +236,11 @@ class OpenCodeEngine:
                     tool_calls[call_id].get("raw_input", {}),
                 )
             if name in WORKSPACE_TOOLS:
+                if (
+                    WORKSPACE_TOOLS[name].startswith("visual_asset_")
+                    and "visual-asset-intelligence" not in loaded_skill_ids
+                ):
+                    return False
                 return _approve_workspace_tool(
                     tool_call,
                     WORKSPACE_TOOLS[name],
@@ -268,6 +329,11 @@ def _approve_workspace_tool(
         return False
     raw_input = tool_call.get("rawInput")
     try:
+        from niang_ia.integrations.opencode.opencode_tools_server import (
+            _resolve_preview_directory,
+            _validate_arguments as _validate_workspace_tool_arguments,
+        )
+
         arguments = _validate_workspace_tool_arguments(tool_name, raw_input)
         if tool_name == "start_preview":
             target = _resolve_preview_directory(workspace_root, arguments["path"])
@@ -287,6 +353,32 @@ def _approve_workspace_tool(
         )
     elif tool_name == "start_preview":
         detail = f"Démarrer un aperçu statique local du dossier « {arguments['path']} »"
+    elif tool_name == "visual_asset_inspect":
+        detail = "Inspecter les images locales déjà présentes dans le projet"
+    elif tool_name == "visual_asset_search":
+        detail = (
+            f"Envoyer la recherche « {arguments['query']} » à Pixabay/Unsplash"
+            + (
+                " et à Pexels (clé configurée)"
+                if arguments.get("allow_pexels") is True
+                else ""
+            )
+        )
+    elif tool_name == "visual_asset_use":
+        detail = (
+            f"Enregistrer l’image {arguments['candidate_id']} dans "
+            f"« {arguments['relative_path'] or arguments['placement']} » "
+            "avec sa provenance"
+        )
+        if arguments["candidate_id"].startswith("local:"):
+            detail += (
+                "; confirmer que l’image a été fournie par l’utilisateur "
+                "ou que ses droits d’utilisation ont été vérifiés"
+            )
+    elif tool_name == "visual_asset_verify":
+        detail = "Vérifier les images, fichiers, crédits et métadonnées du projet"
+        if arguments["check_external_urls"]:
+            detail += " et contrôler les URL externes autorisées"
     else:
         detail = "Arrêter l’aperçu statique local du projet"
     description = (
@@ -301,6 +393,25 @@ def _approve_workspace_tool(
             cancel_flag,
         )
     ) and not cancel_flag.is_set()
+
+
+def _parse_visual_asset_report(content: Any) -> dict[str, Any] | None:
+    if not isinstance(content, list):
+        return None
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        body = block.get("content")
+        text = body.get("text") if isinstance(body, dict) else block.get("text")
+        if not isinstance(text, str):
+            continue
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    return None
 
 
 def _permission_paths(tool_call: dict[str, Any], workspace_root: Path) -> list[str]:

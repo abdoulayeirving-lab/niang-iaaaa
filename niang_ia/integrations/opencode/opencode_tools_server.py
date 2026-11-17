@@ -23,6 +23,8 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from agent import workspace_tools
+from agent.secrets import detect_sensitive_data
+from niang_ia.visual_assets import VisualAssetService
 
 
 SERVER_NAME = "niang_workspace"
@@ -89,7 +91,89 @@ def _validate_arguments(name: str, arguments: Any) -> dict[str, Any]:
             raise ValueError("Stopping the preview accepts no arguments.")
         return {}
 
+    if name == "visual_asset_inspect":
+        if set(arguments) - {"path", "limit"}:
+            raise ValueError("Unknown visual asset inspection arguments.")
+        return {
+            "path": arguments.get("path", "."),
+            "limit": _bounded_integer(arguments.get("limit", 8), "limit", 1, 30),
+        }
+
+    if name == "visual_asset_search":
+        if set(arguments) - {
+            "query", "orientation", "min_width", "min_height", "limit", "allow_pexels",
+        }:
+            raise ValueError("Unknown visual asset search arguments.")
+        query = arguments.get("query")
+        if (
+            not isinstance(query, str)
+            or not 2 <= len(query.strip()) <= 120
+            or detect_sensitive_data(query)
+            or any(ord(char) < 32 for char in query)
+        ):
+            raise ValueError("The visual search query is invalid or contains sensitive information.")
+        orientation = arguments.get("orientation", "any")
+        if not isinstance(orientation, str) or orientation not in {
+            "any", "landscape", "portrait", "square",
+        }:
+            raise ValueError("Image orientation must be any, landscape, portrait, or square.")
+        allow_pexels = arguments.get("allow_pexels", False)
+        if not isinstance(allow_pexels, bool):
+            raise ValueError("Pexels access must be explicitly enabled with a boolean value.")
+        return {
+            "query": query.strip(),
+            "orientation": orientation,
+            "min_width": _bounded_integer(arguments.get("min_width", 0), "min_width", 0, 16000),
+            "min_height": _bounded_integer(arguments.get("min_height", 0), "min_height", 0, 16000),
+            "limit": _bounded_integer(arguments.get("limit", 8), "limit", 1, 30),
+            "allow_pexels": allow_pexels,
+        }
+
+    if name == "visual_asset_use":
+        if set(arguments) - {
+            "candidate_id", "relative_path", "placement", "output_format", "reuse_authorized",
+        }:
+            raise ValueError("Unknown visual asset use arguments.")
+        candidate_id = arguments.get("candidate_id")
+        placement = arguments.get("placement")
+        relative_path = arguments.get("relative_path", "")
+        output_format = arguments.get("output_format", "original")
+        reuse_authorized = arguments.get("reuse_authorized", False)
+        if not isinstance(candidate_id, str) or not 3 <= len(candidate_id) <= 240:
+            raise ValueError("A valid image candidate ID is required.")
+        if not isinstance(placement, str) or not 2 <= len(placement.strip()) <= 80:
+            raise ValueError("A short image placement label is required.")
+        if not isinstance(relative_path, str) or len(relative_path) > 240:
+            raise ValueError("The image output path is invalid.")
+        if not isinstance(output_format, str) or output_format not in {
+            "original", "webp", "avif",
+        }:
+            raise ValueError("The requested output image format is not supported.")
+        if not isinstance(reuse_authorized, bool):
+            raise ValueError("Local image reuse requires an explicit authorization flag.")
+        return {
+            "candidate_id": candidate_id,
+            "relative_path": relative_path,
+            "placement": placement.strip(),
+            "output_format": output_format,
+            "reuse_authorized": reuse_authorized,
+        }
+
+    if name == "visual_asset_verify":
+        if set(arguments) - {"check_external_urls"}:
+            raise ValueError("Unknown visual asset verification arguments.")
+        check_external_urls = arguments.get("check_external_urls", False)
+        if not isinstance(check_external_urls, bool):
+            raise ValueError("External URL verification must be a boolean value.")
+        return {"check_external_urls": check_external_urls}
+
     raise ValueError("This OpenCode tool is not available.")
+
+
+def _bounded_integer(value: Any, label: str, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+        raise ValueError(f"{label} must be between {minimum} and {maximum}.")
+    return value
 
 
 def execute_workspace_tool(
@@ -98,7 +182,11 @@ def execute_workspace_tool(
     workspace_root: str | os.PathLike[str],
     *,
     cancel_flag=None,
+    visual_assets_enabled: bool = False,
+    visual_asset_service: VisualAssetService | None = None,
 ) -> str:
+    if name.startswith("visual_asset_") and not visual_assets_enabled:
+        raise ValueError("Visual asset tools are not enabled for this OpenCode mission.")
     args = _validate_arguments(name, arguments)
     root = workspace_tools._workspace_root(workspace_root)
     if name == "run_check":
@@ -119,7 +207,44 @@ def execute_workspace_tool(
         return _start_preview(root, args["path"])
     if name == "stop_preview":
         return _stop_preview()
+    asset_service = visual_asset_service or VisualAssetService()
+    if name == "visual_asset_inspect":
+        return _json_text(asset_service.inspect_local(
+            root, path=args["path"], limit=args["limit"]
+        ))
+    if name == "visual_asset_search":
+        return _json_text(asset_service.search(
+            args["query"],
+            orientation=args["orientation"],
+            min_width=args["min_width"],
+            min_height=args["min_height"],
+            limit=args["limit"],
+            allow_pexels=args["allow_pexels"],
+        ))
+    if name == "visual_asset_use":
+        if args["relative_path"]:
+            workspace_tools._resolve_workspace_path(
+                args["relative_path"], workspace_root=root
+            )
+        return _json_text(asset_service.use_asset(
+            args["candidate_id"],
+            root,
+            relative_path=args["relative_path"],
+            placement=args["placement"],
+            output_format=args["output_format"],
+            reuse_authorized=args["reuse_authorized"],
+        ))
+    if name == "visual_asset_verify":
+        return _json_text(asset_service.verify_project(
+            root, check_external_urls=args["check_external_urls"]
+        ))
     raise ValueError("This OpenCode tool is not available.")
+
+
+def _json_text(value: dict[str, Any]) -> str:
+    import json
+
+    return json.dumps(value, ensure_ascii=False)
 
 
 def _resolve_preview_directory(workspace_root: Path, relative_path: str) -> Path:
@@ -302,7 +427,7 @@ def _preview_server(workspace_root: Path, relative_directory: str, port: int, tt
         server.server_close()
 
 
-async def _serve_mcp(workspace_root: Path) -> None:
+async def _serve_mcp(workspace_root: Path, *, visual_assets_enabled: bool = False) -> None:
     server = Server(SERVER_NAME, version="1.0.0")
     definitions = [
         Tool(
@@ -348,6 +473,70 @@ async def _serve_mcp(workspace_root: Path) -> None:
             inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
         ),
     ]
+    asset_service = VisualAssetService()
+    if visual_assets_enabled:
+        definitions.extend([
+            Tool(
+                name="visual_asset_inspect",
+                description="Inspect existing local visual assets in the selected project.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 30},
+                    },
+                    "additionalProperties": False,
+                },
+            ),
+            Tool(
+                name="visual_asset_search",
+                description="Search free image providers for suitable visual assets. Requires approval.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "minLength": 2, "maxLength": 120},
+                        "orientation": {
+                            "type": "string",
+                            "enum": ["any", "landscape", "portrait", "square"],
+                        },
+                        "min_width": {"type": "integer", "minimum": 0, "maximum": 16000},
+                        "min_height": {"type": "integer", "minimum": 0, "maximum": 16000},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 30},
+                        "allow_pexels": {"type": "boolean"},
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+            ),
+            Tool(
+                name="visual_asset_use",
+                description="Save a selected image and its provenance in the project. Requires approval.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "candidate_id": {"type": "string", "minLength": 3, "maxLength": 240},
+                        "relative_path": {"type": "string", "maxLength": 240},
+                        "placement": {"type": "string", "minLength": 2, "maxLength": 80},
+                        "output_format": {
+                            "type": "string",
+                            "enum": ["original", "webp", "avif"],
+                        },
+                        "reuse_authorized": {"type": "boolean"},
+                    },
+                    "required": ["candidate_id", "placement"],
+                    "additionalProperties": False,
+                },
+            ),
+            Tool(
+                name="visual_asset_verify",
+                description="Verify local image references, provenance, credits, and missing files.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {"check_external_urls": {"type": "boolean"}},
+                    "additionalProperties": False,
+                },
+            ),
+        ])
 
     @server.list_tools()
     async def list_tools() -> list[Tool]:
@@ -358,7 +547,13 @@ async def _serve_mcp(workspace_root: Path) -> None:
         return [
             TextContent(
                 type="text",
-                text=execute_workspace_tool(name, arguments, workspace_root),
+                text=execute_workspace_tool(
+                    name,
+                    arguments,
+                    workspace_root,
+                    visual_assets_enabled=visual_assets_enabled,
+                    visual_asset_service=asset_service,
+                ),
             )
         ]
 
@@ -378,11 +573,15 @@ def main() -> None:
     parser.add_argument("--directory", default=".")
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--ttl", type=int, default=PREVIEW_TTL_SECONDS)
+    parser.add_argument("--visual-assets", action="store_true")
     args = parser.parse_args()
     if args.preview_server:
         _preview_server(args.workspace, args.directory, args.port, args.ttl)
     else:
-        asyncio.run(_serve_mcp(workspace_tools._workspace_root(args.workspace)))
+        asyncio.run(_serve_mcp(
+            workspace_tools._workspace_root(args.workspace),
+            visual_assets_enabled=args.visual_assets,
+        ))
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ saved missions; new development-panel and voice-routed missions use OpenCode.
 
 - OpenCode CLI installed and available from the user's npm installation.
 - OpenCode authenticated with a free OpenCode or OpenCode Go model.
+- NIANG IA's Python environment has the `mcp` package from `requirements.txt`.
 - Visual Studio Code installed to view the selected project while a mission runs.
 
 OpenCode uses its existing local user configuration and provider credentials.
@@ -30,7 +31,10 @@ paid model.
 The development panel reports how many verified free models are available and
 shows the active model and attempt number in mission progress. This preflight
 checks the CLI model list and public pricing metadata; it does not verify
-generation authentication or send a prompt.
+generation authentication or send a prompt. It also checks that the active
+NIANG IA Python environment can import the MCP workspace server required for
+file and preview tools. The Windows launchers repair declared dependencies
+when this runtime package is missing.
 
 ## Modes and permissions
 
@@ -49,7 +53,7 @@ launch host code outside NIANG IA's action gate. Global OpenCode user settings
 and credentials remain in effect. Permission requests are checked against
 NIANG IA's workspace path rules before they are presented or approved.
 
-OpenCode receives a local stdio MCP server with only four bounded tools:
+OpenCode receives a local stdio MCP server with four base tools:
 
 - `run_check` runs a fixed Python/Node build, test, lint, or Git status check.
   Each check is individually confirmed and limited to 180 seconds.
@@ -62,22 +66,40 @@ OpenCode receives a local stdio MCP server with only four bounded tools:
   The preview expires after 30 minutes; `stop_preview` stops it sooner.
   Starting and stopping the preview require confirmation.
 
+When `visual-asset-intelligence` is selected, OpenCode also receives four
+mission-scoped visual tools: inspect local images, search configured Pixabay
+and Unsplash APIs, optionally search Pexels when both configured and explicitly
+approved, save a selected result, and verify image references/metadata/credits.
+The visual skill must be observed loading before these tools can be used.
+Provider searches, image writes, and visual verification require NIANG IA
+approval. Provider keys are read only from `NIANG_IA_PIXABAY_API_KEY`,
+`NIANG_IA_UNSPLASH_ACCESS_KEY`, or `NIANG_IA_PEXELS_API_KEY` and are passed only
+to the trusted local MCP child process when the visual skill is selected; they
+are not added to the model prompt or OpenCode's general child environment.
+Search results are cached locally with Pixabay's required 24-hour minimum
+retention; cache keys are one-way hashes, and provider credentials are not
+stored. No provider request is made when a key is absent.
+
 No general shell, arbitrary command, delete, deployment, or system-control
-tool is exposed. Plan mode denies all four tools. ACP messages are
+tool is exposed. Plan mode denies all MCP tools. ACP messages are
 newline-delimited JSON; the mission is capped at 80 reported tool actions and
 30 minutes.
 
 ## Skills and quality gate
 
 NIANG IA selects up to 10 skills from the curated `web_design_skills/` library
-for each mission: the 20 existing general skills and the 15-skill elite
-engineering profile (with `software-architecture` shared between them). The
+for each mission: the existing general skills, the 15-skill elite engineering
+profile (with `software-architecture` shared between them), and the dedicated
+`visual-asset-intelligence` skill. The
 engineering baseline includes `clean-code-engineering`,
 `testing-debugging-mastery`, and `secure-software-engineering`. The managed
 OpenCode config adds that source and permits the `skill` tool only for selected
 IDs; all other skill IDs are denied. Skills are read-only guidance and do not
 add workspace or shell permissions. Mission results distinguish selected
-skills from skill IDs OpenCode reported loading.
+skills from skill IDs OpenCode reported loading. If the visual asset skill is
+selected, the quality gate additionally requires host-reported asset
+verification and keeps visual composition review `NOT_TESTED` unless it was
+actually performed.
 
 The mission result includes a quality gate: `PASS`, `FAIL`, or `NOT_TESTED`
 (`NON TESTÉ`). It records host-observed test/build checks. Visual design,

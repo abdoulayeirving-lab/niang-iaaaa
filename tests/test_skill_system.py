@@ -150,6 +150,24 @@ class SkillCatalogTests(unittest.TestCase):
             "testing-debugging-mastery",
         }.issubset(selected))
 
+    def test_selects_visual_asset_skill_for_visual_web_missions_with_complementary_skills(self):
+        selected = select_skills(
+            "Create a luxury car dealership landing page with genuine photography and responsive images."
+        )
+        ids = set(selected.ids)
+        self.assertIn("visual-asset-intelligence", ids)
+        self.assertTrue({
+            "awwwards-level-web-design",
+            "advanced-ui-ux-responsive",
+            "performance-optimization",
+        }.issubset(ids))
+        self.assertLessEqual(len(ids), 10)
+
+    def test_does_not_add_web_design_skills_for_non_web_visual_assets(self):
+        ids = set(select_skills("Create original sprites and textures for a Godot game.").ids)
+        self.assertIn("visual-asset-intelligence", ids)
+        self.assertNotIn("awwwards-level-web-design", ids)
+
     def test_chooses_motion_framework_from_explicit_technology_without_loading_both(self):
         gsap = set(select_skills("Build a GSAP scroll timeline for this site.").ids)
         motion = set(select_skills("Implement Framer Motion React route transitions.").ids)
@@ -213,6 +231,37 @@ class SkillCatalogTests(unittest.TestCase):
             ],
         )
         self.assertEqual(report["status"], "FAIL")
+
+    def test_visual_asset_gate_requires_real_verification_and_visual_review(self):
+        unverified = evaluate_quality_gate(
+            "Create a website with real images.",
+            [],
+            selected_skill_ids=("visual-asset-intelligence",),
+        )
+        checks = {item["id"]: item["status"] for item in unverified["checks"]}
+        self.assertEqual(checks["visual_assets"], "NOT_TESTED")
+        self.assertEqual(checks["visual_asset_review"], "NOT_TESTED")
+
+        verified = evaluate_quality_gate(
+            "Create a website with real images.",
+            [
+                {
+                    "name": "visual-assets-integrity",
+                    "status": "PASS",
+                    "evidence": "Assets, provenance, references and credits verified.",
+                },
+                {
+                    "name": "visual_asset_review",
+                    "status": "NOT_TESTED",
+                    "evidence": "Composition and semantic fit were not visually reviewed.",
+                },
+            ],
+            selected_skill_ids=("visual-asset-intelligence",),
+        )
+        checks = {item["id"]: item["status"] for item in verified["checks"]}
+        self.assertEqual(checks["visual_assets"], "PASS")
+        self.assertEqual(checks["visual_asset_review"], "NOT_TESTED")
+        self.assertNotEqual(verified["status"], "PASS")
 
 
 if __name__ == "__main__":

@@ -428,7 +428,9 @@ class OpenCodeProcess:
                 "session/new",
                 {
                     "cwd": str(workspace_root),
-                    "mcpServers": [_workspace_tools_server(workspace_root)],
+                    "mcpServers": [
+                        _workspace_tools_server(workspace_root, selected_skill_ids)
+                    ],
                 },
                 timeout=120,
             )
@@ -764,6 +766,23 @@ def _managed_config(
             {"action": "niang_workspace_install_dependency", "resource": "*", "effect": tool_effect},
             {"action": "niang_workspace_start_preview", "resource": "*", "effect": tool_effect},
             {"action": "niang_workspace_stop_preview", "resource": "*", "effect": tool_effect},
+            *(
+                [
+                    {
+                        "action": f"niang_workspace_{tool}",
+                        "resource": "*",
+                        "effect": tool_effect,
+                    }
+                    for tool in (
+                        "visual_asset_inspect",
+                        "visual_asset_search",
+                        "visual_asset_use",
+                        "visual_asset_verify",
+                    )
+                ]
+                if "visual-asset-intelligence" in selected_skill_ids
+                else []
+            ),
         ]
 
     config = {
@@ -801,14 +820,39 @@ def _skill_prompt(goal: str, selected_skill_ids: Sequence[str]) -> str:
             f"{available}. Load the relevant skills with the skill tool before "
             "implementing, and always load testing-debugging-mastery. Other skill IDs are unavailable."
         )
+    if "visual-asset-intelligence" in selected_skill_ids:
+        sections.append(
+            "For visual tasks, inspect existing local assets first. Use the NIANG "
+            "visual asset tools for provider searches and project writes; those "
+            "actions require user approval. Never invent image paths. Record "
+            "provenance and attribution, then run visual asset verification. "
+            "Do not claim a visual review unless one was actually performed."
+        )
     return "\n\n".join(sections)
 
 
-def _workspace_tools_server(workspace_root: Path) -> dict[str, Any]:
+def _workspace_tools_server(
+    workspace_root: Path,
+    selected_skill_ids: Sequence[str] = (),
+) -> dict[str, Any]:
     server_script = Path(__file__).with_name("opencode_tools_server.py").resolve()
+    visual_assets_enabled = "visual-asset-intelligence" in selected_skill_ids
+    environment = {}
+    if visual_assets_enabled:
+        for key in (
+            "NIANG_IA_PIXABAY_API_KEY",
+            "NIANG_IA_UNSPLASH_ACCESS_KEY",
+            "NIANG_IA_PEXELS_API_KEY",
+        ):
+            value = os.environ.get(key)
+            if isinstance(value, str) and value.strip():
+                environment[key] = value
+    args = ["-u", str(server_script), "--workspace", str(workspace_root)]
+    if visual_assets_enabled:
+        args.append("--visual-assets")
     return {
         "name": "niang_workspace",
         "command": sys.executable,
-        "args": ["-u", str(server_script), "--workspace", str(workspace_root)],
-        "env": {},
+        "args": args,
+        "env": environment,
     }

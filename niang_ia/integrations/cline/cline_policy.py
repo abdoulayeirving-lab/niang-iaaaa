@@ -5,14 +5,23 @@ from pathlib import Path
 from typing import Any
 
 from agent import workspace_tools
+from agent.secrets import detect_sensitive_data
 from niang_ia.integrations.cline.cline_models import ClineMode
 
 
-READ_TOOLS = {"workspace_list_files", "workspace_read_file", "workspace_search"}
+READ_TOOLS = {
+    "workspace_list_files", "workspace_read_file", "workspace_search",
+    "workspace_visual_asset_inspect",
+}
 WRITE_TOOLS = {"workspace_write_file", "workspace_edit_file", "workspace_apply_patch"}
 CHECK_TOOLS = {"workspace_run_check"}
 INSTALL_TOOLS = {"workspace_install_dependency"}
-ALLOWED_TOOLS = READ_TOOLS | WRITE_TOOLS | CHECK_TOOLS | INSTALL_TOOLS
+VISUAL_ASSET_TOOLS = {
+    "workspace_visual_asset_search",
+    "workspace_visual_asset_use",
+    "workspace_visual_asset_verify",
+}
+ALLOWED_TOOLS = READ_TOOLS | WRITE_TOOLS | CHECK_TOOLS | INSTALL_TOOLS | VISUAL_ASSET_TOOLS
 
 _PACKAGE_NAME = re.compile(r"^(?:[A-Za-z0-9][A-Za-z0-9._-]*|@[A-Za-z0-9._-]+/[A-Za-z0-9._-]+)(?:@[A-Za-z0-9.*<>=!~^+-]+)?$")
 
@@ -21,6 +30,36 @@ def validate_tool_input(tool: str, values: Any, workspace_root: Path) -> dict:
     if tool not in ALLOWED_TOOLS or not isinstance(values, dict):
         raise workspace_tools.WorkspaceError("This Cline tool is not allowed.")
     args = dict(values)
+    if tool == "workspace_visual_asset_inspect":
+        if set(args) - {"path", "limit"}:
+            raise workspace_tools.WorkspaceError("Unknown visual asset inspection arguments.")
+        return args
+    if tool == "workspace_visual_asset_search":
+        if set(args) - {
+            "query", "orientation", "min_width", "min_height", "limit", "allow_pexels",
+        }:
+            raise workspace_tools.WorkspaceError("Unknown visual asset search arguments.")
+        query = args.get("query")
+        if (
+            not isinstance(query, str)
+            or             not 2 <= len(query.strip()) <= 120
+            or detect_sensitive_data(query)
+            or any(ord(char) < 32 for char in query)
+        ):
+            raise workspace_tools.WorkspaceError(
+                "The visual search query is invalid or contains sensitive information."
+            )
+        return args
+    if tool == "workspace_visual_asset_use":
+        if set(args) - {
+            "candidate_id", "relative_path", "placement", "output_format", "reuse_authorized",
+        }:
+            raise workspace_tools.WorkspaceError("Unknown visual asset use arguments.")
+        return args
+    if tool == "workspace_visual_asset_verify":
+        if set(args) - {"check_external_urls"}:
+            raise workspace_tools.WorkspaceError("Unknown visual asset verification arguments.")
+        return args
     if tool in {"workspace_list_files", "workspace_read_file", "workspace_search",
                 "workspace_write_file", "workspace_edit_file"}:
         workspace_tools._resolve_workspace_path(
@@ -37,6 +76,8 @@ def validate_tool_input(tool: str, values: Any, workspace_root: Path) -> dict:
 
 
 def approval_required(mode: ClineMode, tool: str, args: dict, workspace_root: Path) -> bool:
+    if tool in VISUAL_ASSET_TOOLS:
+        return True
     if tool in READ_TOOLS:
         return False
     if tool in INSTALL_TOOLS:
@@ -57,6 +98,35 @@ def approval_required(mode: ClineMode, tool: str, args: dict, workspace_root: Pa
 
 
 def approval_description(tool: str, args: dict) -> str:
+    if tool == "workspace_visual_asset_search":
+        provider_note = (
+            " Pexels is included only if explicitly enabled and configured."
+            if args.get("allow_pexels") is True
+            else ""
+        )
+        return (
+            f"Envoyer la requête « {args.get('query', '')} » aux fournisseurs d’images "
+            f"gratuits Pixabay/Unsplash.{provider_note}"
+        )
+    if tool == "workspace_visual_asset_use":
+        rights_note = (
+            " Confirmer que cette image locale a été fournie par l’utilisateur "
+            "ou que ses droits d’utilisation ont été vérifiés."
+            if str(args.get("candidate_id", "")).startswith("local:")
+            else ""
+        )
+        return (
+            f"Enregistrer l’asset {args.get('candidate_id', '')} dans le projet à "
+            f"« {args.get('relative_path', '') or args.get('placement', '')} » "
+            f"et ajouter ses métadonnées de provenance.{rights_note}"
+        )
+    if tool == "workspace_visual_asset_verify":
+        suffix = (
+            " Vérifiera aussi l’accès réseau aux URL Unsplash autorisées."
+            if args.get("check_external_urls") is True
+            else ""
+        )
+        return f"Vérifier les images, crédits et métadonnées du projet.{suffix}"
     if tool == "workspace_write_file":
         return f"Créer ou remplacer le fichier {Path(str(args.get('path', ''))).name}."
     if tool == "workspace_edit_file":

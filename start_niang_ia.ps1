@@ -23,6 +23,22 @@ if (-not $PY) {
     exit 1
 }
 
+& $PY -c "from mcp.server import Server; from mcp.server.stdio import stdio_server" 2>$null
+if ($LASTEXITCODE -ne 0) {
+    Get-CimInstance Win32_Process -Filter "Name='pythonw.exe' OR Name='python.exe'" |
+        Where-Object { $_.CommandLine -like '*main.py*' } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    $launcher = Join-Path $ROOT "START_NIANG_IA.bat"
+    if (-not (Test-Path $launcher)) {
+        Write-Error "MCP is missing and START_NIANG_IA.bat is unavailable to repair the Python environment."
+        exit 1
+    }
+    $setup = Start-Process -FilePath $env:ComSpec `
+        -ArgumentList @("/c", "`"$launcher`"") `
+        -WorkingDirectory $ROOT -Wait -PassThru
+    exit $setup.ExitCode
+}
+
 # Kill any existing NIANG IA instances (single instance).
 Get-CimInstance Win32_Process -Filter "Name='pythonw.exe' OR Name='python.exe'" |
     Where-Object { $_.CommandLine -like '*main.py*' } |
