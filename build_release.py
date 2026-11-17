@@ -36,6 +36,7 @@ SOURCE_DIRS = (
     "tests",
     "vision",
     "vision_engine",
+    "web_design_skills",
 )
 ROOT_FILES = (
     ".env.example",
@@ -69,6 +70,7 @@ EXCLUDED_DIRS = {
     ".git",
     ".gradle",
     ".idea",
+    ".legacy",
     ".pytest_cache",
     ".venv",
     "__pycache__",

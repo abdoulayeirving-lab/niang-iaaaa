@@ -26,12 +26,34 @@ SENSITIVE_NAMES = {
     "id_rsa", "id_ed25519",
 }
 APPROVED_CHECKS = {
+    # Python
     "python-tests": [sys.executable, "-m", "pytest", "-q"],
     "python-unittest": [sys.executable, "-m", "unittest"],
     "python-compile": [sys.executable, "-m", "compileall", "-q", "."],
+    # Node.js / JavaScript / TypeScript
     "npm-test": ["npm", "test"],
     "npm-build": ["npm", "run", "build"],
     "npm-lint": ["npm", "run", "lint"],
+    "tsc-check": ["npx", "tsc", "--noEmit"],
+    # Go
+    "go-build": ["go", "build", "./..."],
+    "go-test": ["go", "test", "./..."],
+    "go-vet": ["go", "vet", "./..."],
+    # Rust
+    "cargo-check": ["cargo", "check"],
+    "cargo-test": ["cargo", "test"],
+    "cargo-build": ["cargo", "build"],
+    # .NET / C#
+    "dotnet-build": ["dotnet", "build"],
+    "dotnet-test": ["dotnet", "test"],
+    # Java
+    "mvn-test": ["mvn", "test"],
+    "mvn-compile": ["mvn", "compile"],
+    "gradle-test": ["gradle", "test"],
+    "gradle-build": ["gradle", "build"],
+    # PHP
+    "php-lint": ["php", "-l"],
+    # Git (language-agnostic)
     "git-status": ["git", "status", "--short"],
     "git-diff-check": ["git", "diff", "--check"],
 }
@@ -584,8 +606,41 @@ def install_dependency(
             raise WorkspaceError("The npm command is unavailable.")
         command = [npm, "install", "--save", "--ignore-scripts", "--", package]
         env_overrides = {"npm_config_cache": str(root / ".niang-npm-cache")}
+    elif ecosystem == "go":
+        go = shutil.which("go.exe") or shutil.which("go")
+        if go is None:
+            raise WorkspaceError("The go command is unavailable.")
+        command = [go, "get", package]
+        env_overrides = {}
+    elif ecosystem == "rust":
+        cargo = shutil.which("cargo.exe") or shutil.which("cargo")
+        if cargo is None:
+            raise WorkspaceError("The cargo command is unavailable.")
+        command = [cargo, "add", package]
+        env_overrides = {}
+    elif ecosystem == "dotnet":
+        dotnet = shutil.which("dotnet.exe") or shutil.which("dotnet")
+        if dotnet is None:
+            raise WorkspaceError("The dotnet command is unavailable.")
+        command = [dotnet, "add", "package", package]
+        env_overrides = {}
+    elif ecosystem == "php":
+        composer = shutil.which("composer.cmd") or shutil.which("composer")
+        if composer is None:
+            raise WorkspaceError("The composer command is unavailable.")
+        command = [composer, "require", "--no-interaction", package]
+        env_overrides = {}
+    elif ecosystem == "ruby":
+        gem = shutil.which("gem.cmd") or shutil.which("gem")
+        if gem is None:
+            raise WorkspaceError("The gem command is unavailable.")
+        command = [gem, "install", package]
+        env_overrides = {}
     else:
-        raise WorkspaceError("Only Python and Node dependencies are supported.")
+        raise WorkspaceError(
+            f"Unsupported dependency ecosystem '{ecosystem}'. "
+            "Supported: python, node, go, rust, dotnet, php, ruby."
+        )
 
     completed = _run_workspace_process(
         command,
@@ -704,11 +759,6 @@ def _workspace_process_descendants(root_pid: int, psutil_module) -> list:
 
 def _terminate_workspace_process_tree(process, psutil_module, grace_seconds: float = 3) -> None:
     root_pid = process.pid
-    try:
-        process.terminate()
-    except OSError:
-        pass
-
     descendants = _workspace_process_descendants(root_pid, psutil_module)
     for child in reversed(descendants):
         try:
@@ -717,22 +767,31 @@ def _terminate_workspace_process_tree(process, psutil_module, grace_seconds: flo
             continue
 
     try:
-        process.communicate(timeout=grace_seconds)
-    except subprocess.TimeoutExpired:
-        descendants = _workspace_process_descendants(root_pid, psutil_module)
-        for child in reversed(descendants):
-            try:
-                child.kill()
-            except psutil_module.NoSuchProcess:
-                continue
+        process.terminate()
+    except OSError:
+        pass
+
+    _, alive = psutil_module.wait_procs(descendants, timeout=grace_seconds)
+    for child in reversed(alive):
         try:
-            if process.poll() is None:
-                process.kill()
-            process.communicate(timeout=2)
-        except subprocess.TimeoutExpired as exc:
-            raise WorkspaceError(
-                "The approved project process tree could not be confirmed stopped."
-            ) from exc
+            child.kill()
+        except psutil_module.NoSuchProcess:
+            continue
+    if alive:
+        _, alive = psutil_module.wait_procs(alive, timeout=2)
+    if alive:
+        raise WorkspaceError(
+            "The approved project process tree could not be confirmed stopped."
+        )
+
+    if process.poll() is None:
+        process.kill()
+    try:
+        process.communicate(timeout=2)
+    except subprocess.TimeoutExpired as exc:
+        raise WorkspaceError(
+            "The approved project process tree could not be confirmed stopped."
+        ) from exc
 
     descendants = _workspace_process_descendants(root_pid, psutil_module)
     for child in reversed(descendants):
@@ -760,3 +819,128 @@ def _terminate_workspace_process_tree(process, psutil_module, grace_seconds: flo
         raise WorkspaceError(
             "The approved project process tree could not be confirmed stopped."
         )
+
+
+# ---------------------------------------------------------------------------
+# Project detection — multilanguage support
+# ---------------------------------------------------------------------------
+
+_PROJECT_MARKERS = {
+    "package.json": {"languages": ["javascript", "typescript"], "ecosystem": "node"},
+    "tsconfig.json": {"languages": ["typescript"], "ecosystem": "node"},
+    "vite.config.ts": {"languages": ["typescript"], "ecosystem": "node"},
+    "vite.config.js": {"languages": ["javascript"], "ecosystem": "node"},
+    "next.config.js": {"languages": ["javascript", "typescript"], "ecosystem": "node"},
+    "next.config.mjs": {"languages": ["javascript", "typescript"], "ecosystem": "node"},
+    "requirements.txt": {"languages": ["python"], "ecosystem": "python"},
+    "pyproject.toml": {"languages": ["python"], "ecosystem": "python"},
+    "setup.py": {"languages": ["python"], "ecosystem": "python"},
+    "setup.cfg": {"languages": ["python"], "ecosystem": "python"},
+    "go.mod": {"languages": ["go"], "ecosystem": "go"},
+    "go.sum": {"languages": ["go"], "ecosystem": "go"},
+    "Cargo.toml": {"languages": ["rust"], "ecosystem": "rust"},
+    "Cargo.lock": {"languages": ["rust"], "ecosystem": "rust"},
+    "pom.xml": {"languages": ["java"], "ecosystem": "java"},
+    "build.gradle": {"languages": ["java", "kotlin"], "ecosystem": "java"},
+    "build.gradle.kts": {"languages": ["java", "kotlin"], "ecosystem": "java"},
+    "settings.gradle": {"languages": ["java", "kotlin"], "ecosystem": "java"},
+    "composer.json": {"languages": ["php"], "ecosystem": "php"},
+    "pubspec.yaml": {"languages": ["dart"], "ecosystem": "dart"},
+    "Gemfile": {"languages": ["ruby"], "ecosystem": "ruby"},
+    "CMakeLists.txt": {"languages": ["c", "cpp"], "ecosystem": "cpp"},
+    "Makefile": {"languages": ["c", "cpp"], "ecosystem": "cpp"},
+    "makefile": {"languages": ["c", "cpp"], "ecosystem": "cpp"},
+    "*.csproj": {"languages": ["csharp"], "ecosystem": "dotnet"},
+    "*.sln": {"languages": ["csharp"], "ecosystem": "dotnet"},
+}
+
+
+def detect_project_languages(workspace_root: str | os.PathLike[str]) -> dict[str, Any]:
+    """Analyse un dossier de projet et retourne les langages, écosystèmes et frameworks détectés.
+
+    Lecture seule : ne modifie aucun fichier. Identifie les marqueurs de configuration
+    et les extensions de fichiers sources présents à la racine du projet.
+    """
+    root = Path(workspace_root)
+    if not root.is_dir():
+        return {
+            "languages": [],
+            "ecosystems": [],
+            "frameworks": [],
+            "markers": [],
+            "source_extensions": [],
+            "detected": False,
+        }
+
+    languages: set[str] = set()
+    ecosystems: set[str] = set()
+    markers_found: list[str] = []
+    frameworks: set[str] = set()
+
+    try:
+        entries = [p.name for p in root.iterdir()]
+    except OSError:
+        entries = []
+
+    for entry in entries:
+        info = _PROJECT_MARKERS.get(entry)
+        if info:
+            languages.update(info["languages"])
+            ecosystems.add(info["ecosystem"])
+            markers_found.append(entry)
+            continue
+        for pattern, info in _PROJECT_MARKERS.items():
+            if "*" in pattern:
+                prefix, _, suffix = pattern.partition("*")
+                if entry.startswith(prefix) and entry.endswith(suffix):
+                    languages.update(info["languages"])
+                    ecosystems.add(info["ecosystem"])
+                    markers_found.append(entry)
+                    break
+
+    if "package.json" in entries:
+        frameworks.add("node")
+    if "tsconfig.json" in entries:
+        frameworks.add("typescript")
+    if "next.config.js" in entries or "next.config.mjs" in entries:
+        frameworks.add("nextjs")
+    if "vite.config.ts" in entries or "vite.config.js" in entries:
+        frameworks.add("vite")
+    if "pyproject.toml" in entries:
+        frameworks.add("python-packaging")
+    if "Cargo.toml" in entries:
+        frameworks.add("cargo")
+    if "composer.json" in entries:
+        frameworks.add("composer")
+    if "pubspec.yaml" in entries:
+        frameworks.add("flutter")
+
+    source_extensions: set[str] = set()
+    ext_to_lang = {
+        ".py": "python", ".js": "javascript", ".jsx": "jsx", ".ts": "typescript",
+        ".tsx": "tsx", ".go": "go", ".rs": "rust", ".cs": "csharp", ".java": "java",
+        ".kt": "kotlin", ".kts": "kotlin", ".dart": "dart", ".swift": "swift",
+        ".c": "c", ".cpp": "cpp", ".cc": "cpp", ".cxx": "cpp", ".h": "c",
+        ".hpp": "cpp", ".php": "php", ".rb": "ruby", ".sql": "sql", ".html": "html",
+        ".css": "css", ".json": "json", ".yaml": "yaml", ".yml": "yaml",
+        ".toml": "toml", ".md": "markdown", ".xml": "xml", ".sh": "shell",
+        ".ps1": "powershell",
+    }
+    try:
+        for entry in root.iterdir():
+            if entry.is_file():
+                ext = entry.suffix.lower()
+                if ext in ext_to_lang:
+                    source_extensions.add(ext)
+                    languages.add(ext_to_lang[ext])
+    except OSError:
+        pass
+
+    return {
+        "languages": sorted(languages),
+        "ecosystems": sorted(ecosystems),
+        "frameworks": sorted(frameworks),
+        "markers": markers_found,
+        "source_extensions": sorted(source_extensions),
+        "detected": bool(markers_found or source_extensions),
+    }

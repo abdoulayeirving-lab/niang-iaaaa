@@ -93,7 +93,6 @@ from actions.cmd_control       import cmd_control
 from actions.desktop           import desktop_control
 from actions.browser_control   import browser_control
 from actions.file_controller   import file_controller
-from actions.code_helper       import code_helper
 from actions.dev_agent         import dev_agent
 from actions.web_search        import web_search as web_search_action
 from actions.web_fetch         import web_fetch as web_fetch_action
@@ -925,24 +924,7 @@ TOOL_DECLARATIONS = [
             "required": ["action"]
         }
     },
-    {
-        "name": "code_helper",
-        "description": "Writes, edits, explains, runs, or builds code files.",
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {
-                "action":      {"type": "STRING", "description": "write | edit | explain | run | build | auto (default: auto)"},
-                "description": {"type": "STRING", "description": "What the code should do or what change to make"},
-                "language":    {"type": "STRING", "description": "Programming language (default: python)"},
-                "output_path": {"type": "STRING", "description": "Where to save the file"},
-                "file_path":   {"type": "STRING", "description": "Path to existing file for edit/explain/run/build"},
-                "code":        {"type": "STRING", "description": "Raw code string for explain"},
-                "args":        {"type": "STRING", "description": "CLI arguments for run/build"},
-                "timeout":     {"type": "INTEGER", "description": "Execution timeout in seconds (default: 30)"},
-            },
-            "required": ["action"]
-        }
-    },
+
     {
         "name": "dev_agent",
         "description": "Builds complete multi-file projects from scratch: plans, writes files, installs deps, opens VSCode, runs and fixes errors.",
@@ -976,13 +958,13 @@ TOOL_DECLARATIONS = [
     {
         "name": "software_development",
         "description": (
-            "Starts a Cline-powered software-development mission for analyzing "
+            "Starts an OpenCode-powered software-development mission for analyzing "
             "architecture, changing source files, creating applications, diagnosing "
             "code errors, running approved checks, and reporting results. Opens the "
             "selected workspace in Visual Studio Code so file changes are visible live. Use this "
             "for software-project work instead of agent_task, code_helper, or dev_agent. "
-            "The mission is confined to NIANG_IA_WORKSPACE_ROOT and requires explicit "
-            "confirmation before it starts."
+            "The mission is confined to NIANG_IA_WORKSPACE_ROOT, uses the local OpenCode "
+            "configuration and requires confirmation before modifying existing files."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -2135,9 +2117,9 @@ class KaizumiLive:
         self.ui.on_text_command = self._on_text_command
         self.ui.on_agent_start = self._start_agent_task
         self.ui.on_agent_cancel = self._cancel_agent_task
-        self.ui.on_cline_start = self._start_cline_task
+        self.ui.on_cline_start = self._start_opencode_task
         self.ui.on_cline_cancel = self._cancel_agent_task
-        self.ui.on_cline_health = self._cline_health
+        self.ui.on_cline_health = self._opencode_health
         self.ui.on_application_close = self._shutdown_agent_services
         self.ui.on_farewell = self._speak_farewell
         self.ui.on_files_selected = self._on_files_selected
@@ -2480,22 +2462,22 @@ class KaizumiLive:
             tool_registry=self._tool_registry,
         )
 
-    def _start_cline_task(self, goal: str, workspace_root: str, mode: str) -> str:
+    def _start_opencode_task(self, goal: str, workspace_root: str, mode: str) -> str:
         from agent.task_queue import get_queue
         return get_queue().submit(
             goal=goal,
             speak=self.speak,
             approval_callback=self.ui.request_cline_approval,
             tool_registry=self._tool_registry,
-            executor_kind="cline",
-            cline_workspace_root=workspace_root,
-            cline_mode=mode,
+            executor_kind="opencode",
+            opencode_workspace_root=workspace_root,
+            opencode_mode=mode,
         )
 
     @staticmethod
-    def _cline_health() -> dict:
-        from niang_ia.integrations.cline.cline_health import check_cline_health
-        return check_cline_health()
+    def _opencode_health() -> dict:
+        from niang_ia.integrations.opencode.opencode_health import check_opencode_health
+        return check_opencode_health()
 
     def _cancel_agent_task(self, task_id: str) -> bool:
         from agent.task_queue import get_queue
@@ -2837,11 +2819,9 @@ class KaizumiLive:
         def _software_development(args):
             from agent import workspace_tools
             from agent.task_queue import get_queue
-            from niang_ia.integrations.cline.cline_models import ClineMode
-
-            mode = str(args.get("mode", ClineMode.ASSISTED.value)).strip().lower()
-            if mode not in {item.value for item in ClineMode}:
-                return "Invalid Cline mode. Choose plan, assisted, or autonomous_controlled."
+            mode = str(args.get("mode", "assisted")).strip().lower()
+            if mode not in {"plan", "assisted", "autonomous_controlled"}:
+                return "Invalid OpenCode mode. Choose plan, assisted, or autonomous_controlled."
             root = workspace_tools._workspace_root()
             ui.show_development_panel(str(root))
             task_id = get_queue().submit(
@@ -2849,11 +2829,11 @@ class KaizumiLive:
                 speak=speak,
                 approval_callback=ui.request_cline_approval,
                 tool_registry=self._tool_registry,
-                executor_kind="cline",
-                cline_workspace_root=str(root),
-                cline_mode=mode,
+                executor_kind="opencode",
+                opencode_workspace_root=str(root),
+                opencode_mode=mode,
             )
-            return f"Cline software mission queued (ID: {task_id})."
+            return f"OpenCode software mission queued (ID: {task_id})."
 
         def _recall(args):
             from memory.memory_manager import search_memory
@@ -3165,7 +3145,6 @@ class KaizumiLive:
             "computer_settings": (lambda a: computer_settings(parameters=a, response=None, player=ui), 120),
             "cmd_control":       (lambda a: cmd_control(parameters=a, player=ui), 120),
             "desktop_control":   (lambda a: desktop_control(parameters=a, player=ui), 60),
-            "code_helper":       (lambda a: code_helper(parameters=a, player=ui, speak=speak), 180),
             "dev_agent":         (lambda a: dev_agent(parameters=a, player=ui, speak=speak), 180),
             "agent_task":        (_agent_task, 15),
             "software_development": (_software_development, 15),

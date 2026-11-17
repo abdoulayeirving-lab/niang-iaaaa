@@ -572,7 +572,7 @@ def describe(name: str, args: dict | None) -> str:
     if name == "software_development":
         mode = str(args.get("mode", "assisted")).strip().lower()
         return (
-            f"start the requested Cline software mission in {mode} mode "
+            f"start the requested OpenCode software mission in {mode} mode "
             "inside the authorized project workspace"
         )
 

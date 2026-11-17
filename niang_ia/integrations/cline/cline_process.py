@@ -7,7 +7,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from niang_ia.integrations.cline.cline_config import ClineConfig, MAX_MISSION_SECONDS
 from niang_ia.integrations.cline.cline_events import public_event, redact_text
@@ -17,6 +17,10 @@ from niang_ia.integrations.cline.cline_protocol import ClineProtocolError, decod
 
 
 class ClineProcessError(RuntimeError):
+    pass
+
+
+class ClineFreeModelLimitError(ClineProcessError):
     pass
 
 
@@ -46,6 +50,7 @@ class ClineProcess:
         *,
         on_tool_request: Callable[[str, dict], str],
         on_approval_request: Callable[[str, dict], bool],
+        selected_skills: Sequence[dict[str, str]] = (),
         on_event: Callable[[ClineEvent], None] | None = None,
         cancel_flag: threading.Event | None = None,
     ) -> ClineResult:
@@ -77,6 +82,7 @@ class ClineProcess:
         completed: dict[str, Any] = {}
         stderr_output: list[str] = []
         final_result: ClineResult | None = None
+        quota_exhausted = False
         deadline = time.monotonic() + min(config.mission_timeout_seconds, MAX_MISSION_SECONDS)
         cancel_sent_at: float | None = None
 
@@ -155,7 +161,8 @@ class ClineProcess:
                 "mode": mode.value,
                 "provider_id": config.provider_id,
                 "model_id": config.model_id,
-                "base_url": config.base_url,
+                "base_url": config.base_url if config.provider_id == "ollama" else "",
+                "selected_skills": list(selected_skills),
             })
             stdout_eof = False
             while not stdout_eof:
@@ -203,6 +210,7 @@ class ClineProcess:
                 elif message_type == "approval_request":
                     threading.Thread(target=handle_approval, args=(message,), daemon=True).start()
                 elif message_type == "agent_event":
+                    quota_exhausted = quota_exhausted or message.get("quotaExhausted") is True
                     event_data = public_event({
                         "type": message.get("eventType", "agent_event"),
                         "message": message.get("message", ""),
@@ -221,6 +229,10 @@ class ClineProcess:
                     if status != "completed":
                         if cancel_flag.is_set() or status == "aborted":
                             raise ClineCancelled("Cline mission was cancelled.")
+                        if quota_exhausted or message.get("quotaExhausted") is True:
+                            raise ClineFreeModelLimitError(
+                                text or f"The free quota for {config.model_id} is exhausted."
+                            )
                         raise ClineProcessError(text or f"Cline run ended with status {status}.")
                     final_result = ClineResult(status="completed", text=text, events=events)
                 elif message_type == "fatal":

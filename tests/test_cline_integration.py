@@ -13,7 +13,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from agent.task_queue import TaskQueue
 from agent.workspace_tools import WorkspaceError, read_file, write_file
 from niang_ia.integrations.cline.cline_config import (
+    CLINE_FREE_MODELS,
     DEFAULT_MODEL,
+    DEFAULT_OLLAMA_MODEL,
+    DEFAULT_PROVIDER,
     MAX_ACTIONS,
     MAX_ACTION_SECONDS,
     ClineConfig,
@@ -24,6 +27,7 @@ from niang_ia.integrations.cline.cline_manager import ClineExecutionError, Cline
 from niang_ia.integrations.cline.cline_models import ClineMode, ClineResult
 from niang_ia.integrations.cline.cline_process import (
     ClineCancelled,
+    ClineFreeModelLimitError,
     ClineProcess,
     ClineProcessError,
 )
@@ -92,6 +96,21 @@ class _FakeProcess:
                 self.stdout.push({"type": "run_result", "status": "completed", "outputText": "Plan ready."})
                 self.stdout.close()
                 self.exit_code = 0
+            elif self.scenario == "quota":
+                self.stdout.push({
+                    "type": "agent_event",
+                    "eventType": "run-failed",
+                    "message": "Free model usage limit reached.",
+                    "quotaExhausted": True,
+                })
+                self.stdout.push({
+                    "type": "run_result",
+                    "status": "failed",
+                    "outputText": "Free model usage limit reached.",
+                    "quotaExhausted": True,
+                })
+                self.stdout.close()
+                self.exit_code = 0
             elif self.scenario == "tool":
                 self.stdout.push({
                     "type": "tool_request",
@@ -151,7 +170,11 @@ class _FakeEngineProcess:
     def __init__(self, action):
         self.action = action
 
-    def run(self, goal, config, mode, *, on_tool_request, on_approval_request, on_event, cancel_flag):
+    def run(
+        self, goal, config, mode, *, on_tool_request, on_approval_request,
+        selected_skills=(), on_event, cancel_flag,
+    ):
+        self.selected_skills = tuple(selected_skills)
         result = self.action(
             goal, config, mode, on_tool_request, on_approval_request, on_event, cancel_flag
         )
@@ -195,11 +218,19 @@ class ClineProtocolTests(unittest.TestCase):
                 ClineMode.PLAN,
                 on_tool_request=lambda *_: "",
                 on_approval_request=lambda *_: False,
+                selected_skills=[{
+                    "id": "testing-debugging-mastery",
+                    "description": "Verify behavior with evidence.",
+                }],
             )
         self.assertEqual(result.status, "completed")
         self.assertEqual(result.text, "Plan ready.")
         self.assertEqual(result.events[0].event_type, "run-started")
         self.assertEqual(child.messages[0]["type"], "start")
+        self.assertEqual(
+            child.messages[0]["selected_skills"],
+            [{"id": "testing-debugging-mastery", "description": "Verify behavior with evidence."}],
+        )
 
     def test_process_routes_tool_requests_without_real_cline(self):
         child = _FakeProcess("tool")
@@ -335,6 +366,40 @@ class ClineEngineTests(unittest.TestCase):
             )
         self.assertFalse((self.root / "main.py").exists())
 
+    def test_selected_skill_is_loaded_through_the_host_and_injected_as_metadata(self):
+        def action(_goal, _config, _mode, run_tool, *_):
+            instructions = run_tool(
+                "workspace_load_skill",
+                {"skill_id": "desktop-engineering"},
+            )
+            run_tool("workspace_list_files", {})
+            return instructions
+
+        engine = self.engine(action)
+        result = engine.execute(
+            "Create a desktop Tkinter application",
+            self.root,
+            ClineMode.PLAN,
+        )
+        self.assertIn("# desktop-engineering", result.text)
+        self.assertIn(
+            "desktop-engineering",
+            [skill["id"] for skill in engine.process.selected_skills],
+        )
+        self.assertIn("desktop-engineering", result.loaded_skills)
+        self.assertIn("testing-debugging-mastery", result.selected_skills)
+
+    def test_skill_loader_rejects_an_id_not_selected_for_the_mission(self):
+        def action(_goal, _config, _mode, run_tool, *_):
+            return run_tool("workspace_load_skill", {"skill_id": "mobile-engineering"})
+
+        with self.assertRaisesRegex(ClineEngineError, "not selected"):
+            self.engine(action).execute(
+                "Create a desktop Tkinter application",
+                self.root,
+                ClineMode.PLAN,
+            )
+
     def test_autonomous_mode_only_writes_new_files_inside_workspace(self):
         def action(goal, config, mode, run_tool, approve, *_):
             self.assertTrue(approve("workspace_write_file", {"path": "new.py"}))
@@ -364,6 +429,67 @@ class ClineEngineTests(unittest.TestCase):
         self.assertEqual(len(prompts), 1)
         self.assertNotIn("content", prompts[0][1])
 
+    def test_free_model_quota_switches_to_the_next_free_model(self):
+        class QuotaThenSuccess:
+            def __init__(self):
+                self.calls = []
+
+            def run(
+                self, goal, config, mode, *, on_tool_request, on_approval_request,
+                selected_skills=(), on_event, cancel_flag,
+            ):
+                self.calls.append((goal, config.model_id))
+                if len(self.calls) == 1:
+                    raise ClineFreeModelLimitError("Free model usage limit reached.")
+                on_tool_request("workspace_list_files", {"path": "."})
+                return ClineResult(status="completed", text="Continued.")
+
+        process = QuotaThenSuccess()
+        result = ClineEngine(process=process, health_check=_healthy).execute(
+            "Create a project",
+            self.root,
+            ClineMode.PLAN,
+        )
+
+        self.assertEqual(
+            [model_id for _, model_id in process.calls],
+            list(CLINE_FREE_MODELS[:2]),
+        )
+        self.assertIn("Continue from the current workspace state", process.calls[1][0])
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.actions, 1)
+
+    def test_non_quota_provider_errors_do_not_trigger_fallback(self):
+        class FailedProcess:
+            calls = 0
+
+            def run(self, *_args, **_kwargs):
+                self.calls += 1
+                raise ClineProcessError("Authentication failed.")
+
+        process = FailedProcess()
+        with self.assertRaisesRegex(ClineEngineError, "Authentication failed"):
+            ClineEngine(process=process, health_check=_healthy).execute(
+                "Create a project", self.root, ClineMode.PLAN
+            )
+        self.assertEqual(process.calls, 1)
+
+    def test_exhausted_cline_quotas_stop_without_a_paid_fallback(self):
+        class AlwaysQuota:
+            def __init__(self):
+                self.models = []
+
+            def run(self, _goal, config, *_args, **_kwargs):
+                self.models.append(config.model_id)
+                raise ClineFreeModelLimitError("Free model usage limit reached.")
+
+        process = AlwaysQuota()
+        with self.assertRaisesRegex(ClineEngineError, "No paid model was used"):
+            ClineEngine(process=process, health_check=_healthy).execute(
+                "Create a project", self.root, ClineMode.PLAN
+            )
+        self.assertEqual(process.models, list(CLINE_FREE_MODELS))
+
     def test_write_tool_cannot_run_without_an_engine_approval_grant(self):
         def action(_goal, _config, _mode, run_tool, *_):
             return run_tool(
@@ -377,30 +503,43 @@ class ClineEngineTests(unittest.TestCase):
         self.assertFalse((self.root / "unapproved.py").exists())
 
     def test_install_and_executable_checks_still_require_approval_in_autonomous_mode(self):
+        approval_requests = []
+
         def action(goal, config, mode, run_tool, approve, *_):
-            self.assertFalse(approve(
-                "workspace_install_dependency",
-                {"ecosystem": "node", "package": "example-package"},
-            ))
-            self.assertFalse(approve(
-                "workspace_run_check",
-                {"check": "python-tests"},
-            ))
+            for check in ("python-tests", "npm-lint", "tsc-check", "go-vet",
+                          "cargo-check", "dotnet-build"):
+                self.assertTrue(approve("workspace_run_check", {"check": check}))
             self.assertTrue(approve(
                 "workspace_run_check",
                 {"check": "git-status"},
             ))
+            self.assertTrue(approve(
+                "workspace_install_dependency",
+                {"ecosystem": "node", "package": "example-package"},
+            ))
             run_tool("workspace_list_files", {})
             return "checked"
 
+        def request_approval(tool, parameters, description, cancel_flag):
+            approval_requests.append((tool, parameters, description))
+            return True
+
         result = self.engine(action).execute(
             "Inspect project", self.root, "autonomous_controlled",
+            approval_callback=request_approval,
         )
         self.assertEqual(result.status, "completed")
 
-        from niang_ia.integrations.cline.cline_engine import _SAFE_AUTONOMOUS_CHECKS
-        self.assertNotIn("python-tests", _SAFE_AUTONOMOUS_CHECKS)
-        self.assertNotIn("npm-test", _SAFE_AUTONOMOUS_CHECKS)
+        requested_checks = [
+            item[1]["description"] for item in approval_requests
+            if item[0] == "workspace_run_check"
+        ]
+        self.assertEqual(len(requested_checks), 6)
+        self.assertTrue(all("Exécuter le contrôle" in item for item in requested_checks))
+        self.assertEqual(
+            sum(item[0] == "workspace_install_dependency" for item in approval_requests),
+            1,
+        )
 
     def test_action_limit_cannot_exceed_twenty(self):
         def action(goal, config, mode, run_tool, *_):
@@ -437,6 +576,17 @@ class ClineEngineTests(unittest.TestCase):
             ClineConfig(self.root, max_actions=MAX_ACTIONS + 1)
         with self.assertRaises(ValueError):
             ClineConfig(self.root, action_timeout_seconds=MAX_ACTION_SECONDS + 1)
+
+    def test_config_allows_only_the_cline_free_fallback_models(self):
+        config = ClineConfig(self.root)
+        self.assertEqual(config.provider_id, DEFAULT_PROVIDER)
+        self.assertEqual(config.model_id, DEFAULT_MODEL)
+        self.assertEqual(
+            ClineConfig(self.root, provider_id="ollama").model_id,
+            DEFAULT_OLLAMA_MODEL,
+        )
+        with self.assertRaisesRegex(ValueError, "only the configured free models"):
+            ClineConfig(self.root, provider_id="cline", model_id="anthropic/paid")
 
     def test_queue_accepts_specialized_missions_without_running_a_real_engine(self):
         queue_instance = TaskQueue(persist=False)
@@ -477,14 +627,31 @@ class ClineEngineTests(unittest.TestCase):
         ) as engine_type:
             engine_type.return_value.execute.side_effect = (
                 lambda *_args, **_kwargs: call_order.append("engine")
-                or ClineResult(status="completed", text="Plan generated.", verified=True)
+                or ClineResult(
+                    status="completed",
+                    text="Plan generated.",
+                    verified=True,
+                    quality_gate={
+                        "status": "NOT_TESTED",
+                        "checks": [{
+                            "id": "tests",
+                            "name": "Automated tests",
+                            "status": "NOT_TESTED",
+                            "evidence": [],
+                        }],
+                    },
+                    selected_skills=["testing-debugging-mastery"],
+                    loaded_skills=["testing-debugging-mastery"],
+                )
             )
             queue_instance._run_task(task)
 
         engine_type.return_value.execute.assert_called_once()
         self.assertEqual(call_order, ["vscode", "engine"])
         self.assertEqual(task.status, TaskStatus.COMPLETED)
-        self.assertEqual(task.result, "Plan generated.")
+        self.assertIn("Plan generated.", task.result)
+        self.assertIn("Skills loaded: testing-debugging-mastery", task.result)
+        self.assertIn("QUALITY GATE: NON TESTÉ", task.result)
 
     def test_queue_does_not_run_cline_if_vscode_cannot_open(self):
         from agent.task_queue import Task, TaskStatus
@@ -530,17 +697,40 @@ class ClineEngineTests(unittest.TestCase):
         self.assertFalse(kwargs["shell"])
 
     def test_child_environment_does_not_inherit_api_keys(self):
-        with patch.dict(os.environ, {"GEMINI_API_KEY": "not-forwarded", "OPENAI_API_KEY": "not-forwarded"}):
+        with patch.dict(os.environ, {
+            "GEMINI_API_KEY": "not-forwarded",
+            "OPENAI_API_KEY": "not-forwarded",
+            "CLINE_API_KEY": "not-forwarded",
+        }):
             env = _safe_child_environment()
         self.assertNotIn("GEMINI_API_KEY", env)
         self.assertNotIn("OPENAI_API_KEY", env)
+        self.assertNotIn("CLINE_API_KEY", env)
+
+    def test_process_reports_a_typed_free_quota_failure(self):
+        child = _FakeProcess("quota")
+        process = ClineProcess(
+            node_executable="fake-node",
+            worker_path=Path(__file__),
+            sdk_entrypoint=Path(__file__),
+            popen=lambda *args, **kwargs: child,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(ClineFreeModelLimitError):
+                process.run(
+                    "Create a project",
+                    ClineConfig(Path(directory)),
+                    ClineMode.PLAN,
+                    on_tool_request=lambda *_: "",
+                    on_approval_request=lambda *_: False,
+                )
 
 
 class ClineHealthTests(unittest.TestCase):
-    def test_default_model_is_tool_calling_compatible_choice(self):
-        # qwen2.5-coder:7b emitted tool calls as plain text via Ollama in this stack;
-        # default must target a model with native tool-call support.
-        self.assertEqual(DEFAULT_MODEL, "qwen2.5:7b")
+    def test_default_provider_uses_the_cline_free_fallback_order(self):
+        self.assertEqual(DEFAULT_PROVIDER, "cline")
+        self.assertEqual(DEFAULT_MODEL, CLINE_FREE_MODELS[0])
+        self.assertEqual(len(CLINE_FREE_MODELS), 3)
 
     def test_cli_detection_finds_the_installed_package_entry(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -569,9 +759,9 @@ class ClineHealthTests(unittest.TestCase):
             return_value="3.0.74",
         ), patch(
             "niang_ia.integrations.cline.cline_health._probe_ollama",
-            return_value={"available": True, "models": [DEFAULT_MODEL], "error": None},
+            return_value={"available": True, "models": [DEFAULT_OLLAMA_MODEL], "error": None},
         ):
-            result = check_cline_health()
+            result = check_cline_health(provider_id="ollama")
         self.assertTrue(result["ready"])
         self.assertEqual(result["authentication"], "not_required_for_local_ollama")
         self.assertNotIn("api_key", json.dumps(result).lower())

@@ -31,7 +31,7 @@ def validate_tool_input(tool: str, values: Any, workspace_root: Path) -> dict:
     if tool == "workspace_install_dependency":
         ecosystem = args.get("ecosystem")
         package = args.get("package")
-        if ecosystem not in {"python", "node"} or not isinstance(package, str) or not _PACKAGE_NAME.fullmatch(package):
+        if ecosystem not in {"python", "node", "go", "rust", "dotnet", "php", "ruby"} or not isinstance(package, str) or not _PACKAGE_NAME.fullmatch(package):
             raise workspace_tools.WorkspaceError("The requested dependency specification is not allowed.")
     return args
 

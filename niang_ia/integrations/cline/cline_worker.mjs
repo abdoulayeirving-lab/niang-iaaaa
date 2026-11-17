@@ -1,9 +1,11 @@
+import path from "node:path";
 import readline from "node:readline";
 import { pathToFileURL } from "node:url";
 
 const pending = new Map();
 let activeAgent;
 let nextRequestId = 0;
+let clineErrors;
 
 function send(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -17,7 +19,7 @@ function requestHost(type, data) {
   });
 }
 
-function schemas(planOnly) {
+function schemas(planOnly, selectedSkills) {
   const tools = [
     {
       name: "workspace_list_files",
@@ -52,6 +54,20 @@ function schemas(planOnly) {
       },
     },
   ];
+  if (selectedSkills.length > 0) {
+    tools.push({
+      name: "workspace_load_skill",
+      description: "Load one preselected NIANG IA development skill.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          skill_id: { type: "string", enum: selectedSkills.map((skill) => skill.id) },
+        },
+        required: ["skill_id"],
+        additionalProperties: false,
+      },
+    });
+  }
   if (planOnly) return tools;
   return tools.concat([
     {
@@ -104,6 +120,20 @@ function schemas(planOnly) {
               "npm-test",
               "npm-build",
               "npm-lint",
+              "tsc-check",
+              "go-build",
+              "go-test",
+              "go-vet",
+              "cargo-check",
+              "cargo-test",
+              "cargo-build",
+              "dotnet-build",
+              "dotnet-test",
+              "mvn-test",
+              "mvn-compile",
+              "gradle-test",
+              "gradle-build",
+              "php-lint",
               "git-status",
               "git-diff-check",
             ],
@@ -132,8 +162,16 @@ function schemas(planOnly) {
 
 async function start(message) {
   try {
-    const sdk = await import(pathToFileURL(process.env.NIANG_CLINE_AGENT_ENTRY).href);
-    const toolDefs = schemas(message.mode === "plan");
+    const sdkEntry = process.env.NIANG_CLINE_AGENT_ENTRY;
+    const sdk = await import(pathToFileURL(sdkEntry).href);
+    const llmsEntry = path.resolve(path.dirname(sdkEntry), "../../llms/dist/index.js");
+    clineErrors = await import(pathToFileURL(llmsEntry).href);
+    const selectedSkills = Array.isArray(message.selected_skills)
+      ? message.selected_skills.filter(
+          (skill) => skill && typeof skill.id === "string" && typeof skill.description === "string",
+        )
+      : [];
+    const toolDefs = schemas(message.mode === "plan", selectedSkills);
     const tools = toolDefs.map((definition) =>
       sdk.createTool({
         ...definition,
@@ -151,13 +189,13 @@ async function start(message) {
       toolDefs.map((definition) => [
         definition.name,
         { enabled: true, autoApprove: definition.name.startsWith("workspace_") &&
-            ["workspace_list_files", "workspace_read_file", "workspace_search"].includes(definition.name) },
+            ["workspace_list_files", "workspace_read_file", "workspace_search", "workspace_load_skill"].includes(definition.name) },
       ]),
     );
     activeAgent = new sdk.Agent({
       providerId: message.provider_id,
       modelId: message.model_id,
-      baseUrl: message.base_url,
+      ...(message.provider_id === "ollama" ? { baseUrl: message.base_url } : {}),
       tools,
       toolExecution: "sequential",
       toolPolicies: policies,
@@ -170,6 +208,9 @@ async function start(message) {
         "In plan mode, inspect only and return a plan; no write, command, installation, or deployment tool is available.",
         "Do not request or expose credentials, API keys, environment files, or private keys.",
         "Report which checks were actually run and distinguish unverified suggestions from verified results.",
+        selectedSkills.length
+          ? `Selected skills: ${selectedSkills.map((skill) => `${skill.id}: ${skill.description}`).join("\n")}\nAlways load testing-debugging-mastery and load other relevant selected skills with workspace_load_skill before implementing; skill loading is read-only.`
+          : "",
       ].join("\n"),
       requestToolApproval: async (approval) => {
         const result = await requestHost("approval_request", {
@@ -187,7 +228,15 @@ async function start(message) {
     });
     activeAgent.subscribe((event) => {
       if (event.type === "run-failed") {
-        send({ type: "agent_event", eventType: event.type, message: event.error?.message || "" });
+        const errorMessage = event.error?.message || "";
+        const quotaExhausted = clineErrors.isClineFreeModelLimitError(event.error)
+          || clineErrors.isClineFreeModelLimitMessage(errorMessage);
+        send({
+          type: "agent_event",
+          eventType: event.type,
+          message: errorMessage,
+          quotaExhausted,
+        });
       } else if (event.type === "status-notice") {
         send({ type: "agent_event", eventType: event.type, message: event.message || "" });
       } else {
@@ -200,6 +249,8 @@ async function start(message) {
       status: result.status,
       outputText: result.outputText || "",
       iterations: result.iterations,
+      quotaExhausted: result.status !== "completed"
+        && clineErrors.isClineFreeModelLimitMessage(result.outputText || ""),
     });
   } catch (error) {
     send({ type: "fatal", message: error instanceof Error ? error.message : "Cline worker failed." });

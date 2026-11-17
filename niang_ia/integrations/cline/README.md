@@ -1,5 +1,8 @@
 # Cline software-development integration
 
+This adapter runs Cline Agent SDK tasks with NIANG IA's bounded workspace tools.
+OpenCode is a separate integration documented in `../opencode/README.md`.
+
 NIANG IA routes software-project missions to `ClineEngine` through the existing
 `TaskQueue`. The adapter uses the installed Cline Agent SDK (`@cline/agents`)
 behind a small Node.js worker; Python and Node exchange newline-delimited JSON
@@ -14,9 +17,9 @@ From the repository root, start NIANG IA with:
 py -3.12 main.py
 ```
 
-Keep the local Ollama service running and ensure the selected local model is
-already available before opening the development panel (default: `qwen2.5:7b`,
-chosen for native tool-calling compatibility with this SDK/Ollama stack).
+The default provider is Cline Free. Its fallback order is Nemotron 3.5 Super VL,
+Solar Mini 4, then Nemotron 3.5 Lightning Free. The local Ollama provider remains
+available for explicitly configured local missions.
 
 Open **DÉVELOPPEMENT LOGICIEL** in NIANG IA, select an existing project folder,
 choose a mode, and enter the task. NIANG IA opens that folder in a new VS Code
@@ -28,16 +31,12 @@ running. The chat router can also start a mission in the configured
 `NIANG_IA_WORKSPACE_ROOT` after NIANG IA's confirmation gate; it opens the
 development panel and the same workspace in VS Code automatically.
 
-The local model defaults to `qwen2.5:7b` through Ollama at
-`http://127.0.0.1:11434` (models that emit tool calls as plain text rather than
-native tool calls are not compatible with this SDK stack). Cline missions fail
-closed unless the Cline CLI,
-Agent SDK, Ollama service, and selected local model are available. No Gemini,
-OpenAI, Anthropic, or other provider key is copied to Cline or passed to the
-worker. The SDK can represent additional providers, but this integration
-deliberately enables only local Ollama to avoid paid calls and new credentials.
-Model availability alone does not prove native tool-calling compatibility;
-missions that finish without executing a workspace tool are marked failed.
+Cline missions fail closed unless the Cline CLI and Agent SDK are available.
+NIANG IA never copies API keys or credentials into the worker environment. A
+quota fallback occurs only when the Cline SDK identifies its free-model limit
+error; other failures stop the mission. If every free quota is exhausted, the
+mission stops without selecting a paid model. An authenticated Cline account is
+required and is checked by the provider when the first request is made.
 
 ## Modes and permissions
 
@@ -67,7 +66,19 @@ store.
 Raw CLI task execution is intentionally not used: Cline CLI's built-in tools
 include shell execution and do not provide the host-controlled workspace tool
 boundary and per-action approval callback used here. SDK tool policies are
-explicit; only read-only tools are auto-approved.
+explicit; only read-only workspace access and skill loading are auto-approved.
+
+Each mission selects up to 10 skills from `web_design_skills/`: the 20 existing
+general skills and the 15-skill elite engineering profile (with
+`software-architecture` shared between them). The engineering baseline includes
+`clean-code-engineering`, `testing-debugging-mastery`, and
+`secure-software-engineering`. Cline receives only selected IDs and
+descriptions; the `workspace_load_skill` host tool returns instructions only
+after checking the ID against that mission's selection. Skill loading cannot
+read arbitrary workspace files. Mission results distinguish selected skills
+from skill IDs actually loaded and include a quality gate with `PASS`, `FAIL`,
+or `NOT_TESTED`; missing visual, accessibility, security, or runtime evidence
+is never reported as a pass.
 
 ## Validation
 

@@ -52,6 +52,8 @@ class Task:
     executor_kind: str = field(compare=False, default="niang")
     cline_workspace_root: str = field(compare=False, default="")
     cline_mode: str = field(compare=False, default="assisted")
+    opencode_workspace_root: str = field(compare=False, default="")
+    opencode_mode: str = field(compare=False, default="assisted")
     routing_provider: str = field(compare=False, default="")
     routing_model: str = field(compare=False, default="")
     routing_reason: str = field(compare=False, default="")
@@ -167,6 +169,8 @@ class TaskQueue:
             "executor_kind": task.executor_kind,
             "cline_workspace_root": task.cline_workspace_root,
             "cline_mode": task.cline_mode,
+            "opencode_workspace_root": task.opencode_workspace_root,
+            "opencode_mode": task.opencode_mode,
             "routing_provider": task.routing_provider,
             "routing_model": task.routing_model,
             "routing_reason": task.routing_reason,
@@ -297,6 +301,8 @@ class TaskQueue:
                     executor_kind=payload.get("executor_kind", "niang"),
                     cline_workspace_root=payload.get("cline_workspace_root", ""),
                     cline_mode=payload.get("cline_mode", "assisted"),
+                    opencode_workspace_root=payload.get("opencode_workspace_root", ""),
+                    opencode_mode=payload.get("opencode_mode", "assisted"),
                     routing_provider=payload.get("routing_provider", ""),
                     routing_model=payload.get("routing_model", ""),
                     routing_reason=payload.get("routing_reason", ""),
@@ -389,6 +395,8 @@ class TaskQueue:
         executor_kind: str = "niang",
         cline_workspace_root: str = "",
         cline_mode: str = "assisted",
+        opencode_workspace_root: str = "",
+        opencode_mode: str = "assisted",
         workspace_verification_required: bool = False,
         continuity_workspace_proof: Any = None,
         continuity_workspace_root: str = "",
@@ -399,12 +407,16 @@ class TaskQueue:
         continuity_mission_id: str | None = None,
     ) -> str:
 
-        if executor_kind not in {"niang", "cline"}:
+        if executor_kind not in {"niang", "cline", "opencode"}:
             raise ValueError("Unsupported mission engine.")
         if executor_kind == "cline" and not cline_workspace_root:
             raise ValueError("Cline missions require a selected project folder.")
         if cline_mode not in {"plan", "assisted", "autonomous_controlled"}:
             raise ValueError("Unsupported Cline operating mode.")
+        if executor_kind == "opencode" and not opencode_workspace_root:
+            raise ValueError("OpenCode missions require a selected project folder.")
+        if opencode_mode not in {"plan", "assisted", "autonomous_controlled"}:
+            raise ValueError("Unsupported OpenCode operating mode.")
         preserved_task_id = str(task_id) if task_id else str(uuid.uuid4())[:8]
         canonical_mission_id = str(continuity_mission_id or preserved_task_id)
         task    = Task(
@@ -420,6 +432,8 @@ class TaskQueue:
             executor_kind = executor_kind,
             cline_workspace_root = cline_workspace_root,
             cline_mode = cline_mode,
+            opencode_workspace_root = opencode_workspace_root,
+            opencode_mode = opencode_mode,
             workspace_verification_required = bool(workspace_verification_required),
             continuity_workspace_proof = continuity_workspace_proof,
             continuity_workspace_root = continuity_workspace_root or "",
@@ -463,7 +477,7 @@ class TaskQueue:
                 return False
 
             stop_computer_input = (
-                task.status == TaskStatus.RUNNING and task.executor_kind != "cline"
+                task.status == TaskStatus.RUNNING and task.executor_kind not in {"cline", "opencode"}
             )
             task.cancel_flag.set()
             if task.status == TaskStatus.PENDING:
@@ -475,7 +489,7 @@ class TaskQueue:
                 task.status = TaskStatus.STOP_REQUESTED
                 task.phase = "stop_requested"
                 task.outcome = "stop_requested"
-                stop_browser_action = task.executor_kind != "cline"
+                stop_browser_action = task.executor_kind not in {"cline", "opencode"}
             try:
                 self._queue.remove(task)
             except ValueError:
@@ -514,7 +528,7 @@ class TaskQueue:
             candidates = [
                 task for task in self._tasks.values()
                 if task.status in (TaskStatus.INTERRUPTED, TaskStatus.ACTION_UNKNOWN)
-                and task.executor_kind != "cline"
+                and task.executor_kind not in {"cline", "opencode"}
             ]
             if not candidates:
                 return None
@@ -547,9 +561,9 @@ class TaskQueue:
                 TaskStatus.ACTION_UNKNOWN,
             ):
                 raise ValueError("The selected mission is not available for recovery.")
-            if previous.executor_kind == "cline":
+            if previous.executor_kind in {"cline", "opencode"}:
                 raise ValueError(
-                    "Interrupted Cline missions cannot be replayed automatically; start a new mission after reviewing the project."
+                    "Interrupted coding-agent missions cannot be replayed automatically; start a new mission after reviewing the project."
                 )
             history = [
                 {
@@ -569,7 +583,12 @@ class TaskQueue:
             )
             goal = previous.goal
             mission_id = previous.task_id
-            effective_workspace = workspace_root or previous.cline_workspace_root or os.environ.get("NIANG_IA_WORKSPACE_ROOT", "")
+            effective_workspace = (
+                workspace_root
+                or previous.opencode_workspace_root
+                or previous.cline_workspace_root
+                or os.environ.get("NIANG_IA_WORKSPACE_ROOT", "")
+            )
         must_verify = protected_mission or require_workspace_verification is True
         if must_verify:
             try:
@@ -668,6 +687,7 @@ class TaskQueue:
                 "action_history": [dict(item) for item in task.action_history],
                 "executor_kind": task.executor_kind,
                 "cline_workspace_root": task.cline_workspace_root,
+                "opencode_workspace_root": task.opencode_workspace_root,
                 "routing_provider": task.routing_provider,
                 "routing_model": task.routing_model,
                 "routing_reason": task.routing_reason,
@@ -741,7 +761,13 @@ class TaskQueue:
         from agent.executor import ToolTimeoutError, wait_for_tool_idle
 
         try:
-            if task.executor_kind == "cline":
+            if task.executor_kind in {"cline", "opencode"}:
+                workspace_root = (
+                    task.opencode_workspace_root
+                    if task.executor_kind == "opencode"
+                    else task.cline_workspace_root
+                )
+                mode = task.opencode_mode if task.executor_kind == "opencode" else task.cline_mode
                 protected = bool(task.workspace_verification_required or task.continuity_workspace_proof is not None)
                 if protected:
                     if not task.continuity_workspace_proof:
@@ -787,17 +813,29 @@ class TaskQueue:
                         self._active_count -= 1
                         return
                 from niang_ia.integrations.cline.cline_vscode import open_vscode_workspace
-                open_vscode_workspace(task.cline_workspace_root)
-                from niang_ia.integrations.cline.cline_engine import ClineEngine
-                result = ClineEngine().execute(
-                    task.goal,
-                    task.cline_workspace_root,
-                    task.cline_mode,
-                    cancel_flag=task.cancel_flag,
-                    approval_callback=task.approval_callback,
-                    on_progress=lambda progress: self._update_progress(task, progress),
-                    on_action=lambda action: self._record_action(task, action),
-                )
+                open_vscode_workspace(workspace_root)
+                if task.executor_kind == "opencode":
+                    from niang_ia.integrations.opencode.opencode_engine import OpenCodeEngine
+                    result = OpenCodeEngine().execute(
+                        task.goal,
+                        workspace_root,
+                        mode,
+                        cancel_flag=task.cancel_flag,
+                        approval_callback=task.approval_callback,
+                        on_progress=lambda progress: self._update_progress(task, progress),
+                        on_action=lambda action: self._record_action(task, action),
+                    )
+                else:
+                    from niang_ia.integrations.cline.cline_engine import ClineEngine
+                    result = ClineEngine().execute(
+                        task.goal,
+                        workspace_root,
+                        mode,
+                        cancel_flag=task.cancel_flag,
+                        approval_callback=task.approval_callback,
+                        on_progress=lambda progress: self._update_progress(task, progress),
+                        on_action=lambda action: self._record_action(task, action),
+                    )
             else:
                 continuity_context = None
                 protected_context_required = bool(task.workspace_verification_required or task.continuity_workspace_proof is not None)
@@ -897,7 +935,7 @@ class TaskQueue:
                     continuity_context=continuity_context,
                 )
 
-            if task.cancel_flag.is_set() and task.executor_kind != "cline":
+            if task.cancel_flag.is_set() and task.executor_kind not in {"cline", "opencode"}:
                 wait_for_tool_idle()
             with self._lock:
                 if task.cancel_flag.is_set():
@@ -921,6 +959,31 @@ class TaskQueue:
                     task.current_step = ""
                     if hasattr(result, "text") and not isinstance(result, (str, bytes)):
                         task.result = result.text
+                        selected_skills = getattr(result, "selected_skills", [])
+                        loaded_skills = getattr(result, "loaded_skills", [])
+                        if selected_skills:
+                            task.result += (
+                                "\n\nSkills selected: " + ", ".join(selected_skills)
+                                + "\nSkills loaded: " + (", ".join(loaded_skills) or "none")
+                            )
+                        quality_gate = getattr(result, "quality_gate", None)
+                        if isinstance(quality_gate, dict) and quality_gate:
+                            from niang_ia.skills.quality_gate import format_quality_gate
+                            task.result = f"{task.result}\n\n{format_quality_gate(quality_gate)}"
+                    elif isinstance(result, dict) and isinstance(result.get("text"), str):
+                        task.result = result["text"]
+                        skill_usage = result.get("skills")
+                        if isinstance(skill_usage, dict) and skill_usage.get("selected"):
+                            selected_skills = skill_usage["selected"]
+                            loaded_skills = skill_usage.get("loaded", [])
+                            task.result += (
+                                "\n\nSkills selected: " + ", ".join(selected_skills)
+                                + "\nSkills loaded: " + (", ".join(loaded_skills) or "none")
+                            )
+                        quality_gate = result.get("quality_gate")
+                        if isinstance(quality_gate, dict) and quality_gate:
+                            from niang_ia.skills.quality_gate import format_quality_gate
+                            task.result = f"{task.result}\n\n{format_quality_gate(quality_gate)}"
                     else:
                         task.result = result
                     if task.status not in {TaskStatus.COMPLETED, TaskStatus.BLOCKED}:

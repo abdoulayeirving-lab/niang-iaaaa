@@ -9,7 +9,11 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from niang_ia.integrations.cline.cline_config import DEFAULT_BASE_URL
+from niang_ia.integrations.cline.cline_config import (
+    CLINE_FREE_MODELS,
+    DEFAULT_BASE_URL,
+    DEFAULT_PROVIDER,
+)
 
 
 def _cline_package_roots() -> list[Path]:
@@ -99,19 +103,44 @@ def _probe_ollama(base_url: str = DEFAULT_BASE_URL) -> dict[str, Any]:
     return {"available": True, "models": names, "error": None}
 
 
-def check_cline_health(base_url: str = DEFAULT_BASE_URL) -> dict[str, Any]:
+def check_cline_health(
+    base_url: str = DEFAULT_BASE_URL,
+    provider_id: str = DEFAULT_PROVIDER,
+) -> dict[str, Any]:
     binary = find_cline_binary()
     sdk = find_agent_sdk_entrypoint()
     version = get_cline_version(binary)
-    ollama = _probe_ollama(base_url=base_url)
+    if provider_id == "ollama":
+        model_service = _probe_ollama(base_url=base_url)
+        authentication = "not_required_for_local_ollama"
+        provider = "ollama"
+        ready = bool(binary and version and sdk and model_service["available"])
+    elif provider_id == "cline":
+        model_service = {
+            "available": None,
+            "models": list(CLINE_FREE_MODELS),
+            "error": None,
+        }
+        authentication = "managed_by_cline_sdk_not_copied_by_niang_ia"
+        provider = "cline"
+        ready = bool(binary and version and sdk)
+    else:
+        model_service = {
+            "available": False,
+            "models": [],
+            "error": "Unsupported Cline provider.",
+        }
+        authentication = "unsupported"
+        provider = provider_id
+        ready = False
     return {
         "cli_available": binary is not None and version is not None,
         "binary_path": str(binary) if binary else None,
         "version": version,
         "sdk_available": sdk is not None,
         "sdk_entrypoint": str(sdk) if sdk else None,
-        "provider": "ollama",
-        "authentication": "not_required_for_local_ollama",
-        "model_service": ollama,
-        "ready": bool(binary and version and sdk and ollama["available"]),
+        "provider": provider,
+        "authentication": authentication,
+        "model_service": model_service,
+        "ready": ready,
     }
