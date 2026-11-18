@@ -166,6 +166,7 @@ class PillButton(tk.Canvas):
         self._radius = radius
         self._state = "normal"
         self._hover = False
+        self._bounce_offset = 0
         self.bind("<Configure>", lambda e: self._redraw())
         self.bind("<Enter>", self._on_enter)
         self.bind("<Leave>", self._on_leave)
@@ -192,6 +193,10 @@ class PillButton(tk.Canvas):
     config = configure
 
     def refresh(self):
+        self._redraw()
+
+    def set_bounce(self, offset):
+        self._bounce_offset = int(offset)
         self._redraw()
 
     def _on_enter(self, _e=None):
@@ -237,12 +242,16 @@ class PillButton(tk.Canvas):
                 border = col["pri"] if hov else col["mid"]
                 fg = "#ffffff" if hov else col["text"]
             r = self._radius if self._radius is not None else h // 2
-            _round_poly(self, 1, 1, w - 1, h - 1, r, fill=fill, outline=border, width=1)
+            offset = self._bounce_offset
+            _round_poly(
+                self, 1, 1 + offset, w - 1, h - 1 + offset, r,
+                fill=fill, outline=border, width=1,
+            )
             if self._anchor == "w":
-                self.create_text(min(r, 14) + 6, h // 2, text=self._text, fill=fg,
+                self.create_text(min(r, 14) + 6, h // 2 + offset, text=self._text, fill=fg,
                                  font=self._font, anchor="w")
             else:
-                self.create_text(w // 2, h // 2, text=self._text, fill=fg,
+                self.create_text(w // 2, h // 2 + offset, text=self._text, fill=fg,
                                  font=self._font)
         except tk.TclError:
             pass
@@ -394,6 +403,9 @@ class KaizumiUI:
         self._voiceover_window = None
         self._analysis_report = ""
         self._update_check_in_progress = False
+        self._available_update = None
+        self._update_button_bounce_after = None
+        self._update_check_after = None
         self.on_whatsapp_call_control = None
         self.on_vision_control = None
         self.vision_mode = "STANDBY"
@@ -500,6 +512,9 @@ class KaizumiUI:
 
         self._animate()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close_request)
+        self._update_check_after = self.root.after(
+            10_000, self._check_for_updates_silently
+        )
 
     # ── Theme ────────────────────────────────────────────────────────────────
 
@@ -2623,41 +2638,71 @@ class KaizumiUI:
         self._refresh_deck_status()
 
     def _check_for_updates(self):
+        if self._available_update is not None:
+            self._offer_update_download(self._available_update)
+            return
+        self._start_update_check(silent=False)
+
+    def _check_for_updates_silently(self):
+        self._update_check_after = None
+        self._start_update_check(silent=True)
+        self._update_check_after = self.root.after(
+            6 * 60 * 60 * 1000, self._check_for_updates_silently
+        )
+
+    def _start_update_check(self, *, silent):
         if self._update_check_in_progress:
             return
         self._update_check_in_progress = True
-        self._update_button.configure(state="disabled", text=tr("VÉRIFICATION…"))
+        if not silent:
+            self._update_button.configure(state="disabled", text=tr("VÉRIFICATION…"))
 
         def worker():
             try:
                 from app_update import CURRENT_VERSION, check_for_update
                 update = check_for_update(CURRENT_VERSION)
-                self.root.after(0, self._finish_update_check, update, None)
+                self.root.after(0, self._finish_update_check, update, None, silent)
             except Exception as exc:
-                self.root.after(0, self._finish_update_check, None, str(exc))
+                try:
+                    self.root.after(
+                        0, self._finish_update_check, None, str(exc), silent
+                    )
+                except tk.TclError:
+                    pass
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _finish_update_check(self, update, error):
+    def _finish_update_check(self, update, error, silent=False):
         self._update_check_in_progress = False
         self._update_button.configure(state="normal", text=tr("↻ MISE À JOUR"))
         if error:
             self.write_log(f"ERR: Vérification des mises à jour impossible : {error}")
-            messagebox.showerror(
-                "Mise à jour NIANG IA",
-                f"Impossible de vérifier les mises à jour GitHub.\n\n{error}",
-                parent=self.root,
-            )
+            if not silent:
+                messagebox.showerror(
+                    "Mise à jour NIANG IA",
+                    f"Impossible de vérifier les mises à jour GitHub.\n\n{error}",
+                    parent=self.root,
+                )
             return
         if update is None:
-            from app_update import CURRENT_VERSION
-            self._update_button.configure(text=tr("NIANG IA À JOUR"))
-            self.root.after(5000, self._reset_update_button)
-            self.write_log("SYS: NIANG IA est déjà à jour.")
+            self._available_update = None
+            self._stop_update_button_bounce()
+            if not silent:
+                self._update_button.configure(text=tr("NIANG IA À JOUR"))
+                self.root.after(5000, self._reset_update_button)
+                self.write_log("SYS: NIANG IA est déjà à jour.")
             return
 
+        self._available_update = update
         self._update_button.configure(text=tr("VERSION ") + update.version)
+        self._start_update_button_bounce()
         self.write_log(f"SYS: Mise à jour NIANG IA {update.version} disponible.")
+        if silent:
+            return
+        self._offer_update_download(update)
+
+    def _offer_update_download(self, update):
+        self._stop_update_button_bounce()
         if messagebox.askyesno(
             "Mise à jour disponible",
             f"NIANG IA {update.version} est disponible.\n\n"
@@ -2666,6 +2711,44 @@ class KaizumiUI:
             parent=self.root,
         ):
             self._download_update(update)
+        else:
+            self._start_update_button_bounce()
+
+    def _start_update_button_bounce(self):
+        if self._update_button_bounce_after is None:
+            self._update_button_bounce_step(0)
+
+    def _update_button_bounce_step(self, step):
+        try:
+            if not self._update_button.winfo_exists():
+                self._update_button_bounce_after = None
+                return
+            offsets = (0, -5, -2, 0, 0)
+            self._update_button.set_bounce(offsets[step])
+            if step + 1 < len(offsets):
+                delay = 110
+                next_step = step + 1
+            else:
+                delay = 2200
+                next_step = 0
+            self._update_button_bounce_after = self.root.after(
+                delay, self._update_button_bounce_step, next_step
+            )
+        except tk.TclError:
+            self._update_button_bounce_after = None
+
+    def _stop_update_button_bounce(self):
+        if self._update_button_bounce_after is not None:
+            try:
+                self.root.after_cancel(self._update_button_bounce_after)
+            except tk.TclError:
+                pass
+            self._update_button_bounce_after = None
+        try:
+            if self._update_button.winfo_exists():
+                self._update_button.set_bounce(0)
+        except tk.TclError:
+            pass
 
     def _download_update(self, update):
         self._update_button.configure(state="disabled", text=tr("TÉLÉCHARGEMENT ") + "0 %")
@@ -2692,6 +2775,11 @@ class KaizumiUI:
     def _finish_update_download(self, installer, error):
         self._update_button.configure(state="normal", text=tr("↻ MISE À JOUR"))
         if error:
+            if self._available_update is not None:
+                self._update_button.configure(
+                    text=tr("VERSION ") + self._available_update.version
+                )
+                self._start_update_button_bounce()
             self.write_log(f"ERR: Téléchargement de la mise à jour impossible : {error}")
             messagebox.showerror(
                 "Téléchargement impossible",
@@ -2701,6 +2789,7 @@ class KaizumiUI:
             return
 
         self._update_button.configure(text=tr("INSTALLATEUR PRÊT"))
+        self._available_update = None
         self.root.after(8000, self._reset_update_button)
         self.write_log(f"SYS: Installateur vérifié téléchargé : {installer}")
         if messagebox.askyesno(
@@ -2715,6 +2804,7 @@ class KaizumiUI:
     def _reset_update_button(self):
         try:
             if self._update_button.winfo_exists():
+                self._stop_update_button_bounce()
                 self._update_button.configure(text=tr("↻ MISE À JOUR"))
         except tk.TclError:
             pass
