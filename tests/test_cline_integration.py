@@ -11,7 +11,8 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent.task_queue import TaskQueue
-from agent.workspace_tools import WorkspaceError, read_file, write_file
+from agent.workspace_tools import WorkspaceError, open_folder, read_file, write_file
+from agent.windows_desktop import WindowsDesktopError
 from niang_ia.integrations.cline.cline_config import (
     CLINE_FREE_MODELS,
     DEFAULT_MODEL,
@@ -218,7 +219,11 @@ class ClineProtocolTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             result = process.run(
                 "Make a plan",
-                ClineConfig(Path(directory)),
+                ClineConfig(
+                    Path(directory),
+                    target_window_hwnd=101,
+                    target_window_pid=202,
+                ),
                 ClineMode.PLAN,
                 on_tool_request=lambda *_: "",
                 on_approval_request=lambda *_: False,
@@ -235,6 +240,8 @@ class ClineProtocolTests(unittest.TestCase):
             child.messages[0]["selected_skills"],
             [{"id": "testing-debugging-mastery", "description": "Verify behavior with evidence."}],
         )
+        self.assertEqual(child.messages[0]["target_window_hwnd"], 101)
+        self.assertEqual(child.messages[0]["target_window_pid"], 202)
 
     def test_process_routes_tool_requests_without_real_cline(self):
         child = _FakeProcess("tool")
@@ -355,12 +362,202 @@ class ClineEngineTests(unittest.TestCase):
         def action(goal, config, mode, run_tool, approve, *_):
             with self.assertRaises(ClineEngineError):
                 run_tool("workspace_write_file", {"path": "new.py", "content": "no"})
+            with self.assertRaises(ClineEngineError):
+                run_tool("workspace_open_folder", {})
+            with self.assertRaises(ClineEngineError):
+                run_tool("workspace_window_observe", {})
             run_tool("workspace_list_files", {})
             return "Plan only."
 
-        result = self.engine(action).execute("Inspect the project", self.root, "plan")
+        result = self.engine(action).execute(
+            "Inspect the project",
+            self.root,
+            "plan",
+            target_window_hwnd=123,
+            target_window_pid=456,
+        )
         self.assertEqual(result.text, "Plan only.")
         self.assertFalse((self.root / "new.py").exists())
+
+    def test_open_folder_is_limited_to_workspace_and_requires_approval(self):
+        project = self.root / "project"
+        project.mkdir()
+        args = validate_tool_input(
+            "workspace_open_folder",
+            {"path": "project"},
+            self.root,
+        )
+        self.assertTrue(
+            approval_required(
+                ClineMode.AUTONOMOUS_CONTROLLED,
+                "workspace_open_folder",
+                args,
+                self.root,
+            )
+        )
+        with self.assertRaises(WorkspaceError):
+            validate_tool_input(
+                "workspace_open_folder",
+                {"path": ".."},
+                self.root,
+            )
+        with self.assertRaises(WorkspaceError):
+            validate_tool_input(
+                "workspace_open_folder",
+                {"path": "missing"},
+                self.root,
+            )
+        with patch("agent.workspace_tools.subprocess.Popen") as launch:
+            result = open_folder("project", workspace_root=self.root)
+        launch.assert_called_once()
+        self.assertIn("Windows Explorer", result)
+
+    def test_cline_opens_a_requested_folder_only_after_approval(self):
+        project = self.root / "project"
+        project.mkdir()
+        prompts = []
+
+        def action(_goal, _config, _mode, run_tool, approve, *_):
+            args = {"path": "project"}
+            self.assertTrue(approve("workspace_open_folder", args))
+            return run_tool("workspace_open_folder", args)
+
+        with patch("agent.workspace_tools.subprocess.Popen") as launch:
+            result = self.engine(action).execute(
+                "Open the project folder in Explorer",
+                self.root,
+                ClineMode.AUTONOMOUS_CONTROLLED,
+                approval_callback=lambda _tool, _params, description, _cancel: (
+                    prompts.append(description) or True
+                ),
+            )
+        self.assertEqual(result.actions, 1)
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("Explorateur Windows", prompts[0])
+        self.assertEqual(launch.call_count, 1)
+
+    def test_window_controls_require_a_selected_window_and_restrict_arguments(self):
+        args = {"name": "Projects", "role": "Hyperlink"}
+        with self.assertRaises(WorkspaceError):
+            validate_tool_input("workspace_window_click", args, self.root)
+
+        self.assertEqual(
+            validate_tool_input(
+                "workspace_window_click",
+                args,
+                self.root,
+                target_window_hwnd=123,
+                target_window_pid=456,
+            ),
+            args,
+        )
+        with self.assertRaises(WorkspaceError):
+            validate_tool_input(
+                "workspace_window_click",
+                {**args, "x": 10},
+                self.root,
+                target_window_hwnd=123,
+                target_window_pid=456,
+            )
+        with self.assertRaises(WorkspaceError):
+            validate_tool_input(
+                "workspace_window_press",
+                {"key": "enter"},
+                self.root,
+                target_window_hwnd=123,
+                target_window_pid=456,
+            )
+
+    def test_safe_window_navigation_is_autonomous_but_button_clicks_need_approval(self):
+        link = {"name": "Projects", "role": "Hyperlink"}
+        button = {"name": "Continue", "role": "Button"}
+        self.assertFalse(approval_required(
+            ClineMode.AUTONOMOUS_CONTROLLED,
+            "workspace_window_click",
+            link,
+            self.root,
+            target_window_hwnd=123,
+            target_window_pid=456,
+        ))
+        self.assertTrue(approval_required(
+            ClineMode.AUTONOMOUS_CONTROLLED,
+            "workspace_window_click",
+            button,
+            self.root,
+            target_window_hwnd=123,
+            target_window_pid=456,
+        ))
+
+    def test_selected_window_is_passed_to_bounded_cline_control(self):
+        args = {"name": "Projects", "role": "Hyperlink"}
+
+        def action(_goal, _config, _mode, run_tool, approve, *_):
+            self.assertTrue(approve("workspace_window_click", args))
+            return run_tool("workspace_window_click", args)
+
+        with patch(
+            "niang_ia.integrations.cline.cline_desktop.click_control",
+            return_value='{"clicked":true}',
+        ) as click:
+            result = self.engine(action).execute(
+                "Open the Projects section",
+                self.root,
+                ClineMode.AUTONOMOUS_CONTROLLED,
+                target_window_hwnd=123,
+                target_window_pid=456,
+            )
+        click.assert_called_once_with(
+            123,
+            456,
+            name="Projects",
+            automation_id="",
+            role="Hyperlink",
+        )
+        self.assertEqual(result.actions, 1)
+
+    def test_window_button_click_uses_explicit_approval(self):
+        args = {"name": "Continue", "role": "Button"}
+        prompts = []
+
+        def action(_goal, _config, _mode, run_tool, approve, *_):
+            self.assertFalse(approve("workspace_window_click", args))
+            return run_tool("workspace_window_click", args)
+
+        with patch(
+            "niang_ia.integrations.cline.cline_desktop.click_control",
+            return_value='{"clicked":true}',
+        ) as click:
+            with self.assertRaises(ClineEngineError):
+                self.engine(action).execute(
+                    "Continue",
+                    self.root,
+                    ClineMode.AUTONOMOUS_CONTROLLED,
+                    target_window_hwnd=123,
+                    target_window_pid=456,
+                )
+            click.assert_not_called()
+
+        def approved_action(_goal, _config, _mode, run_tool, approve, *_):
+            self.assertTrue(approve("workspace_window_click", args))
+            return run_tool("workspace_window_click", args)
+
+        with patch(
+            "niang_ia.integrations.cline.cline_desktop.click_control",
+            return_value='{"clicked":true}',
+        ):
+            result = self.engine(approved_action).execute(
+                "Continue",
+                self.root,
+                ClineMode.AUTONOMOUS_CONTROLLED,
+                target_window_hwnd=123,
+                target_window_pid=456,
+                approval_callback=lambda tool, _params, description, _cancel: (
+                    prompts.append((tool, description)) or True
+                ),
+            )
+        self.assertEqual(result.actions, 1)
+        self.assertEqual(len(prompts), 1)
+        self.assertEqual(prompts[0][0], "workspace_window_click")
 
     def test_completion_without_workspace_action_is_not_reported_as_success(self):
         response = '{"name":"workspace_write_file","arguments":{"path":"main.py"}}'
@@ -624,6 +821,10 @@ class ClineEngineTests(unittest.TestCase):
             ClineConfig(self.root, max_actions=MAX_ACTIONS + 1)
         with self.assertRaises(ValueError):
             ClineConfig(self.root, action_timeout_seconds=MAX_ACTION_SECONDS + 1)
+        with self.assertRaisesRegex(ValueError, "requires both"):
+            ClineConfig(self.root, target_window_hwnd=123)
+        with self.assertRaisesRegex(ValueError, "handle is invalid"):
+            ClineConfig(self.root, target_window_hwnd=123, target_window_pid=0)
 
     def test_config_allows_only_the_cline_free_fallback_models(self):
         config = ClineConfig(self.root)
@@ -643,11 +844,15 @@ class ClineEngineTests(unittest.TestCase):
             executor_kind="cline",
             cline_workspace_root=str(self.root),
             cline_mode="plan",
+            cline_target_window_hwnd=123,
+            cline_target_window_pid=456,
         )
         status = queue_instance.get_status(task_id)
         self.assertEqual(status["executor_kind"], "cline")
         self.assertEqual(status["status"], "pending")
         self.assertEqual(status["cline_workspace_root"], str(self.root))
+        self.assertEqual(status["cline_target_window_hwnd"], 123)
+        self.assertEqual(status["cline_target_window_pid"], 456)
 
     def test_queue_dispatches_cline_missions_to_the_engine(self):
         from agent.task_queue import Task, TaskStatus
@@ -662,6 +867,8 @@ class ClineEngineTests(unittest.TestCase):
             executor_kind="cline",
             cline_workspace_root=str(self.root),
             cline_mode="plan",
+            cline_target_window_hwnd=123,
+            cline_target_window_pid=456,
         )
         queue_instance._tasks[task.task_id] = task
         queue_instance._active_count = 1
@@ -670,7 +877,7 @@ class ClineEngineTests(unittest.TestCase):
         with patch(
             "niang_ia.integrations.cline.cline_vscode.open_vscode_workspace",
             side_effect=lambda *_: call_order.append("vscode"),
-        ), patch(
+        ) as open_vscode, patch(
             "niang_ia.integrations.cline.cline_engine.ClineEngine"
         ) as engine_type:
             engine_type.return_value.execute.side_effect = (
@@ -695,13 +902,26 @@ class ClineEngineTests(unittest.TestCase):
             queue_instance._run_task(task)
 
         engine_type.return_value.execute.assert_called_once()
-        self.assertEqual(call_order, ["vscode", "engine"])
+        self.assertEqual(
+            engine_type.return_value.execute.call_args.kwargs[
+                "target_window_hwnd"
+            ],
+            123,
+        )
+        self.assertEqual(
+            engine_type.return_value.execute.call_args.kwargs[
+                "target_window_pid"
+            ],
+            456,
+        )
+        open_vscode.assert_not_called()
+        self.assertEqual(call_order, ["engine"])
         self.assertEqual(task.status, TaskStatus.COMPLETED)
         self.assertIn("Plan generated.", task.result)
         self.assertIn("Skills loaded: testing-debugging-mastery", task.result)
         self.assertIn("QUALITY GATE: NON TESTÉ", task.result)
 
-    def test_queue_does_not_run_cline_if_vscode_cannot_open(self):
+    def test_queue_runs_cline_without_launching_vscode(self):
         from agent.task_queue import Task, TaskStatus
 
         queue_instance = TaskQueue(persist=False)
@@ -721,14 +941,18 @@ class ClineEngineTests(unittest.TestCase):
         with patch(
             "niang_ia.integrations.cline.cline_vscode.open_vscode_workspace",
             side_effect=RuntimeError("VS Code unavailable"),
-        ), patch(
+        ) as open_vscode, patch(
             "niang_ia.integrations.cline.cline_engine.ClineEngine"
         ) as engine_type:
+            engine_type.return_value.execute.return_value = ClineResult(
+                status="completed",
+                text="Mission completed.",
+            )
             queue_instance._run_task(task)
 
-        engine_type.return_value.execute.assert_not_called()
-        self.assertEqual(task.status, TaskStatus.FAILED)
-        self.assertIn("VS Code unavailable", task.error)
+        open_vscode.assert_not_called()
+        engine_type.return_value.execute.assert_called_once()
+        self.assertEqual(task.status, TaskStatus.COMPLETED)
 
     def test_open_vscode_workspace_uses_new_window_and_selected_root(self):
         with patch(
@@ -772,6 +996,93 @@ class ClineEngineTests(unittest.TestCase):
                     on_tool_request=lambda *_: "",
                     on_approval_request=lambda *_: False,
                 )
+
+
+class ClineDesktopTests(unittest.TestCase):
+    class FakeDesktop:
+        def __init__(self, *, pid=456, controls=None):
+            self.pid = pid
+            self._controls = controls or []
+            self.clicked = False
+            self.typed = False
+
+        def window(self, *, hwnd):
+            return {
+                "hwnd": hwnd,
+                "pid": self.pid,
+                "visible": True,
+                "minimized": False,
+            }
+
+        def controls(self, hwnd, *, limit):
+            return self._controls[:limit]
+
+        def click(self, hwnd, *, name=None, automation_id=None):
+            self.clicked = True
+            return {"clicked": name or automation_id}
+
+        def type_text(self, hwnd, text, *, name=None, automation_id=None):
+            self.typed = True
+            return {"verified": True}
+
+    def test_observation_omits_sensitive_controls_even_when_password_state_is_unknown(self):
+        controls = [
+            {
+                "name": "Password",
+                "automation_id": "passwordBox",
+                "role": "Edit",
+                "visible": True,
+                "enabled": True,
+                "password": None,
+            },
+            {
+                "name": "Projects",
+                "automation_id": "projectsLink",
+                "role": "Hyperlink",
+                "visible": True,
+                "enabled": True,
+                "password": False,
+            },
+        ]
+        desktop = self.FakeDesktop(controls=controls)
+        with patch(
+            "niang_ia.integrations.cline.cline_desktop.WindowsDesktopAgent",
+            return_value=desktop,
+        ):
+            from niang_ia.integrations.cline.cline_desktop import observe_window
+            result = json.loads(observe_window(123, 456))
+        self.assertEqual([item["name"] for item in result["controls"]], ["Projects"])
+
+    def test_control_action_rejects_replaced_window_and_sensitive_fields(self):
+        from niang_ia.integrations.cline.cline_desktop import (
+            click_control,
+            type_into_control,
+        )
+
+        replaced = self.FakeDesktop(pid=999)
+        with patch(
+            "niang_ia.integrations.cline.cline_desktop.WindowsDesktopAgent",
+            return_value=replaced,
+        ):
+            with self.assertRaisesRegex(WindowsDesktopError, "window changed"):
+                click_control(123, 456, name="Projects", role="Hyperlink")
+        self.assertFalse(replaced.clicked)
+
+        sensitive = self.FakeDesktop(controls=[{
+            "name": "API key",
+            "automation_id": "api_key",
+            "role": "Edit",
+            "visible": True,
+            "enabled": True,
+            "password": None,
+        }])
+        with patch(
+            "niang_ia.integrations.cline.cline_desktop.WindowsDesktopAgent",
+            return_value=sensitive,
+        ):
+            with self.assertRaisesRegex(WindowsDesktopError, "password fields"):
+                type_into_control(123, 456, name="API key", text="not-a-secret")
+        self.assertFalse(sensitive.typed)
 
 
 class ClineHealthTests(unittest.TestCase):

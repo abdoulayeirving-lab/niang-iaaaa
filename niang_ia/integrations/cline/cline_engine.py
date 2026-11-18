@@ -73,6 +73,8 @@ class ClineEngine:
         provider_id: str = DEFAULT_PROVIDER,
         model_id: str = DEFAULT_MODEL,
         base_url: str = DEFAULT_BASE_URL,
+        target_window_hwnd: int | None = None,
+        target_window_pid: int | None = None,
     ) -> ClineResult:
         if not isinstance(goal, str) or not goal.strip():
             raise ClineEngineError("A non-empty software-development task is required.")
@@ -82,6 +84,8 @@ class ClineEngine:
             selected_mode = ClineMode(mode)
             config = ClineConfig(
                 workspace_root=Path(workspace_root),
+                target_window_hwnd=target_window_hwnd,
+                target_window_pid=target_window_pid,
                 provider_id=provider_id,
                 model_id=model_id,
                 base_url=base_url,
@@ -150,9 +154,15 @@ class ClineEngine:
             if tool not in ALLOWED_TOOLS or not isinstance(raw_args, dict):
                 return False
             try:
-                args = validate_tool_input(tool, raw_args, config.workspace_root)
+                args = validate_tool_input(
+                    tool,
+                    raw_args,
+                    config.workspace_root,
+                    target_window_hwnd=config.target_window_hwnd,
+                    target_window_pid=config.target_window_pid,
+                )
                 required = requires_approval(tool, args)
-            except (TypeError, ValueError, OSError):
+            except (TypeError, ValueError, OSError, workspace_tools.WorkspaceError):
                 return False
             if not required:
                 return not cancel_flag.is_set()
@@ -170,7 +180,12 @@ class ClineEngine:
 
         def requires_approval(tool: str, args: dict) -> bool:
             required = approval_required(
-                selected_mode, tool, args, config.workspace_root
+                selected_mode,
+                tool,
+                args,
+                config.workspace_root,
+                target_window_hwnd=config.target_window_hwnd,
+                target_window_pid=config.target_window_pid,
             )
             if tool == "workspace_run_check" and args.get("check") not in _SAFE_AUTONOMOUS_CHECKS:
                 return True
@@ -201,7 +216,13 @@ class ClineEngine:
                 raise ClineEngineError(
                     "Load visual-asset-intelligence before using its project tools."
                 )
-            args = validate_tool_input(tool, raw_args, config.workspace_root)
+            args = validate_tool_input(
+                tool,
+                raw_args,
+                config.workspace_root,
+                target_window_hwnd=config.target_window_hwnd,
+                target_window_pid=config.target_window_pid,
+            )
             if selected_mode == ClineMode.PLAN and tool not in READ_TOOLS:
                 raise ClineEngineError("Plan mode is read-only.")
             if requires_approval(tool, args):
@@ -396,6 +417,47 @@ def _dispatch_tool(
 ) -> str:
     root = config.workspace_root
     asset_service = visual_asset_service or VisualAssetService()
+    if tool == "workspace_window_observe":
+        from niang_ia.integrations.cline.cline_desktop import observe_window
+        return observe_window(
+            config.target_window_hwnd, config.target_window_pid
+        )
+    if tool == "workspace_window_click":
+        from niang_ia.integrations.cline.cline_desktop import click_control
+        return click_control(
+            config.target_window_hwnd,
+            config.target_window_pid,
+            name=args.get("name", ""),
+            automation_id=args.get("automation_id", ""),
+            role=args["role"],
+        )
+    if tool == "workspace_window_type":
+        from niang_ia.integrations.cline.cline_desktop import type_into_control
+        return type_into_control(
+            config.target_window_hwnd,
+            config.target_window_pid,
+            name=args.get("name", ""),
+            automation_id=args.get("automation_id", ""),
+            text=args["text"],
+        )
+    if tool == "workspace_window_scroll":
+        from niang_ia.integrations.cline.cline_desktop import scroll_window
+        return scroll_window(
+            config.target_window_hwnd,
+            config.target_window_pid,
+            args["amount"],
+        )
+    if tool == "workspace_window_press":
+        from niang_ia.integrations.cline.cline_desktop import press_window_key
+        return press_window_key(
+            config.target_window_hwnd,
+            config.target_window_pid,
+            args["key"],
+        )
+    if tool == "workspace_open_folder":
+        return workspace_tools.open_folder(
+            args.get("path", "."), workspace_root=root
+        )
     if tool == "workspace_list_files":
         return workspace_tools.list_files(
             args.get("path", "."), workspace_root=root

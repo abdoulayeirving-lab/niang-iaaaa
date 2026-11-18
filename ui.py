@@ -342,6 +342,7 @@ class KaizumiUI:
         self.on_cline_start = None
         self.on_cline_cancel = None
         self.on_cline_health = None
+        self.on_cline_windows = None
         self.on_application_close = None
         self._agent_window = None
         self._agent_task_id = None
@@ -359,6 +360,10 @@ class KaizumiUI:
         self._cline_display_task_id = None
         self._cline_mode_var = None
         self._cline_workspace_var = None
+        self._cline_engine_var = None
+        self._cline_target_window_var = None
+        self._cline_target_window_menu = None
+        self._cline_target_windows = {}
         self._cline_goal = None
         self._cline_status_label = None
         self._cline_health_label = None
@@ -946,14 +951,14 @@ class KaizumiUI:
 
         window = tk.Toplevel(self.root)
         window.title("NIANG IA — Développement logiciel")
-        window.geometry("900x790")
-        window.minsize(740, 640)
+        window.geometry("900x840")
+        window.minsize(740, 700)
         window.configure(bg=self.col["bg"])
         self._cline_window = window
 
         tk.Label(
             window,
-            text="MOTEUR DE DÉVELOPPEMENT OPENCODE",
+            text="MOTEUR DE DÉVELOPPEMENT",
             anchor="w",
             bg=self.col["bg"],
             fg=self.col["pri"],
@@ -961,7 +966,7 @@ class KaizumiUI:
         ).pack(fill="x", padx=14, pady=(14, 4))
         tk.Label(
             window,
-            text="OpenCode travaille dans le workspace choisi ; les fichiers et actions apparaissent au fil de la mission.",
+            text="Choisis Cline ou OpenCode ; les fichiers et actions apparaissent au fil de la mission.",
             anchor="w",
             bg=self.col["bg"],
             fg=self.col["dim"],
@@ -969,13 +974,31 @@ class KaizumiUI:
         ).pack(fill="x", padx=14, pady=(0, 4))
         self._cline_health_label = tk.Label(
             window,
-            text="Vérification d’OpenCode…",
+            text="Vérification du moteur…",
             anchor="w",
             bg=self.col["bg"],
             fg=self.col["dim"],
             font=("Consolas", 8),
         )
         self._cline_health_label.pack(fill="x", padx=14)
+
+        engine_row = tk.Frame(window, bg=self.col["bg"])
+        engine_row.pack(fill="x", padx=14, pady=(8, 2))
+        tk.Label(
+            engine_row,
+            text="MOTEUR",
+            bg=self.col["bg"],
+            fg=self.col["pri"],
+            font=("Consolas", 9, "bold"),
+        ).pack(side="left", padx=(0, 8))
+        self._cline_engine_var = tk.StringVar(value="OpenCode")
+        tk.OptionMenu(
+            engine_row,
+            self._cline_engine_var,
+            "OpenCode",
+            "Cline",
+            command=self._on_development_engine_changed,
+        ).pack(side="left")
 
         folder_row = tk.Frame(window, bg=self.col["bg"])
         folder_row.pack(fill="x", padx=14, pady=(10, 4))
@@ -1004,6 +1027,39 @@ class KaizumiUI:
             fg=self.col["text"],
             relief="flat",
         ).pack(side="right")
+
+        target_row = tk.Frame(window, bg=self.col["bg"])
+        target_row.pack(fill="x", padx=14, pady=(2, 4))
+        tk.Label(
+            target_row,
+            text="FENÊTRE CIBLE (CLINE)",
+            bg=self.col["bg"],
+            fg=self.col["pri"],
+            font=("Consolas", 9, "bold"),
+        ).pack(side="left", padx=(0, 8))
+        self._cline_target_window_var = tk.StringVar(value="Aucune — contrôle désactivé")
+        self._cline_target_window_menu = tk.OptionMenu(
+            target_row,
+            self._cline_target_window_var,
+            "Aucune — contrôle désactivé",
+        )
+        self._cline_target_window_menu.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        tk.Button(
+            target_row,
+            text="ACTUALISER",
+            command=self._refresh_cline_windows,
+            bg=self.col["input"],
+            fg=self.col["text"],
+            relief="flat",
+        ).pack(side="right")
+        tk.Label(
+            window,
+            text="Cline agit uniquement dans la fenêtre choisie. Clics sur boutons/menus et soumissions demandent confirmation.",
+            anchor="w",
+            bg=self.col["bg"],
+            fg=self.col["dim"],
+            font=("Segoe UI", 8),
+        ).pack(fill="x", padx=14, pady=(0, 4))
 
         mode_row = tk.Frame(window, bg=self.col["bg"])
         mode_row.pack(fill="x", padx=14, pady=4)
@@ -1082,7 +1138,7 @@ class KaizumiUI:
 
         tk.Label(
             window,
-            text="HISTORIQUE DES MISSIONS OPENCODE",
+            text="HISTORIQUE DES MISSIONS",
             anchor="w",
             bg=self.col["bg"],
             fg=self.col["pri"],
@@ -1171,14 +1227,21 @@ class KaizumiUI:
         if selected and self._cline_workspace_var:
             self._cline_workspace_var.set(selected)
 
-    def _check_cline_health(self):
+    def _on_development_engine_changed(self, engine=None):
+        self._check_cline_health(engine or self._cline_engine_var.get())
+
+    def _check_cline_health(self, engine=None):
         if not self.on_cline_health:
-            self._cline_health_label.configure(text="Contrôle OpenCode indisponible.")
+            self._cline_health_label.configure(text="Contrôle du moteur indisponible.")
             return
+
+        selected_engine = engine or (
+            self._cline_engine_var.get() if self._cline_engine_var else "OpenCode"
+        )
 
         def check():
             try:
-                result = self.on_cline_health()
+                result = self.on_cline_health(selected_engine.casefold())
             except Exception as exc:
                 result = {"error": str(exc)}
             try:
@@ -1192,9 +1255,18 @@ class KaizumiUI:
         label = self._cline_health_label
         if label is None or not label.winfo_exists():
             return
+        engine = result.get("engine") or (
+            self._cline_engine_var.get() if self._cline_engine_var else "OpenCode"
+        )
         version = result.get("version") or "CLI indisponible"
         if result.get("error"):
             state = "contrôle impossible"
+        elif engine.casefold() == "cline":
+            state = (
+                "Agent SDK prêt"
+                if result.get("ready") and result.get("sdk_available")
+                else "CLI ou Agent SDK indisponible"
+            )
         elif not result.get("version"):
             state = "CLI indisponible"
         elif not result.get("workspace_tools_available", True):
@@ -1206,14 +1278,80 @@ class KaizumiUI:
         else:
             state = "aucun modèle gratuit activé"
         label.configure(
-            text=f"OpenCode {version} • {state}",
+            text=f"{engine} {version} • {state}",
             fg=self.col["green"] if result.get("ready") else self.col["red"],
         )
+
+    def _refresh_cline_windows(self):
+        if not self.on_cline_windows:
+            self._cline_status_label.configure(text="Le contrôle des fenêtres est indisponible.")
+            return
+
+        def load():
+            try:
+                result = self.on_cline_windows()
+            except Exception as exc:
+                result = {"error": str(exc)}
+            try:
+                self.root.after(0, lambda: self._populate_cline_windows(result))
+            except tk.TclError:
+                pass
+
+        threading.Thread(target=load, daemon=True).start()
+
+    def _populate_cline_windows(self, result):
+        menu_widget = self._cline_target_window_menu
+        if menu_widget is None or not menu_widget.winfo_exists():
+            return
+        menu = menu_widget["menu"]
+        menu.delete(0, "end")
+        self._cline_target_windows = {}
+        if isinstance(result, dict) and result.get("error"):
+            placeholder = "Impossible de lire les fenêtres"
+            self._cline_status_label.configure(text=f"Fenêtres indisponibles : {result['error'][:120]}")
+        else:
+            windows = result if isinstance(result, list) else []
+            placeholder = "Aucune fenêtre disponible"
+            for item in windows:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    hwnd = int(item["hwnd"])
+                    pid = int(item["pid"])
+                    title = str(item["title"]).strip()
+                    process_name = str(item.get("process_name") or "application")
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if hwnd <= 0 or pid <= 0 or not title:
+                    continue
+                label = f"{title[:80]} — {process_name} ({pid})"
+                if label in self._cline_target_windows:
+                    label = f"{label} [{hwnd}]"
+                self._cline_target_windows[label] = {"hwnd": hwnd, "pid": pid}
+                menu.add_command(
+                    label=label,
+                    command=lambda value=label: self._cline_target_window_var.set(value),
+                )
+            if self._cline_target_windows:
+                placeholder = "Choisir une fenêtre…"
+                self._cline_status_label.configure(
+                    text=f"{len(self._cline_target_windows)} fenêtre(s) disponible(s)."
+                )
+        self._cline_target_window_var.set(placeholder)
+        if not self._cline_target_windows:
+            menu.add_command(
+                label=placeholder,
+                command=lambda: self._cline_target_window_var.set(placeholder),
+            )
 
     def _start_cline_mission(self):
         goal = self._cline_goal.get("1.0", "end-1c").strip()
         workspace = self._cline_workspace_var.get().strip()
         mode = self._cline_mode_var.get().strip()
+        engine = self._cline_engine_var.get().strip().casefold()
+        selected_window = self._cline_target_windows.get(
+            self._cline_target_window_var.get()
+        )
         if not goal:
             self._cline_status_label.configure(text="Saisissez une mission logicielle.")
             return
@@ -1224,35 +1362,49 @@ class KaizumiUI:
             self._cline_status_label.configure(text="Le dossier projet ne peut pas être un lien symbolique.")
             return
         if self._cline_task_id:
-            self._cline_status_label.configure(text="Une mission OpenCode est déjà en cours.")
+            self._cline_status_label.configure(text="Une mission est déjà en cours.")
             return
         if not self.on_cline_start:
-            self._cline_status_label.configure(text="Le moteur OpenCode n’est pas disponible.")
+            self._cline_status_label.configure(text="Le moteur de développement n’est pas disponible.")
             return
         try:
-            self._cline_task_id = self.on_cline_start(goal, workspace, mode)
+            self._cline_task_id = self.on_cline_start(
+                goal,
+                workspace,
+                mode,
+                engine,
+                selected_window if engine == "cline" else None,
+            )
             self._cline_display_task_id = self._cline_task_id
             self._cline_history_task_id = None
             self._cline_history_count = 0
             self._cline_start_button.configure(state="disabled")
             self._cline_stop_button.configure(state="normal")
-            self._cline_status_label.configure(text="Mission OpenCode en attente…")
+            engine_name = "Cline" if engine == "cline" else "OpenCode"
+            desktop_state = (
+                " — contrôle de la fenêtre sélectionnée actif"
+                if engine == "cline" and selected_window
+                else " — contrôle de fenêtre désactivé"
+                if engine == "cline"
+                else ""
+            )
+            self._cline_status_label.configure(text=f"Mission {engine_name} en attente{desktop_state}…")
             self._refresh_cline_panel()
         except Exception as exc:
             self._cline_status_label.configure(text=f"Échec : {str(exc)[:160]}")
-            self.write_log(f"ERR: Mission OpenCode impossible : {exc}")
+            self.write_log(f"ERR: Mission de développement impossible : {exc}")
 
     def _stop_cline_mission(self):
         if not self._cline_task_id or not self.on_cline_cancel:
             return
         try:
             if self.on_cline_cancel(self._cline_task_id):
-                self._cline_status_label.configure(text="Arrêt OpenCode demandé…")
+                self._cline_status_label.configure(text="Arrêt de la mission demandé…")
             else:
-                self._cline_status_label.configure(text="Aucune mission OpenCode active.")
+                self._cline_status_label.configure(text="Aucune mission active.")
         except Exception as exc:
             self._cline_status_label.configure(text=f"Arrêt impossible : {str(exc)[:120]}")
-            self.write_log(f"ERR: Arrêt OpenCode impossible : {exc}")
+            self.write_log(f"ERR: Arrêt de la mission impossible : {exc}")
 
     def _select_cline_history(self, _event=None):
         if not self._cline_history_list:
@@ -1856,7 +2008,7 @@ class KaizumiUI:
             try:
                 window = tk.Toplevel(self.root)
                 dialog["window"] = window
-                window.title("Confirmation requise — OpenCode")
+                window.title("Confirmation requise — Développement")
                 window.geometry("470x220")
                 window.resizable(False, False)
                 window.configure(bg=self.col["bg"])
@@ -1900,13 +2052,13 @@ class KaizumiUI:
                 ).pack(side="right")
                 window.lift()
             except tk.TclError as exc:
-                self.write_log(f"ERR: Demande OpenCode impossible: {exc}")
+                self.write_log(f"ERR: Demande d’autorisation impossible: {exc}")
                 finish(False)
 
         try:
             self.root.after(0, show)
         except tk.TclError as exc:
-            self.write_log(f"ERR: Interface fermée pendant la demande OpenCode: {exc}")
+            self.write_log(f"ERR: Interface fermée pendant la demande d’autorisation: {exc}")
             return False
         while not completed.wait(timeout=0.1):
             if cancel_flag is not None and cancel_flag.is_set():
@@ -1920,7 +2072,7 @@ class KaizumiUI:
                     self.root.after(0, lambda: finish(False))
                 except tk.TclError:
                     finish(False)
-                self.write_log(f"ERR: Confirmation OpenCode expirée pour {tool} ; action refusée.")
+                self.write_log(f"ERR: Confirmation expirée pour {tool} ; action refusée.")
                 break
         return decision["approved"]
 

@@ -184,6 +184,27 @@ def list_files(
     return "\n".join(results) if results else "No accessible files found in that workspace folder."
 
 
+def open_folder(
+    path: str = ".",
+    *,
+    workspace_root: str | os.PathLike[str] | None = None,
+) -> str:
+    target = _resolve_workspace_path(
+        path, must_exist=True, workspace_root=workspace_root
+    )
+    if not target.is_dir():
+        raise WorkspaceError("The requested workspace path is not a directory.")
+    if os.name != "nt":
+        raise WorkspaceError("Opening folders in Explorer is supported only on Windows.")
+
+    explorer = Path(os.environ.get("WINDIR", r"C:\Windows")) / "explorer.exe"
+    try:
+        subprocess.Popen([str(explorer), str(target)], close_fds=True)
+    except OSError as exc:
+        raise WorkspaceError(f"Could not open the folder in Windows Explorer: {exc}") from exc
+    return f"Opened folder in Windows Explorer: {target}"
+
+
 def read_file(path: str, *, workspace_root: str | os.PathLike[str] | None = None) -> str:
     target = _resolve_workspace_path(path, must_exist=True, workspace_root=workspace_root)
     if not target.is_file():

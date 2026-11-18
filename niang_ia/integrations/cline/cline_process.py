@@ -158,6 +158,8 @@ class ClineProcess:
                 "type": "start",
                 "goal": goal,
                 "workspace_root": str(config.workspace_root),
+                "target_window_hwnd": config.target_window_hwnd,
+                "target_window_pid": config.target_window_pid,
                 "mode": mode.value,
                 "provider_id": config.provider_id,
                 "model_id": config.model_id,

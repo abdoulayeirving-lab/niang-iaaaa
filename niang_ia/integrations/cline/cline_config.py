@@ -22,6 +22,8 @@ DEFAULT_BASE_URL = "http://127.0.0.1:11434"
 @dataclass(frozen=True)
 class ClineConfig:
     workspace_root: Path
+    target_window_hwnd: int | None = None
+    target_window_pid: int | None = None
     provider_id: str = DEFAULT_PROVIDER
     model_id: str = DEFAULT_MODEL
     base_url: str = DEFAULT_BASE_URL
@@ -35,6 +37,15 @@ class ClineConfig:
         if root.is_symlink() or (is_junction is not None and is_junction()) or not root.is_dir():
             raise ValueError("The selected project folder must be an existing directory, not a link or junction.")
         object.__setattr__(self, "workspace_root", root.resolve(strict=True))
+        if (self.target_window_hwnd is None) != (self.target_window_pid is None):
+            raise ValueError("A selected desktop window requires both its handle and process ID.")
+        if self.target_window_hwnd is not None and (
+            type(self.target_window_hwnd) is not int
+            or self.target_window_hwnd <= 0
+            or type(self.target_window_pid) is not int
+            or self.target_window_pid <= 0
+        ):
+            raise ValueError("The selected desktop window handle is invalid.")
         if self.provider_id not in {"cline", "ollama"}:
             raise ValueError("Only Cline Free and local Ollama providers are enabled.")
         if self.provider_id == "ollama" and self.model_id == DEFAULT_MODEL:

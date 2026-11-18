@@ -354,6 +354,7 @@ class WindowsDesktopAgent:
                     "class_name": str(getattr(info, "class_name", "") or ""),
                     "enabled": _safe_control_bool(control, "is_enabled"),
                     "visible": _safe_control_bool(control, "is_visible"),
+                    "password": _safe_control_bool(control, "is_password"),
                     "bounds": {
                         "left": rectangle.left,
                         "top": rectangle.top,

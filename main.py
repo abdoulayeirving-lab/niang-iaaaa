@@ -2121,9 +2121,10 @@ class KaizumiLive:
         self.ui.on_text_command = self._on_text_command
         self.ui.on_agent_start = self._start_agent_task
         self.ui.on_agent_cancel = self._cancel_agent_task
-        self.ui.on_cline_start = self._start_opencode_task
+        self.ui.on_cline_start = self._start_development_task
         self.ui.on_cline_cancel = self._cancel_agent_task
-        self.ui.on_cline_health = self._opencode_health
+        self.ui.on_cline_health = self._development_engine_health
+        self.ui.on_cline_windows = self._available_desktop_windows
         self.ui.on_application_close = self._shutdown_agent_services
         self.ui.on_farewell = self._speak_farewell
         self.ui.on_files_selected = self._on_files_selected
@@ -2466,8 +2467,30 @@ class KaizumiLive:
             tool_registry=self._tool_registry,
         )
 
-    def _start_opencode_task(self, goal: str, workspace_root: str, mode: str) -> str:
+    def _start_development_task(
+        self,
+        goal: str,
+        workspace_root: str,
+        mode: str,
+        engine: str,
+        target_window: dict | None = None,
+    ) -> str:
         from agent.task_queue import get_queue
+        if engine == "cline":
+            selected = target_window or {}
+            return get_queue().submit(
+                goal=goal,
+                speak=self.speak,
+                approval_callback=self.ui.request_cline_approval,
+                tool_registry=self._tool_registry,
+                executor_kind="cline",
+                cline_workspace_root=workspace_root,
+                cline_mode=mode,
+                cline_target_window_hwnd=selected.get("hwnd"),
+                cline_target_window_pid=selected.get("pid"),
+            )
+        if engine != "opencode":
+            raise ValueError("Moteur de développement inconnu.")
         return get_queue().submit(
             goal=goal,
             speak=self.speak,
@@ -2479,9 +2502,42 @@ class KaizumiLive:
         )
 
     @staticmethod
-    def _opencode_health() -> dict:
+    def _development_engine_health(engine: str = "opencode") -> dict:
+        if engine == "cline":
+            from niang_ia.integrations.cline.cline_health import check_cline_health
+            result = check_cline_health()
+            result["engine"] = "Cline"
+            return result
         from niang_ia.integrations.opencode.opencode_health import check_opencode_health
-        return check_opencode_health()
+        result = check_opencode_health()
+        result["engine"] = "OpenCode"
+        return result
+
+    @staticmethod
+    def _available_desktop_windows() -> list[dict]:
+        from agent.windows_desktop import WindowsDesktopAgent
+
+        blocked_processes = {
+            "cmd.exe", "consent.exe", "credentialuibroker.exe", "mmc.exe",
+            "powershell.exe", "pwsh.exe", "regedit.exe", "services.exe",
+            "taskmgr.exe", "winlogon.exe",
+        }
+        windows = WindowsDesktopAgent().list_windows(
+            include_hidden=False,
+            include_untitled=False,
+        )
+        return [
+            {
+                "hwnd": window["hwnd"],
+                "pid": window["pid"],
+                "title": window["title"],
+                "process_name": window.get("process_name") or "application",
+            }
+            for window in windows
+            if window.get("visible")
+            and window.get("pid") != os.getpid()
+            and str(window.get("process_name") or "").casefold() not in blocked_processes
+        ]
 
     def _cancel_agent_task(self, task_id: str) -> bool:
         from agent.task_queue import get_queue

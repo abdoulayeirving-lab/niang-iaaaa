@@ -37,6 +37,18 @@ class ReleaseBuildTests(unittest.TestCase):
             release_files,
         )
         self.assertIn(
+            "niang_ia/integrations/cline/cline_desktop.py",
+            release_files,
+        )
+        self.assertIn(
+            "niang_ia/integrations/cline/cline_engine.py",
+            release_files,
+        )
+        self.assertIn(
+            "niang_ia/integrations/cline/cline_policy.py",
+            release_files,
+        )
+        self.assertIn(
             "web_design_skills/visual-asset-intelligence/SKILL.md",
             release_files,
         )

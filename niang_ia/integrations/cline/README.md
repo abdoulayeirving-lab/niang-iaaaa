@@ -22,14 +22,17 @@ Solar Mini 4, then Nemotron 3.5 Lightning Free. The local Ollama provider remain
 available for explicitly configured local missions.
 
 Open **DÉVELOPPEMENT LOGICIEL** in NIANG IA, select an existing project folder,
-choose a mode, and enter the task. NIANG IA opens that folder in a new VS Code
-window before starting Cline. The development panel shows progress and completed
-workspace actions as they happen; VS Code reflects the Cline file writes in the
-open project. If a voice request starts the mission, NIANG IA opens the
-development panel on the configured workspace and updates it while the task is
-running. The chat router can also start a mission in the configured
-`NIANG_IA_WORKSPACE_ROOT` after NIANG IA's confirmation gate; it opens the
-development panel and the same workspace in VS Code automatically.
+choose **Cline**, choose an operating mode, and enter the task. Cline runs
+directly through the Agent SDK and does not launch VS Code automatically. The
+development panel shows progress and completed workspace actions as they happen.
+If you explicitly select a visible target window before the mission, Cline can
+observe safe accessible controls and perform bounded navigation in that window.
+It never receives screenshots or field values; text entry is limited to
+non-sensitive fields. Window tools are absent in Plan mode, and clicks on
+buttons, menus, or risky controls require confirmation. Cline cannot enumerate
+or switch to another window.
+The chat router can still start an OpenCode mission in the configured
+`NIANG_IA_WORKSPACE_ROOT` after NIANG IA's confirmation gate.
 
 Cline missions fail closed unless the Cline CLI and Agent SDK are available.
 NIANG IA never copies API keys or credentials into the worker environment. A
@@ -46,6 +49,9 @@ required and is checked by the provider when the first request is made.
 - **Autonomous controlled**: allows bounded in-workspace edits and new-file
   creation; overwrites, multi-file patches, dependency installs, and executable
   project checks still require approval.
+- Cline can open a folder from the selected project in Windows Explorer only
+  when the user explicitly requests it; each opening requires approval, and
+  paths outside the selected workspace are rejected.
 
 The agent receives no general shell, delete, deployment, browser, or system
 administration tool. Python and Node dependency installs are project-scoped;

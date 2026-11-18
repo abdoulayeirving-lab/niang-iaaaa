@@ -52,6 +52,8 @@ class Task:
     executor_kind: str = field(compare=False, default="niang")
     cline_workspace_root: str = field(compare=False, default="")
     cline_mode: str = field(compare=False, default="assisted")
+    cline_target_window_hwnd: int | None = field(compare=False, default=None)
+    cline_target_window_pid: int | None = field(compare=False, default=None)
     opencode_workspace_root: str = field(compare=False, default="")
     opencode_mode: str = field(compare=False, default="autonomous_controlled")
     routing_provider: str = field(compare=False, default="")
@@ -169,6 +171,8 @@ class TaskQueue:
             "executor_kind": task.executor_kind,
             "cline_workspace_root": task.cline_workspace_root,
             "cline_mode": task.cline_mode,
+            "cline_target_window_hwnd": task.cline_target_window_hwnd,
+            "cline_target_window_pid": task.cline_target_window_pid,
             "opencode_workspace_root": task.opencode_workspace_root,
             "opencode_mode": task.opencode_mode,
             "routing_provider": task.routing_provider,
@@ -301,6 +305,8 @@ class TaskQueue:
                     executor_kind=payload.get("executor_kind", "niang"),
                     cline_workspace_root=payload.get("cline_workspace_root", ""),
                     cline_mode=payload.get("cline_mode", "assisted"),
+                    cline_target_window_hwnd=payload.get("cline_target_window_hwnd"),
+                    cline_target_window_pid=payload.get("cline_target_window_pid"),
                     opencode_workspace_root=payload.get("opencode_workspace_root", ""),
                     opencode_mode=payload.get("opencode_mode", "autonomous_controlled"),
                     routing_provider=payload.get("routing_provider", ""),
@@ -395,6 +401,8 @@ class TaskQueue:
         executor_kind: str = "niang",
         cline_workspace_root: str = "",
         cline_mode: str = "assisted",
+        cline_target_window_hwnd: int | None = None,
+        cline_target_window_pid: int | None = None,
         opencode_workspace_root: str = "",
         opencode_mode: str = "autonomous_controlled",
         workspace_verification_required: bool = False,
@@ -411,6 +419,15 @@ class TaskQueue:
             raise ValueError("Unsupported mission engine.")
         if executor_kind == "cline" and not cline_workspace_root:
             raise ValueError("Cline missions require a selected project folder.")
+        if (cline_target_window_hwnd is None) != (cline_target_window_pid is None):
+            raise ValueError("Cline desktop control requires a selected window and process.")
+        if cline_target_window_hwnd is not None and (
+            type(cline_target_window_hwnd) is not int
+            or cline_target_window_hwnd <= 0
+            or type(cline_target_window_pid) is not int
+            or cline_target_window_pid <= 0
+        ):
+            raise ValueError("Cline desktop control requires a valid selected window.")
         if cline_mode not in {"plan", "assisted", "autonomous_controlled"}:
             raise ValueError("Unsupported Cline operating mode.")
         if executor_kind == "opencode" and not opencode_workspace_root:
@@ -432,6 +449,8 @@ class TaskQueue:
             executor_kind = executor_kind,
             cline_workspace_root = cline_workspace_root,
             cline_mode = cline_mode,
+            cline_target_window_hwnd = cline_target_window_hwnd,
+            cline_target_window_pid = cline_target_window_pid,
             opencode_workspace_root = opencode_workspace_root,
             opencode_mode = opencode_mode,
             workspace_verification_required = bool(workspace_verification_required),
@@ -687,6 +706,8 @@ class TaskQueue:
                 "action_history": [dict(item) for item in task.action_history],
                 "executor_kind": task.executor_kind,
                 "cline_workspace_root": task.cline_workspace_root,
+                "cline_target_window_hwnd": task.cline_target_window_hwnd,
+                "cline_target_window_pid": task.cline_target_window_pid,
                 "opencode_workspace_root": task.opencode_workspace_root,
                 "routing_provider": task.routing_provider,
                 "routing_model": task.routing_model,
@@ -812,9 +833,6 @@ class TaskQueue:
                             self._condition.notify()
                         self._active_count -= 1
                         return
-                if task.executor_kind == "cline":
-                    from niang_ia.integrations.cline.cline_vscode import open_vscode_workspace
-                    open_vscode_workspace(workspace_root)
                 if task.executor_kind == "opencode":
                     from niang_ia.integrations.opencode.opencode_engine import OpenCodeEngine
                     result = OpenCodeEngine().execute(
@@ -836,6 +854,8 @@ class TaskQueue:
                         approval_callback=task.approval_callback,
                         on_progress=lambda progress: self._update_progress(task, progress),
                         on_action=lambda action: self._record_action(task, action),
+                        target_window_hwnd=task.cline_target_window_hwnd,
+                        target_window_pid=task.cline_target_window_pid,
                     )
             else:
                 continuity_context = None
