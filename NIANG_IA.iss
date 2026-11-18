@@ -1,5 +1,5 @@
 #define AppName "NIANG IA"
-#define AppVersion "1.0.47"
+#define AppVersion "1.0.50"
 #define SourceDir AddBackslash(SourcePath) + "dist\NIANG_IA_" + AppVersion
 
 [Setup]
@@ -38,6 +38,7 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 
 [Run]
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\install_screen_vision.ps1"""; StatusMsg: "Installation d'Ollama et téléchargement du modèle de vision (environ 1,9 Go)..."; Flags: waituntilterminated
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\install_agent_reach.ps1"""; StatusMsg: "Téléchargement et installation des connecteurs Agent-Reach..."; Flags: waituntilterminated; Check: ShouldInstallAgentReach
 Filename: "{sys}\wscript.exe"; Parameters: """{app}\START_NIANG_IA.vbs"""; Description: "Launch NIANG IA"; WorkingDir: "{app}"; Flags: postinstall nowait skipifsilent
 
 [Code]
@@ -48,9 +49,12 @@ const
 var
   PersonalizationPage: TWizardPage;
   ApiKeyPage: TWizardPage;
+  AgentReachPage: TWizardPage;
   UserNameEdit: TNewEdit;
   LanguageCombo: TNewComboBox;
   GeminiKeyEdit: TNewEdit;
+  AgentReachInstallCheck: TNewCheckBox;
+  AgentReachSessionReuseCheck: TNewCheckBox;
   GetApiKeyButton: TNewButton;
   BrandLabel: TNewStaticText;
   TaglineLabel: TNewStaticText;
@@ -62,6 +66,8 @@ var
   ApiKeyDescription: TNewStaticText;
   ApiKeyLabel: TNewStaticText;
   ApiKeyInfo: TNewStaticText;
+  AgentReachTitle: TNewStaticText;
+  AgentReachInfo: TNewStaticText;
   ExistingProfile: Boolean;
   ExistingApiConfig: Boolean;
 
@@ -297,11 +303,69 @@ begin
     ScaleY(10);
   ApiKeyInfo.Width := ContentWidth;
   ApiKeyInfo.Height := ScaleY(48);
+
+  AgentReachPage := CreateCustomPage(ApiKeyPage.ID, '', '');
+
+  AgentReachTitle := TNewStaticText.Create(WizardForm);
+  AgentReachTitle.Parent := AgentReachPage.Surface;
+  AgentReachTitle.Caption := 'Recherche Internet avec Agent-Reach';
+  AgentReachTitle.Font.Name := 'Segoe UI';
+  AgentReachTitle.Font.Size := 15;
+  AgentReachTitle.Font.Style := [fsBold];
+  AgentReachTitle.Font.Color := clNavy;
+  AgentReachTitle.AutoSize := True;
+  AgentReachTitle.Left := ContentLeft;
+  AgentReachTitle.Top := ScaleY(14);
+
+  AgentReachInfo := TNewStaticText.Create(WizardForm);
+  AgentReachInfo.Parent := AgentReachPage.Surface;
+  AgentReachInfo.Caption :=
+    'L''installation telecharge uv 0.13.7 et Agent-Reach 1.6.1 depuis leurs sources officielles, ' +
+    'puis installe les connecteurs et leurs dependances (dont OpenCLI, un navigateur dedie, ' +
+    'des paquets Python/Node et FFmpeg). Une connexion Internet est necessaire; aucun droit ' +
+    'administrateur n''est demande. Aucun cookie, identifiant ni cle API n''est fourni. ' +
+    'Xiaoyuzhou est installe, mais sa transcription reste desactivee sans cle Groq protegee par DPAPI ' +
+    'et approbation explicite a chaque appel; des frais de fournisseur peuvent s''appliquer.';
+  AgentReachInfo.Font.Name := 'Segoe UI';
+  AgentReachInfo.Font.Size := 8;
+  AgentReachInfo.Font.Color := clGray;
+  AgentReachInfo.WordWrap := True;
+  AgentReachInfo.AutoSize := False;
+  AgentReachInfo.Left := ContentLeft;
+  AgentReachInfo.Top := AgentReachTitle.Top + AgentReachTitle.Height + ScaleY(10);
+  AgentReachInfo.Width := ContentWidth;
+  AgentReachInfo.Height := ScaleY(126);
+
+  AgentReachInstallCheck := TNewCheckBox.Create(WizardForm);
+  AgentReachInstallCheck.Parent := AgentReachPage.Surface;
+  AgentReachInstallCheck.Caption :=
+    'Telecharger et installer maintenant Agent-Reach et tous ses connecteurs declares';
+  AgentReachInstallCheck.Font.Name := 'Segoe UI';
+  AgentReachInstallCheck.Font.Size := 9;
+  AgentReachInstallCheck.Left := ContentLeft;
+  AgentReachInstallCheck.Top := AgentReachInfo.Top + AgentReachInfo.Height + ScaleY(8);
+  AgentReachInstallCheck.Width := ContentWidth;
+  AgentReachInstallCheck.Height := ScaleY(38);
+  AgentReachInstallCheck.Checked := False;
+
+  AgentReachSessionReuseCheck := TNewCheckBox.Create(WizardForm);
+  AgentReachSessionReuseCheck.Parent := AgentReachPage.Surface;
+  AgentReachSessionReuseCheck.Caption :=
+    'J''autorise NIANG IA a reutiliser, uniquement pour une recherche demandee, les cookies locaux du site concerne dans son profil Agent-Reach dedie.';
+  AgentReachSessionReuseCheck.Font.Name := 'Segoe UI';
+  AgentReachSessionReuseCheck.Font.Size := 9;
+  AgentReachSessionReuseCheck.Left := ContentLeft;
+  AgentReachSessionReuseCheck.Top :=
+    AgentReachInstallCheck.Top + AgentReachInstallCheck.Height + ScaleY(4);
+  AgentReachSessionReuseCheck.Width := ContentWidth;
+  AgentReachSessionReuseCheck.Height := ScaleY(48);
+  AgentReachSessionReuseCheck.Checked := False;
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
 var
-  AppDir, DataDir: string;
+  AppDir, DataDir, ReuseConsentPath: string;
+  ReuseConsentValue: AnsiString;
 begin
   Result := True;
   if CurPageID <> wpSelectDir then
@@ -320,6 +384,13 @@ begin
     FileExists(DataDir + 'config\installer_gemini_key.txt') or
     FileExists(DataDir + 'config\api_keys.json') or
     FileExists(ExpandConstant('{localappdata}\NIANG IA\api_keys.dpapi'));
+
+  ReuseConsentPath := AppDir + 'config\agent_reach_session_reuse.txt';
+  if LoadStringFromFile(ReuseConsentPath, ReuseConsentValue) then
+    AgentReachSessionReuseCheck.Checked :=
+      Lowercase(Trim(ReuseConsentValue)) = 'true'
+  else
+    AgentReachSessionReuseCheck.Checked := False;
 end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
@@ -327,6 +398,11 @@ begin
   Result :=
     ((PageID = PersonalizationPage.ID) and ExistingProfile) or
     ((PageID = ApiKeyPage.ID) and ExistingApiConfig);
+end;
+
+function ShouldInstallAgentReach: Boolean;
+begin
+  Result := Assigned(AgentReachInstallCheck) and AgentReachInstallCheck.Checked;
 end;
 
 procedure OpenGeminiApiKeyPage(Sender: TObject);
@@ -348,7 +424,9 @@ end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  Json, IdentityFields, ProfilePath, KeyPath, DataDir: string;
+  Json, IdentityFields, ProfilePath, KeyPath, DataDir,
+  ReuseConsentPath: string;
+  ReuseConsentValue: AnsiString;
   HasIdentityField: Boolean;
 begin
   if CurStep <> ssPostInstall then
@@ -380,5 +458,18 @@ begin
       RaiseException('Impossible de créer le dossier de configuration.');
     if not SaveStringToFile(KeyPath, Trim(GeminiKeyEdit.Text), False) then
       RaiseException('Impossible d''enregistrer la clé Gemini sur cet ordinateur.');
+  end;
+
+  ReuseConsentPath := AddBackslash(WizardDirValue) +
+    'config\agent_reach_session_reuse.txt';
+  if (not WizardSilent) or (not FileExists(ReuseConsentPath)) then
+  begin
+    ReuseConsentValue := 'false';
+    if Assigned(AgentReachSessionReuseCheck) and AgentReachSessionReuseCheck.Checked then
+      ReuseConsentValue := 'true';
+    if not ForceDirectories(ExtractFileDir(ReuseConsentPath)) then
+      RaiseException('Impossible de créer le dossier de configuration Agent-Reach.');
+    if not SaveStringToFile(ReuseConsentPath, ReuseConsentValue, False) then
+      RaiseException('Impossible d''enregistrer le choix de réutilisation des cookies locaux.');
   end;
 end;

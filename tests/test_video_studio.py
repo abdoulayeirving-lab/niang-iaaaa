@@ -1,4 +1,4 @@
-"""Tests for local-only video inspection."""
+"""Tests for local-only Video Studio actions."""
 
 import json
 import os
@@ -175,6 +175,50 @@ class VideoStudioTests(unittest.TestCase):
             with self.assertRaisesRegex(video_studio.VideoInspectionError, "formats"):
                 video_studio.inspect_video(str(path), cv2_module=_FakeCV2())
 
+    def test_audio_source_rejects_urls_and_non_audio_files(self):
+        with self.assertRaisesRegex(video_studio.VideoInspectionError, "URLs"):
+            video_studio._resolve_audio_source("https://example.com/audio.mp3")
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "notes.txt"
+            path.write_text("not audio", encoding="utf-8")
+            with self.assertRaisesRegex(video_studio.VideoInspectionError, "audio formats"):
+                video_studio._resolve_audio_source(str(path))
+
+    def test_audio_duration_probe_requires_an_audio_stream_and_enforces_limit(self):
+        with patch.object(
+            video_studio.subprocess,
+            "run",
+            return_value=type("Probe", (), {
+                "stderr": (
+                    "Input #0, wav, from 'sample.wav':\n"
+                    "  Duration: 00:00:12.50, bitrate: 128 kb/s\n"
+                    "  Stream #0:0: Audio: pcm_s16le"
+                ),
+                "stdout": "",
+                "returncode": 1,
+            })(),
+        ):
+            self.assertEqual(
+                video_studio._probe_audio_duration(Path("ffmpeg.exe"), Path("sample.wav")),
+                12.5,
+            )
+
+        with patch.object(
+            video_studio.subprocess,
+            "run",
+            return_value=type("Probe", (), {
+                "stderr": (
+                    "Input #0, wav, from 'sample.wav':\n"
+                    "  Duration: 00:11:00.00, bitrate: 128 kb/s\n"
+                    "  Stream #0:0: Audio: pcm_s16le"
+                ),
+                "stdout": "",
+                "returncode": 1,
+            })(),
+        ):
+            with self.assertRaisesRegex(video_studio.VideoInspectionError, "10-minute"):
+                video_studio._probe_audio_duration(Path("ffmpeg.exe"), Path("sample.wav"))
+
     def test_analysis_action_saves_a_local_json_report(self):
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / "private clip.mp4"
@@ -247,6 +291,39 @@ class VideoStudioTests(unittest.TestCase):
             self.assertEqual(report_data["source_name"], source.name)
             self.assertNotIn(str(source.parent), reports[0].read_text(encoding="utf-8"))
 
+    def test_visualize_action_renders_local_mp4_and_saves_report(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "private audio.wav"
+            source.write_bytes(b"synthetic-audio")
+            output_dir = Path(folder) / "renders"
+
+            def render(source_path, output_path, ffmpeg, duration):
+                output_path.write_bytes(b"rendered visualizer")
+
+            with (
+                patch.object(video_studio, "REPORT_DIR", output_dir),
+                patch.object(video_studio, "_find_ffmpeg", return_value=Path("ffmpeg.exe")),
+                patch.object(video_studio, "_probe_audio_duration", return_value=3.2),
+                patch.object(video_studio, "_render_audio_visualizer", side_effect=render),
+            ):
+                result = video_studio.video_studio_action({
+                    "action": "visualize",
+                    "source": str(source),
+                })
+
+            renders = list(output_dir.glob("*.mp4"))
+            reports = list(output_dir.glob("*.visualizer.json"))
+            self.assertEqual(len(renders), 1)
+            self.assertEqual(len(reports), 1)
+            self.assertIn("audio stayed on this device", result)
+            self.assertEqual(renders[0].read_bytes(), b"rendered visualizer")
+            report_data = json.loads(reports[0].read_text(encoding="utf-8"))
+            self.assertEqual(report_data["source_name"], source.name)
+            self.assertEqual(report_data["duration_seconds"], 3.2)
+            self.assertFalse(report_data["media_uploaded"])
+            self.assertFalse(report_data["source_changed"])
+            self.assertNotIn(str(source.parent), reports[0].read_text(encoding="utf-8"))
+
     def test_status_distinguishes_detected_and_missing_capcut(self):
         with (
             patch.object(video_studio.shutil, "which", return_value=None),
@@ -255,7 +332,7 @@ class VideoStudioTests(unittest.TestCase):
             self.assertFalse(video_studio.capcut_status()["installed"])
             result = video_studio.video_studio_action({"action": "status"})
         self.assertIn("CapCut is not installed", result)
-        self.assertIn("editing, and export", result)
+        self.assertIn("FFmpeg installation", result)
 
     def test_detects_capcut_under_local_appdata_apps_folder(self):
         with tempfile.TemporaryDirectory() as folder:

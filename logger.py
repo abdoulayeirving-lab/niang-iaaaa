@@ -136,6 +136,7 @@ _PRIVATE_TOOL_DATA = frozenset({
     "drive", "calendar", "recall_memory", "computer_control",
     "computer_settings", "screen_process", "whatsapp_call",
     "windows_diagnostics", "windows_repair", "system_status", "pc_health",
+    "agent_reach",
 })
 
 

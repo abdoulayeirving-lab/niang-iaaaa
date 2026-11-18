@@ -34,6 +34,7 @@ class Risk(IntEnum):
 TOOL_RISK = {
     # Read-only / informational
     "web_search":        Risk.LOW,
+    "agent_reach":       Risk.LOW,
     "weather_report":    Risk.LOW,
     "system_status":     Risk.LOW,
     "recall_memory":     Risk.LOW,
@@ -448,6 +449,12 @@ def classify(name: str, args: dict | None) -> Risk:
     """Return the risk level for a concrete tool call (name + args)."""
     args = args or {}
     action = str(args.get("action", "")).lower().strip()
+    if (
+        name == "agent_reach"
+        and str(args.get("channel", "")).lower().strip() == "xiaoyuzhou"
+        and action == "transcribe"
+    ):
+        return Risk.HIGH
     if _contains_sensitive_file_path(name, args):
         return Risk.HIGH
     if name == "software_development":
@@ -576,6 +583,16 @@ def describe(name: str, args: dict | None) -> str:
     """Short human-readable description of what an action will do."""
     args = args or {}
     action = str(args.get("action", "")).lower().strip()
+
+    if (
+        name == "agent_reach"
+        and str(args.get("channel", "")).lower().strip() == "xiaoyuzhou"
+        and action == "transcribe"
+    ):
+        return (
+            "send this podcast audio to the configured external transcription provider; "
+            "provider quota or charges may apply"
+        )
 
     if name == "software_development":
         mode = str(args.get("mode", "autonomous_controlled")).strip().lower()

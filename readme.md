@@ -46,7 +46,7 @@ external APIs. It is **free to self-host** — you only need a Gemini API key
 | Area | What Kaizumi does |
 |------|-------------------|
 | 🎙️ **Real-time voice** | Natural, low-latency speech-to-speech conversation in any language |
-| 🎬 **Video Studio** | Local video inspection and subtitle-guided promo renders with transitions and audio mastering |
+| 🎬 **Video Studio** | Local video inspection, audio-reactive MP4 visualizers, and subtitle-guided promo renders |
 | 👁️ **Visual awareness** | On-demand screen descriptions with local Qwen3-VL via Ollama; screenshots never leave the PC; optional OCR sends only recognized text to Gemini after confirmation |
 | 🧠 **Persistent memory** | Remembers your name, preferences, projects, and plans across sessions |
 | 🖥️ **Guarded Computer Use** | Observe Windows UI Automation controls, operate mouse/keyboard, and verify visible results |
@@ -749,15 +749,18 @@ task status reports the current phase and step progress.
 - **Video Studio:** `video_studio status` checks CapCut in standard
   install locations. `video_studio analyze` reads a local AVI, M4V, MKV, MOV,
   MP4, or WEBM file with OpenCV and saves metadata plus sampled visual-change
-  candidates as JSON under `outputs/video_studio/`. Frames are inspected locally
-  and are not uploaded. The report does not identify story content, speech,
-  or verified scene boundaries. `video_studio edit` creates a rendered copy
-  using existing subtitle phrase boundaries, smooth-wipe/dissolve transitions,
-  synchronized audio crossfades, burnt-in captions, restrained reframing/color
-  adjustment, and normalized audio. It does not modify the source or create a
-  CapCut project. This automated promo preset requires an existing subtitle
-  track and CapCut's bundled FFmpeg; it is not a substitute for editorial review.
-  CapCut 9.6.0.4097 is installed under `%LOCALAPPDATA%/CapCut/Apps/CapCut.exe`.
+  candidates as JSON under `%USERPROFILE%\Videos\NIANG_IA_VideoStudio`. Frames
+  are inspected locally and are not uploaded. The report does not identify story
+  content, speech, or verified scene boundaries. `video_studio visualize` turns
+  a local audio file into a 1280x720 audio-reactive waveform MP4 with synchronized
+  AAC audio. It requires local FFmpeg and accepts files up to 2 GB and 10 minutes;
+  the source stays unchanged and is not uploaded. `video_studio edit` creates a
+  rendered copy using existing subtitle phrase boundaries, smooth-wipe/dissolve
+  transitions, synchronized audio crossfades, burnt-in captions, restrained
+  reframing/color adjustment, and normalized audio. It does not modify the source
+  or create a CapCut project. This automated promo preset requires an existing
+  subtitle track and CapCut's bundled FFmpeg; it is not a substitute for editorial
+  review. CapCut 9.6.0.4097 is installed under `%LOCALAPPDATA%\CapCut\Apps\CapCut.exe`.
 - **Guarded Windows Computer Use:** `computer_control` provides screen
   resolution/scaling and monitor information, local screenshots, active-window
   details, accessible controls from the foreground window, mouse and keyboard

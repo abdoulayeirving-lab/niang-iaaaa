@@ -1,4 +1,6 @@
 import unittest
+import shutil
+import subprocess
 from pathlib import Path
 
 from PIL import Image
@@ -78,11 +80,47 @@ class InstallerPersonalizationTests(unittest.TestCase):
         self.assertIn("127.0.0.1:11434", setup_script)
         self.assertIn("MessageBox]::Show", setup_script)
 
+    def test_agent_reach_installer_requires_visible_install_and_cookie_consent(self):
+        installer = (ROOT / "NIANG_IA.iss").read_text(encoding="utf-8")
+        setup_script = (ROOT / "install_agent_reach.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("AgentReachInstallCheck.Checked := False", installer)
+        self.assertIn("AgentReachSessionReuseCheck.Checked := False", installer)
+        self.assertIn("config\\agent_reach_session_reuse.txt", installer)
+        self.assertIn("Check: ShouldInstallAgentReach", installer)
+        self.assertIn("51443d733bcb26064262442083a8f8abf6ba5e3e7df54beebafe98c88be04a60", setup_script)
+        self.assertIn("0cdc5b38fe5a8168ed6a25814f5ba43c21d313dd3187314fccb37b7cec46e021", setup_script)
+        self.assertIn('"xiaoyuzhou"', setup_script)
+        self.assertIn("No API keys, cookies, or provider credentials are configured.", setup_script)
+
+    def test_agent_reach_setup_plan_is_network_free(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("Windows PowerShell is unavailable.")
+
+        result = subprocess.run(
+            [
+                powershell,
+                "-NoProfile",
+                "-File",
+                str(ROOT / "install_agent_reach.ps1"),
+                "-PlanOnly",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+        self.assertIn("Agent-Reach 1.6.1", result.stdout)
+        self.assertIn("xiaoyuzhou", result.stdout)
+        self.assertIn("No API keys, cookies", result.stdout)
+
     def test_release_excludes_backup_files(self):
         test_backups = (
             ROOT / "tests" / "test_safety.py.audit_backup_20261103_010410.py",
             ROOT / "actions" / "calendar.py.backup_20261016_132605",
             ROOT / "actions" / "autostart.py.avant_niang_suite.bak",
+            ROOT / "actions" / "computer_control.py.bak_screen_describe",
         )
 
         for backup in test_backups:

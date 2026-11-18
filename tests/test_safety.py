@@ -24,6 +24,16 @@ class RiskClassificationTest(unittest.TestCase):
         self.assertEqual(safety.classify("set_live_translation", {"action": "enable"}), safety.Risk.LOW)
         self.assertEqual(safety.classify("proactive_suggestions", {"action": "enable"}), safety.Risk.LOW)
 
+    def test_provider_transcription_requires_per_request_confirmation(self):
+        args = {
+            "action": "transcribe",
+            "channel": "xiaoyuzhou",
+            "target": "https://example.com/episode",
+        }
+        self.assertEqual(safety.classify("agent_reach", args), safety.Risk.HIGH)
+        self.assertTrue(safety.needs_confirmation("agent_reach", args))
+        self.assertIn("external transcription provider", safety.describe("agent_reach", args))
+
     def test_file_delete_is_high(self):
         self.assertEqual(
             safety.classify("file_controller", {"action": "delete", "name": "x.txt"}),
@@ -172,15 +182,17 @@ class RiskClassificationTest(unittest.TestCase):
                 self.assertEqual(safety.classify(name, {}), safety.Risk.HIGH)
                 self.assertTrue(safety.needs_confirmation(name, {}))
 
-    def test_video_studio_status_is_read_only_but_analysis_is_medium(self):
+    def test_video_studio_status_is_read_only_but_media_actions_are_medium(self):
         self.assertEqual(
             safety.classify("video_studio", {"action": "status"}),
             safety.Risk.LOW,
         )
-        self.assertEqual(
-            safety.classify("video_studio", {"action": "analyze"}),
-            safety.Risk.MEDIUM,
-        )
+        for action in ("analyze", "visualize"):
+            with self.subTest(action=action):
+                self.assertEqual(
+                    safety.classify("video_studio", {"action": action}),
+                    safety.Risk.MEDIUM,
+                )
 
     def test_computer_control_requires_confirmation_except_stop_and_screen_info(self):
         self.assertEqual(

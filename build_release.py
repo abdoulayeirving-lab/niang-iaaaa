@@ -47,6 +47,7 @@ ROOT_FILES = (
     "START_NIANG_IA.bat",
     "START_NIANG_IA.vbs",
     "install_screen_vision.ps1",
+    "install_agent_reach.ps1",
     "start_niang_ia.ps1",
     "start_remote.cmd",
     "api_keys.py",
@@ -83,7 +84,7 @@ EXCLUDED_DIRS = {
     "venv",
 }
 EXCLUDED_SUFFIXES = {".bak", ".log", ".pyc"}
-BACKUP_MARKERS = (".backup", ".audit_backup_", ".avant_")
+BACKUP_MARKERS = (".backup", ".audit_backup_", ".avant_", ".bak_")
 SECRET_FILENAMES = {
     "api_keys.json",
     "bridge_token.txt",

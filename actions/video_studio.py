@@ -1,4 +1,4 @@
-"""Local, bounded video inspection for the NIANG IA Video Studio workflow."""
+"""Local, bounded video inspection and audio visualization for NIANG IA."""
 
 from __future__ import annotations
 
@@ -16,10 +16,19 @@ from pathlib import Path
 
 REPORT_DIR = Path.home() / "Videos" / "NIANG_IA_VideoStudio"
 VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm"}
+AUDIO_EXTENSIONS = {
+    ".aac", ".aiff", ".alac", ".flac", ".m4a", ".m4b", ".mka",
+    ".mp3", ".mpc", ".ogg", ".opus", ".wav", ".wma",
+}
 MAX_VIDEO_BYTES = 2 * 1024 * 1024 * 1024
+MAX_AUDIO_BYTES = 2 * 1024 * 1024 * 1024
+MAX_AUDIO_DURATION_SECONDS = 10 * 60
 MAX_DURATION_SECONDS = 6 * 60 * 60
 MAX_FRAME_SAMPLES = 300
 SCENE_CHANGE_THRESHOLD = 0.35
+VISUALIZER_WIDTH = 1280
+VISUALIZER_HEIGHT = 720
+VISUALIZER_FPS = 30
 SUBTITLE_RE = re.compile(
     r"(\d{2}):(\d{2}):(\d{2}),(\d{3})\s+-->\s+"
     r"(\d{2}):(\d{2}):(\d{2}),(\d{3})\s*\n(.*?)(?=\n\s*\n|\Z)",
@@ -103,6 +112,65 @@ def _resolve_video_source(value: str) -> Path:
     return path
 
 
+def _resolve_audio_source(value: str) -> Path:
+    raw = str(value or "").strip().strip('"')
+    if not raw:
+        raise VideoInspectionError("Provide the full path to a local audio file.")
+    if raw.lower().startswith(("http://", "https://")):
+        raise VideoInspectionError("Only local audio files are supported; URLs are not downloaded.")
+    path = Path(raw).expanduser()
+    try:
+        path = path.resolve(strict=True)
+    except OSError as exc:
+        raise VideoInspectionError(f"Audio file was not found or is inaccessible: {exc}") from exc
+    if not path.is_file():
+        raise VideoInspectionError("The audio source path must point to a local file.")
+    if path.suffix.lower() not in AUDIO_EXTENSIONS:
+        raise VideoInspectionError(
+            "Supported audio formats are AAC, AIFF, ALAC, FLAC, M4A, MP3, OGG, OPUS, WAV, and WMA."
+        )
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise VideoInspectionError(f"Could not inspect the audio file: {exc}") from exc
+    if size <= 0:
+        raise VideoInspectionError("The audio file is empty.")
+    if size > MAX_AUDIO_BYTES:
+        raise VideoInspectionError("Audio exceeds the 2 GB local visualization limit.")
+    return path
+
+
+def _probe_audio_duration(ffmpeg: Path, source: Path) -> float:
+    probe = subprocess.run(
+        [str(ffmpeg), "-hide_banner", "-i", str(source)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    details = probe.stderr + probe.stdout
+    if "Input #0" not in details:
+        raise VideoInspectionError(
+            "FFmpeg could not inspect the audio file: "
+            + (details.strip()[-400:] or f"exit code {probe.returncode}")
+        )
+    if not re.search(r"Stream #0:\d+.*?: Audio:", details):
+        raise VideoInspectionError("The selected file does not contain a readable audio stream.")
+    match = re.search(
+        r"Duration:\s*(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)",
+        details,
+    )
+    if not match:
+        raise VideoInspectionError("FFmpeg could not determine the audio duration.")
+    hours, minutes, seconds = match.groups()
+    duration = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+    if not math.isfinite(duration) or duration <= 0:
+        raise VideoInspectionError("The audio duration is invalid.")
+    if duration > MAX_AUDIO_DURATION_SECONDS:
+        raise VideoInspectionError("Audio exceeds the 10-minute local visualization limit.")
+    return duration
+
+
 def _report_path(source: Path) -> Path:
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -116,6 +184,18 @@ def _report_path(source: Path) -> Path:
     return candidate
 
 
+def _visualizer_output_paths(source: Path) -> tuple[Path, Path]:
+    base = _report_path(source).with_suffix("")
+    suffix = 2
+    while any(
+        Path(f"{base}{extension}").exists()
+        for extension in (".mp4", ".visualizer.json", ".json")
+    ):
+        base = base.with_name(f"{base.stem}_{suffix}")
+        suffix += 1
+    return Path(f"{base}.mp4"), Path(f"{base}.visualizer.json")
+
+
 def _edit_output_paths(source: Path) -> tuple[Path, Path]:
     base = _report_path(source).with_suffix("")
     suffix = 2
@@ -126,6 +206,67 @@ def _edit_output_paths(source: Path) -> tuple[Path, Path]:
         base = base.with_name(f"{base.stem}_{suffix}")
         suffix += 1
     return Path(f"{base}.mp4"), Path(f"{base}.edit.json")
+
+
+def _render_audio_visualizer(
+    source: Path,
+    output: Path,
+    ffmpeg: Path,
+    duration: float,
+) -> None:
+    waveform = (
+        f"[1:a]showwaves=s=1080x320:mode=p2p:rate={VISUALIZER_FPS}:"
+        "colors=0x8B5CF6|0x22D3EE:scale=sqrt,format=rgba[waves];"
+        "[0:v][waves]overlay=(W-w)/2:(H-h)/2:shortest=1,format=yuv420p[v]"
+    )
+    command = [
+        str(ffmpeg), "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "lavfi", "-i",
+        f"color=c=0x101426:s={VISUALIZER_WIDTH}x{VISUALIZER_HEIGHT}:r={VISUALIZER_FPS}",
+        "-i", str(source),
+        "-filter_complex", waveform,
+        "-map", "[v]", "-map", "1:a:0",
+        "-c:v", "h264_mf", "-b:v", "6M",
+        "-c:a", "aac", "-b:a", "192k",
+        "-t", f"{duration:.3f}", "-shortest", "-movflags", "+faststart",
+        str(output),
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=min(1800, max(180, int(duration * 3))),
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        try:
+            output.unlink(missing_ok=True)
+        except OSError as cleanup_error:
+            raise VideoInspectionError(
+                f"FFmpeg timed out and its partial output could not be removed: {cleanup_error}"
+            ) from exc
+        raise VideoInspectionError("FFmpeg timed out while rendering the audio visualizer.") from exc
+    if result.returncode:
+        try:
+            output.unlink(missing_ok=True)
+        except OSError as cleanup_error:
+            raise VideoInspectionError(
+                "FFmpeg failed and its partial output could not be removed: "
+                f"{cleanup_error}"
+            )
+        raise VideoInspectionError(
+            "FFmpeg could not render the audio visualizer: "
+            + (result.stderr.strip()[:500] or f"exit code {result.returncode}")
+        )
+    if not output.is_file() or output.stat().st_size <= 0:
+        try:
+            output.unlink(missing_ok=True)
+        except OSError as cleanup_error:
+            raise VideoInspectionError(
+                f"FFmpeg produced an invalid video and it could not be removed: {cleanup_error}"
+            )
+        raise VideoInspectionError("FFmpeg finished without producing a video file.")
 
 
 def _parse_srt(data: str) -> list[dict]:
@@ -636,26 +777,66 @@ def video_studio_action(parameters: dict) -> str:
     action = str(params.get("action", "status")).strip().lower()
     if action == "status":
         status = capcut_status()
+        ffmpeg = _find_ffmpeg()
         if status["installed"]:
-            ffmpeg = _find_ffmpeg()
             return (
                 "Video Studio status: CapCut was found, but automated timeline editing "
                 "has not been verified. "
                 + (
-                    "CapCut's bundled FFmpeg is available for a local rendered-copy edit."
-                    if ffmpeg else "No supported local video renderer was found."
+                    "Local FFmpeg is available for audio visualization and rendered-copy edits."
+                    if ffmpeg else "No supported local FFmpeg renderer was found."
                 )
             )
         return (
             "Video Studio status: CapCut is not installed in the standard Windows "
             "locations checked. OpenCV is used only for local metadata and sampled "
-            "visual-change analysis; audio, transcription, editing, and export are "
-            "not available in this initial module."
+            "visual-change analysis. "
+            + (
+                "Local FFmpeg is available for audio visualization."
+                if ffmpeg else "Audio visualization and video editing need a local FFmpeg installation."
+            )
         )
-    if action not in {"analyze", "edit"}:
-        return "Use video_studio action 'status', 'analyze', or 'edit'."
+    if action not in {"analyze", "edit", "visualize"}:
+        return "Use video_studio action 'status', 'analyze', 'edit', or 'visualize'."
 
     try:
+        if action == "visualize":
+            source = _resolve_audio_source(str(params.get("source", "")))
+            ffmpeg = _find_ffmpeg()
+            if ffmpeg is None:
+                raise VideoInspectionError(
+                    "No local FFmpeg renderer is available. Install a supported editor or FFmpeg first."
+                )
+            duration = _probe_audio_duration(ffmpeg, source)
+            output, report_path = _visualizer_output_paths(source)
+            _render_audio_visualizer(source, output, ffmpeg, duration)
+            report_path.write_text(
+                json.dumps(
+                    {
+                        "source_name": source.name,
+                        "output_name": output.name,
+                        "duration_seconds": round(duration, 3),
+                        "resolution": {
+                            "width": VISUALIZER_WIDTH,
+                            "height": VISUALIZER_HEIGHT,
+                        },
+                        "frames_per_second": VISUALIZER_FPS,
+                        "visualizer": "audio-reactive waveform",
+                        "media_uploaded": False,
+                        "source_changed": False,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            return (
+                f"Audio visualizer video rendered to {output}. "
+                f"{duration:.1f} seconds at {VISUALIZER_WIDTH}x{VISUALIZER_HEIGHT}; "
+                f"local report saved to {report_path}. The audio stayed on this device "
+                "and the source file was not changed."
+            )
+
         source = _resolve_video_source(str(params.get("source", "")))
         if action == "edit":
             ffmpeg = _find_ffmpeg()
@@ -698,7 +879,10 @@ def video_studio_action(parameters: dict) -> str:
             encoding="utf-8",
         )
     except Exception as exc:
-        operation = "edit" if action == "edit" else "analysis"
+        operation = {
+            "edit": "edit",
+            "visualize": "visualization",
+        }.get(action, "analysis")
         return f"Video {operation} failed: {exc}"
 
     return (

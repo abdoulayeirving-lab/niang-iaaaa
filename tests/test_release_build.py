@@ -75,6 +75,29 @@ class ReleaseBuildTests(unittest.TestCase):
         self.assertNotIn(".env", release_files)
         self.assertNotIn("config/guardian.json", release_files)
 
+    def test_release_includes_agent_reach_integration_and_documentation(self):
+        release_files = {
+            path.relative_to(build_release.ROOT).as_posix()
+            for path in build_release.collect_files()
+        }
+
+        self.assertIn("niang_ia/integrations/agent_reach/adapter.py", release_files)
+        self.assertIn("niang_ia/integrations/agent_reach/client.py", release_files)
+        self.assertIn("niang_ia/integrations/agent_reach/command_registry.py", release_files)
+        self.assertIn("niang_ia/integrations/agent_reach/health.py", release_files)
+        self.assertIn("docs/agent-reach-integration.md", release_files)
+        self.assertIn("install_agent_reach.ps1", release_files)
+
+    def test_release_includes_video_studio_audio_visualizer(self):
+        release_files = {
+            path.relative_to(build_release.ROOT).as_posix()
+            for path in build_release.collect_files()
+        }
+
+        self.assertIn("actions/video_studio.py", release_files)
+        self.assertIn("main.py", release_files)
+        self.assertIn("readme.md", release_files)
+
     def test_release_includes_every_registered_skill(self):
         release_files = {
             path.relative_to(build_release.ROOT).as_posix()
