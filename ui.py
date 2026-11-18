@@ -8,6 +8,7 @@ import sys
 from i18n import tr
 from pathlib import Path
 from vision.arcade import VisionArcade
+from user_data_paths import persistent_path
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
 except ImportError:
@@ -24,7 +25,7 @@ def get_base_dir():
 BASE_DIR   = get_base_dir()
 CONFIG_DIR = BASE_DIR / "config"
 API_FILE   = CONFIG_DIR / "api_keys.json"
-INSTALLER_API_KEY_FILE = CONFIG_DIR / "installer_gemini_key.txt"
+INSTALLER_API_KEY_FILE = persistent_path("config/installer_gemini_key.txt")
 THEME_FILE = CONFIG_DIR / "ui_theme.json"
 
 SYSTEM_NAME = "NIANG IA"
@@ -4359,12 +4360,22 @@ class KaizumiUI:
         try:
             cfg = json.loads(API_FILE.read_text(encoding="utf-8"))
         except Exception:
-            return False
+            cfg = {}
+        if not isinstance(cfg, dict):
+            cfg = {}
         if isinstance(cfg.get("gemini_api_key"), str) and cfg["gemini_api_key"].strip():
             return True
         keys = cfg.get("gemini_api_keys")
-        return bool(isinstance(keys, list) and
-                    any(isinstance(k, str) and k.strip() for k in keys))
+        if isinstance(keys, list) and any(
+            isinstance(k, str) and k.strip() for k in keys
+        ):
+            return True
+        try:
+            from api_keys import has_secure_keys
+            return has_secure_keys()
+        except (ImportError, OSError, RuntimeError, ValueError) as exc:
+            self.write_log(f"ERR: Lecture de la clé Gemini protégée impossible : {exc}")
+            return False
 
     def wait_for_api_key(self):
         while not self._api_key_ready:

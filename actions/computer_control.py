@@ -30,6 +30,7 @@ import threading
 from datetime import datetime
 from pathlib import Path
 from ctypes import wintypes
+from user_data_paths import persistent_directory, persistent_path
 
 _PG_MOD = None
 _STOP_REQUESTED = threading.Event()
@@ -64,12 +65,12 @@ def get_base_dir() -> Path:
 
 
 BASE_DIR        = get_base_dir()
-API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
+API_CONFIG_PATH = persistent_path("config/api_keys.json")
 
 
 def _load_user_profile() -> dict:
     """Load user profile from long_term.json for form filling."""
-    memory_path = BASE_DIR / "memory" / "long_term.json"
+    memory_path = persistent_directory("memory") / "long_term.json"
     try:
         if memory_path.exists():
             data = json.loads(memory_path.read_text(encoding="utf-8"))

@@ -50,6 +50,13 @@ class InstallerPersonalizationTests(unittest.TestCase):
         self.assertIn("memory\\installer_profile.json", source)
         self.assertIn("config\\installer_gemini_key.txt", source)
         self.assertIn("config\\api_keys.json", source)
+        self.assertIn("UsePreviousAppDir=yes", source)
+        self.assertIn("DataDir + 'memory\\installer_profile.json'", source)
+        self.assertIn("DataDir + 'config\\installer_gemini_key.txt'", source)
+        self.assertIn(
+            "ExpandConstant('{localappdata}\\NIANG IA\\api_keys.dpapi')",
+            source,
+        )
         self.assertIn("function ShouldSkipPage(PageID: Integer): Boolean;", source)
         self.assertIn("(PageID = PersonalizationPage.ID) and ExistingProfile", source)
         self.assertIn("(PageID = ApiKeyPage.ID) and ExistingApiConfig", source)
@@ -89,6 +96,7 @@ class InstallerPersonalizationTests(unittest.TestCase):
         }
 
         self.assertIn("write_cline.py", release_files)
+        self.assertIn("user_data_paths.py", release_files)
         self.assertIn("niang_ia/integrations/cline/cline_manager.py", release_files)
 
     def test_release_includes_continuous_vision_runtime(self):

@@ -4,17 +4,11 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 import threading
 from datetime import date, timedelta
-from pathlib import Path
+from user_data_paths import persistent_path
 
-BASE_DIR = (
-    Path(sys.executable).parent
-    if getattr(sys, "frozen", False)
-    else Path(__file__).resolve().parent.parent
-)
-DATA_PATH = BASE_DIR / "memory" / "proactive_usage.json"
+DATA_PATH = persistent_path("memory/proactive_usage.json")
 _LOCK = threading.Lock()
 _MAX_EVENTS = 240
 _MIN_ACTIVE_DAYS = 3

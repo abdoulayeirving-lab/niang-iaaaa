@@ -15,6 +15,8 @@ import threading
 import time
 from pathlib import Path
 
+from user_data_paths import persistent_path
+
 
 def get_base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -23,12 +25,12 @@ def get_base_dir() -> Path:
 
 
 CONFIG_PATH = get_base_dir() / "config" / "api_keys.json"
-INSTALLER_KEY_PATH = get_base_dir() / "config" / "installer_gemini_key.txt"
+INSTALLER_KEY_PATH = persistent_path("config/installer_gemini_key.txt")
 _LOCAL_DATA_DIR = Path(
     os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))
 )
 SECURE_KEYS_PATH = _LOCAL_DATA_DIR / "NIANG IA" / "api_keys.dpapi"
-STATE_PATH  = get_base_dir() / "config" / "api_key_state.json"
+STATE_PATH  = persistent_path("config/api_key_state.json")
 DOTENV_PATH = get_base_dir() / ".env"
 
 _ENV_FILE_KEYS = {
@@ -82,6 +84,7 @@ def _load_state() -> dict:
 
 def _save_state() -> None:
     try:
+        STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
         tmp = STATE_PATH.with_suffix(STATE_PATH.suffix + ".tmp")
         tmp.write_text(json.dumps(_state, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, STATE_PATH)
@@ -109,6 +112,10 @@ def _read_secure_keys() -> list[str]:
     ):
         raise ValueError("Protected API key storage has an invalid format.")
     return [value.strip() for value in values if value.strip()]
+
+
+def has_secure_keys() -> bool:
+    return bool(_read_secure_keys())
 
 
 def _write_secure_keys(keys: list[str]) -> None:

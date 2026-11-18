@@ -64,6 +64,7 @@ ROOT_FILES = (
     "voice_launcher.py",
     "app_update.py",
     "write_cline.py",
+    "user_data_paths.py",
     "VERSION.txt",
 )
 EXCLUDED_DIRS = {

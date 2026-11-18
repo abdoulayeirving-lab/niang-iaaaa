@@ -20,6 +20,8 @@ from pathlib import Path
 import sys
 from typing import Iterator
 
+from user_data_paths import persistent_directory
+
 
 def get_base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -28,11 +30,12 @@ def get_base_dir() -> Path:
 
 
 BASE_DIR         = get_base_dir()
-MEMORY_PATH      = BASE_DIR / "memory" / "long_term.json"
-INSTALLER_PROFILE_PATH = BASE_DIR / "memory" / "installer_profile.json"
-BACKUP_DIR       = BASE_DIR / "memory" / "backups"
-ARCHIVE_PATH     = BASE_DIR / "memory" / "long_term_archive.json"
-CONVERSATION_DB_PATH = BASE_DIR / "memory" / "conversations.sqlite3"
+MEMORY_DIR       = persistent_directory("memory")
+MEMORY_PATH      = MEMORY_DIR / "long_term.json"
+INSTALLER_PROFILE_PATH = MEMORY_DIR / "installer_profile.json"
+BACKUP_DIR       = MEMORY_DIR / "backups"
+ARCHIVE_PATH     = MEMORY_DIR / "long_term_archive.json"
+CONVERSATION_DB_PATH = MEMORY_DIR / "conversations.sqlite3"
 MAX_BACKUPS      = 20
 _lock            = Lock()
 _conversation_lock = Lock()

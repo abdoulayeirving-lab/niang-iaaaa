@@ -11,19 +11,12 @@ translation exists (or when the configured language is French).
 """
 
 import json
-import sys
-from pathlib import Path
+from user_data_paths import persistent_directory
 
 
-def get_base_dir():
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent
-
-
-BASE_DIR = get_base_dir()
-MEMORY_PATH = BASE_DIR / "memory" / "long_term.json"
-INSTALLER_PROFILE_PATH = BASE_DIR / "memory" / "installer_profile.json"
+MEMORY_DIR = persistent_directory("memory")
+MEMORY_PATH = MEMORY_DIR / "long_term.json"
+INSTALLER_PROFILE_PATH = MEMORY_DIR / "installer_profile.json"
 
 # Codes accepted for each UI language. The installer saves the display
 # name ("Français", "Wolof", ...), while the LLM memory extractor saves

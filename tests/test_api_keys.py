@@ -97,6 +97,14 @@ class ApiKeysTest(unittest.TestCase):
 
         self.assertEqual(api_keys.get_all_keys(), ["AIzaInstaller"])
 
+    def test_secure_key_detection_returns_true_when_key_exists(self):
+        with mock.patch.object(api_keys, "_read_secure_keys", return_value=["key"]):
+            self.assertTrue(api_keys.has_secure_keys())
+
+    def test_secure_key_detection_is_false_when_file_is_missing(self):
+        with mock.patch.object(api_keys, "_read_secure_keys", return_value=[]):
+            self.assertFalse(api_keys.has_secure_keys())
+
     def test_installer_key_takes_priority_over_existing_config_key(self):
         self._write_config({"gemini_api_key": "existing-key"})
         api_keys.INSTALLER_KEY_PATH.write_text("new-key", encoding="utf-8")

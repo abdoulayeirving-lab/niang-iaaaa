@@ -1,5 +1,5 @@
 #define AppName "NIANG IA"
-#define AppVersion "1.0.46"
+#define AppVersion "1.0.47"
 #define SourceDir AddBackslash(SourcePath) + "dist\NIANG_IA_" + AppVersion
 
 [Setup]
@@ -14,6 +14,7 @@ VersionInfoProductName=NIANG IA
 VersionInfoProductVersion={#AppVersion}
 VersionInfoCompany=NIANG IA
 DefaultDirName={localappdata}\Programs\NIANG IA
+UsePreviousAppDir=yes
 DefaultGroupName=NIANG IA
 OutputDir=dist
 OutputBaseFilename=NIANG_IA_Setup_{#AppVersion}
@@ -300,19 +301,25 @@ end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
 var
-  AppDir: string;
+  AppDir, DataDir: string;
 begin
   Result := True;
   if CurPageID <> wpSelectDir then
     Exit;
 
   AppDir := AddBackslash(WizardDirValue);
+  DataDir := ExpandConstant('{localappdata}\NIANG IA\');
   ExistingProfile :=
     FileExists(AppDir + 'memory\long_term.json') or
-    FileExists(AppDir + 'memory\installer_profile.json');
+    FileExists(AppDir + 'memory\installer_profile.json') or
+    FileExists(DataDir + 'memory\long_term.json') or
+    FileExists(DataDir + 'memory\installer_profile.json');
   ExistingApiConfig :=
     FileExists(AppDir + 'config\installer_gemini_key.txt') or
-    FileExists(AppDir + 'config\api_keys.json');
+    FileExists(AppDir + 'config\api_keys.json') or
+    FileExists(DataDir + 'config\installer_gemini_key.txt') or
+    FileExists(DataDir + 'config\api_keys.json') or
+    FileExists(ExpandConstant('{localappdata}\NIANG IA\api_keys.dpapi'));
 end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
@@ -341,12 +348,13 @@ end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  Json, IdentityFields, ProfilePath, KeyPath: string;
+  Json, IdentityFields, ProfilePath, KeyPath, DataDir: string;
   HasIdentityField: Boolean;
 begin
   if CurStep <> ssPostInstall then
     Exit;
 
+  DataDir := ExpandConstant('{localappdata}\NIANG IA\');
   if not ExistingProfile then
   begin
     IdentityFields := '';
@@ -358,7 +366,7 @@ begin
 
     Json := '{' + Chr(13) + Chr(10) + '  "identity": {' + IdentityFields +
       Chr(13) + Chr(10) + '  }' + Chr(13) + Chr(10) + '}' + Chr(13) + Chr(10);
-    ProfilePath := ExpandConstant('{app}\memory\installer_profile.json');
+    ProfilePath := DataDir + 'memory\installer_profile.json';
     if not ForceDirectories(ExtractFileDir(ProfilePath)) then
       RaiseException('Impossible de créer le dossier du profil utilisateur.');
     if not SaveStringToFile(ProfilePath, Json, False) then
@@ -367,7 +375,7 @@ begin
 
   if (not ExistingApiConfig) and (Trim(GeminiKeyEdit.Text) <> '') then
   begin
-    KeyPath := ExpandConstant('{app}\config\installer_gemini_key.txt');
+    KeyPath := DataDir + 'config\installer_gemini_key.txt';
     if not ForceDirectories(ExtractFileDir(KeyPath)) then
       RaiseException('Impossible de créer le dossier de configuration.');
     if not SaveStringToFile(KeyPath, Trim(GeminiKeyEdit.Text), False) then
