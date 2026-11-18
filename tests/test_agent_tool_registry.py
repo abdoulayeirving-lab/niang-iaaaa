@@ -124,6 +124,33 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertIn("terminal_control", ALLOWED_TOOLS)
         self.assertIn("project_execution", ALLOWED_TOOLS)
 
+    def test_controlled_software_development_is_available_to_autonomous_planner(self):
+        registry = build_tool_registry(
+            [{
+                "name": "software_development",
+                "description": "Create or modify a software project through guarded OpenCode.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "goal": {"type": "STRING"},
+                        "mode": {"type": "STRING"},
+                    },
+                    "required": ["goal"],
+                },
+            }],
+            {"software_development": (lambda _args: "mission queued", 15)},
+        )
+
+        self.assertIn('"software_development"', registry.planner_catalog())
+        self.assertEqual(
+            registry.invoke(
+                "software_development",
+                {"goal": "Create a web project"},
+                ToolExecutionContext(agent_mode=True),
+            ),
+            "mission queued",
+        )
+
     def test_empty_handler_result_is_reported_as_unknown(self):
         registry = build_tool_registry(
             [{
