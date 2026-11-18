@@ -962,14 +962,12 @@ TOOL_DECLARATIONS = [
     {
         "name": "software_development",
         "description": (
-            "Starts an OpenCode-powered software-development mission for analyzing "
-            "architecture, changing source files, creating applications and websites "
-            "including landing pages, diagnosing "
-            "code errors, running approved checks, and reporting results. Opens the "
-            "selected workspace in Visual Studio Code so file changes are visible live. Use this "
-            "for all web/frontend project work instead of dev_agent, agent_task, or code_helper. "
-            "The mission is confined to NIANG_IA_WORKSPACE_ROOT, uses the local OpenCode "
-            "configuration and requires confirmation before modifying existing files."
+            "Creates or modifies software projects, applications, and websites inside "
+            "the selected NIANG IA workspace. Defaults to autonomous_controlled: new "
+            "workspace files can be created without per-file prompts; changes to "
+            "existing files and optional external actions still require confirmation. "
+            "Does not launch VS Code or a browser preview unless requested. Use this "
+            "for web/frontend work instead of dev_agent, agent_task, or code_helper."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -977,7 +975,7 @@ TOOL_DECLARATIONS = [
                 "goal": {"type": "STRING", "description": "Specific software task to perform"},
                 "mode": {
                     "type": "STRING",
-                    "description": "plan | assisted | autonomous_controlled (default: assisted)",
+                    "description": "plan | assisted | autonomous_controlled (default: autonomous_controlled)",
                 },
             },
             "required": ["goal"],
@@ -2825,7 +2823,7 @@ class KaizumiLive:
         def _software_development(args):
             from agent import workspace_tools
             from agent.task_queue import get_queue
-            mode = str(args.get("mode", "assisted")).strip().lower()
+            mode = str(args.get("mode", "autonomous_controlled")).strip().lower()
             if mode not in {"plan", "assisted", "autonomous_controlled"}:
                 return "Invalid OpenCode mode. Choose plan, assisted, or autonomous_controlled."
             root = workspace_tools._workspace_root()
@@ -2848,7 +2846,7 @@ class KaizumiLive:
                 args.get("description", ""),
                 args.get("project_name", ""),
                 web_handler=lambda goal: _software_development(
-                    {"goal": goal, "mode": "assisted"}
+                    {"goal": goal, "mode": "autonomous_controlled"}
                 ),
                 default_handler=lambda: dev_agent(
                     parameters=args, player=ui, speak=speak

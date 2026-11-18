@@ -53,7 +53,7 @@ class Task:
     cline_workspace_root: str = field(compare=False, default="")
     cline_mode: str = field(compare=False, default="assisted")
     opencode_workspace_root: str = field(compare=False, default="")
-    opencode_mode: str = field(compare=False, default="assisted")
+    opencode_mode: str = field(compare=False, default="autonomous_controlled")
     routing_provider: str = field(compare=False, default="")
     routing_model: str = field(compare=False, default="")
     routing_reason: str = field(compare=False, default="")
@@ -302,7 +302,7 @@ class TaskQueue:
                     cline_workspace_root=payload.get("cline_workspace_root", ""),
                     cline_mode=payload.get("cline_mode", "assisted"),
                     opencode_workspace_root=payload.get("opencode_workspace_root", ""),
-                    opencode_mode=payload.get("opencode_mode", "assisted"),
+                    opencode_mode=payload.get("opencode_mode", "autonomous_controlled"),
                     routing_provider=payload.get("routing_provider", ""),
                     routing_model=payload.get("routing_model", ""),
                     routing_reason=payload.get("routing_reason", ""),
@@ -396,7 +396,7 @@ class TaskQueue:
         cline_workspace_root: str = "",
         cline_mode: str = "assisted",
         opencode_workspace_root: str = "",
-        opencode_mode: str = "assisted",
+        opencode_mode: str = "autonomous_controlled",
         workspace_verification_required: bool = False,
         continuity_workspace_proof: Any = None,
         continuity_workspace_root: str = "",
@@ -812,8 +812,9 @@ class TaskQueue:
                             self._condition.notify()
                         self._active_count -= 1
                         return
-                from niang_ia.integrations.cline.cline_vscode import open_vscode_workspace
-                open_vscode_workspace(workspace_root)
+                if task.executor_kind == "cline":
+                    from niang_ia.integrations.cline.cline_vscode import open_vscode_workspace
+                    open_vscode_workspace(workspace_root)
                 if task.executor_kind == "opencode":
                     from niang_ia.integrations.opencode.opencode_engine import OpenCodeEngine
                     result = OpenCodeEngine().execute(

@@ -344,6 +344,37 @@ class OpenCodeIntegrationTests(unittest.TestCase):
             str(self.root),
         )
 
+    def test_controlled_mode_creates_new_workspace_files_without_a_dialog(self):
+        fake = _FakeACPProcess()
+
+        result = OpenCodeEngine(self._process(fake)).execute(
+            "Create new.py",
+            self.root,
+            "autonomous_controlled",
+            approval_callback=lambda *_: self.fail(
+                "Creating a new file in the selected workspace must not prompt."
+            ),
+        )
+
+        self.assertEqual(result["status"], "completed")
+        self.assertTrue(fake.approved)
+
+    def test_controlled_mode_still_confirms_edits_to_existing_files(self):
+        (self.root / "new.py").write_text("existing", encoding="utf-8")
+        fake = _FakeACPProcess()
+        approvals = []
+
+        result = OpenCodeEngine(self._process(fake)).execute(
+            "Update new.py",
+            self.root,
+            "autonomous_controlled",
+            approval_callback=lambda *args: approvals.append(args) or True,
+        )
+
+        self.assertEqual(result["status"], "completed")
+        self.assertTrue(fake.approved)
+        self.assertEqual(len(approvals), 1)
+
     def test_free_quota_uses_the_next_verified_free_model(self):
         first = _FakeACPProcess()
         first.quota_exhausted = True
@@ -1109,7 +1140,7 @@ class OpenCodeIntegrationTests(unittest.TestCase):
         queue_instance._active_count = 1
         with patch(
             "niang_ia.integrations.cline.cline_vscode.open_vscode_workspace"
-        ), patch(
+        ) as open_vscode, patch(
             "niang_ia.integrations.opencode.opencode_engine.OpenCodeEngine"
         ) as engine_type:
             engine_type.return_value.execute.return_value = {
@@ -1133,6 +1164,7 @@ class OpenCodeIntegrationTests(unittest.TestCase):
             queue_instance._run_task(task)
 
         engine_type.return_value.execute.assert_called_once()
+        open_vscode.assert_not_called()
         self.assertEqual(task.status, TaskStatus.COMPLETED)
         self.assertIn("Plan generated.", task.result)
         self.assertIn("Skills loaded: testing-debugging-mastery", task.result)

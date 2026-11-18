@@ -450,6 +450,10 @@ def classify(name: str, args: dict | None) -> Risk:
     action = str(args.get("action", "")).lower().strip()
     if _contains_sensitive_file_path(name, args):
         return Risk.HIGH
+    if name == "software_development":
+        mode = str(args.get("mode", "autonomous_controlled")).strip().lower()
+        if mode == "autonomous_controlled":
+            return Risk.MEDIUM
     if name == "screen_process":
         if str(args.get("angle", "screen")).lower().strip() == "local_vision":
             return Risk.LOW
@@ -527,7 +531,7 @@ def classify(name: str, args: dict | None) -> Risk:
     if name == "dev_agent":
         from agent.task_routing import is_web_frontend_request
         if is_web_frontend_request(str(args.get("description", ""))):
-            return Risk.HIGH
+            return Risk.MEDIUM
     overrides = _ACTION_RISK.get(name)
     if overrides is not None:
         risk = overrides.get(action, overrides.get(None))
@@ -574,17 +578,19 @@ def describe(name: str, args: dict | None) -> str:
     action = str(args.get("action", "")).lower().strip()
 
     if name == "software_development":
-        mode = str(args.get("mode", "assisted")).strip().lower()
+        mode = str(args.get("mode", "autonomous_controlled")).strip().lower()
         return (
-            f"start the requested OpenCode software mission in {mode} mode "
-            "inside the authorized project workspace"
+            f"start the bounded OpenCode mission in {mode} mode inside the "
+            "authorized project workspace; existing-file edits and optional "
+            "external actions retain their approval checks"
         )
     if name == "dev_agent":
         from agent.task_routing import is_web_frontend_request
         if is_web_frontend_request(str(args.get("description", ""))):
             return (
-                "start the requested OpenCode website mission in the authorized "
-                "project workspace; confirm before creating or modifying website files"
+                "start the bounded OpenCode website mission in the authorized "
+                "project workspace; existing-file edits and external actions retain "
+                "their approval checks"
             )
 
     if name == "terminal_control":

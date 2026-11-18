@@ -55,17 +55,30 @@ class ProjectTaskRoutingTests(unittest.TestCase):
         self.assertEqual(result, "Python project")
         self.assertEqual(web_calls, [])
 
-    def test_web_requests_sent_to_the_python_builder_require_confirmation(self):
+    def test_web_requests_routed_to_controlled_opencode_need_no_second_confirmation(self):
         args = {"description": "Crée une landing page pour mon studio"}
 
-        self.assertEqual(classify("dev_agent", args), Risk.HIGH)
-        self.assertTrue(needs_confirmation("dev_agent", args))
-        self.assertIn("OpenCode website mission", describe("dev_agent", args))
+        self.assertEqual(classify("dev_agent", args), Risk.MEDIUM)
+        self.assertFalse(needs_confirmation("dev_agent", args))
+        self.assertIn("bounded OpenCode website mission", describe("dev_agent", args))
 
         self.assertEqual(
             classify("dev_agent", {"description": "Create a Python utility"}),
             Risk.MEDIUM,
         )
+
+    def test_controlled_software_creation_skips_start_confirmation_but_assisted_does_not(self):
+        goal = "Create a landing page"
+
+        self.assertEqual(
+            classify("software_development", {"goal": goal}),
+            Risk.MEDIUM,
+        )
+        self.assertFalse(needs_confirmation("software_development", {"goal": goal}))
+        self.assertTrue(needs_confirmation(
+            "software_development",
+            {"goal": goal, "mode": "assisted"},
+        ))
 
     def test_opencode_prompt_requires_real_frontend_files_for_web_requests(self):
         prompt = _skill_prompt("Crée une landing page", ())
@@ -74,6 +87,9 @@ class ProjectTaskRoutingTests(unittest.TestCase):
         self.assertIn("index.html", prompt)
         self.assertIn("styles.css", prompt)
         self.assertIn("app.js", prompt)
+        self.assertIn("make sensible defaults", prompt)
+        self.assertIn("Do not launch another application", prompt)
+        self.assertIn("unless the user explicitly asks", prompt)
 
         python_prompt = _skill_prompt("Create a Python utility", ())
         self.assertNotIn("WEB PROJECT DELIVERABLE", python_prompt)

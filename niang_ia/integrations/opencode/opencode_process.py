@@ -800,7 +800,16 @@ def _managed_config(
 
 
 def _skill_prompt(goal: str, selected_skill_ids: Sequence[str]) -> str:
-    sections = [goal]
+    sections = [
+        goal,
+        "EXECUTION POLICY: Work directly in the selected workspace and create the "
+        "requested files before reporting completion. For ordinary design choices, "
+        "make sensible defaults and proceed without asking follow-up questions. "
+        "Do not launch another application, open a browser, start a preview, install "
+        "dependencies, or contact an external service unless the user explicitly "
+        "requests it. Never bypass NIANG IA permission decisions: edits to existing "
+        "files and external or executable actions still require their normal approval.",
+    ]
     if is_web_frontend_request(goal):
         sections.append(
             "WEB PROJECT DELIVERABLE: Build the actual browser-facing website, "
@@ -811,7 +820,9 @@ def _skill_prompt(goal: str, selected_skill_ids: Sequence[str]) -> str:
             "landing page. Deliver a polished, responsive page with semantic "
             "sections, working navigation and interactions, accessible controls, "
             "and reduced-motion support. Verify the page files and report their "
-            "paths; never claim a website is complete if only a Python file was made."
+            "paths; never claim a website is complete if only a Python file was made. "
+            "Do not install packages or start a browser preview for a static site "
+            "unless the user explicitly asks."
         )
     if selected_skill_ids:
         available = ", ".join(selected_skill_ids)
@@ -823,8 +834,11 @@ def _skill_prompt(goal: str, selected_skill_ids: Sequence[str]) -> str:
     if "visual-asset-intelligence" in selected_skill_ids:
         sections.append(
             "For visual tasks, inspect existing local assets first. Use the NIANG "
-            "visual asset tools for provider searches and project writes; those "
-            "actions require user approval. Never invent image paths. Record "
+            "visual asset tools only when real external imagery is explicitly "
+            "requested or essential to the stated task; provider searches and "
+            "asset downloads require user approval. Otherwise create original "
+            "CSS/SVG illustrations and identify them as illustrations. Never "
+            "invent image paths. Record "
             "provenance and attribution, then run visual asset verification. "
             "Do not claim a visual review unless one was actually performed."
         )

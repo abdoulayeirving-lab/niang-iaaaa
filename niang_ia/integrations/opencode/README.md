@@ -42,11 +42,13 @@ when this runtime package is missing.
   configuration. The mission is rejected if plan mode is unavailable or the
   agent tries to leave it.
 - **Assisted** requests NIANG IA confirmation for each in-workspace file edit.
-- **Autonomous controlled** may approve edits only for new files in the selected
-  workspace. Existing-file edits still require confirmation.
+- **Autonomous controlled** is the default for a software-creation request. It
+  may approve edits only for new files in the selected workspace. Existing-file
+  edits and optional external actions still require confirmation.
 
 The managed OpenCode configuration denies shell execution, external directories,
-subagents, and web access; it allows project reads and asks before edits.
+subagents, and web access; it allows project reads and sends edits through the
+NIANG IA permission gate.
 Credential and environment files are denied. Workspace-local OpenCode plugin
 directories and `plugins`/`mcp` config entries are rejected because they can
 launch host code outside NIANG IA's action gate. Global OpenCode user settings
@@ -83,7 +85,9 @@ stored. No provider request is made when a key is absent.
 No general shell, arbitrary command, delete, deployment, or system-control
 tool is exposed. Plan mode denies all MCP tools. ACP messages are
 newline-delimited JSON; the mission is capped at 80 reported tool actions and
-30 minutes.
+30 minutes. OpenCode runs through ACP without launching VS Code or a browser
+preview unless the user explicitly requests one; Cline continues to open its
+required VS Code workspace.
 
 ## Skills and quality gate
 

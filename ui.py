@@ -961,7 +961,7 @@ class KaizumiUI:
         ).pack(fill="x", padx=14, pady=(14, 4))
         tk.Label(
             window,
-            text="VS Code s’ouvre sur le projet ; les fichiers et actions apparaissent au fil de la mission.",
+            text="OpenCode travaille dans le workspace choisi ; les fichiers et actions apparaissent au fil de la mission.",
             anchor="w",
             bg=self.col["bg"],
             fg=self.col["dim"],
@@ -1014,7 +1014,7 @@ class KaizumiUI:
             fg=self.col["pri"],
             font=("Consolas", 9, "bold"),
         ).pack(side="left", padx=(0, 8))
-        self._cline_mode_var = tk.StringVar(value="assisted")
+        self._cline_mode_var = tk.StringVar(value="autonomous_controlled")
         tk.OptionMenu(
             mode_row,
             self._cline_mode_var,
